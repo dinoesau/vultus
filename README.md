@@ -4,6 +4,8 @@ Vultus normaliza 2 caras a un espacio UV canónico y permite comparación pixel 
 El sistema es stateless por diseño.
 No persistimos imágenes ni resultados tras la entrega.
 
+> **Infra elegida: Cloudflare + Modal.** Edge en Cloudflare (Pages + Workers + Queues + R2) y GPU serverless en Modal. Coste fijo ~$5/mes + GPU por segundo ($30/mes free en Modal).
+
 ## Quick Start
 
 ### Requisitos
@@ -24,7 +26,7 @@ uv run fastapi dev app/main.py
 El API queda en `http://localhost:8000`.
 Docs en `http://localhost:8000/docs`.
 
-### Full stack con Docker
+### Full stack con Docker (dev local)
 
 ```bash
 docker compose up --build
@@ -32,6 +34,7 @@ docker compose up --build
 
 Servicios: `api` en 8000, `frontend` Astro en 4321, `redis` en 6379.
 Para workers GPU usa `docker compose --profile gpu up`.
+En local se usa `Redis + ARQ` con `fakeredis` en tests. En producción se usa `Cloudflare Queues + R2 + Modal` vía el mismo contrato `core.queue`.
 
 ### Frontend Astro
 
@@ -42,6 +45,18 @@ npm run dev
 ```
 
 Frontend en `http://localhost:4321`.
+En producción el frontend se despliega en `Cloudflare Pages` (static).
+
+### Infra Cloudflare + Modal (prod)
+
+```bash
+# Edge: Cloudflare
+npx wrangler deploy          # Workers API + Queues + R2 (ver docs/infra-cloudflare.md)
+# GPU: Modal
+modal deploy backend/modal_app.py  # Workers GPU FreeUV/FLAME con $30/mes free
+```
+
+Ver `ROADMAP.md` sección 7 y `ARCHITECTURE.md` ADR-004 para el diseño híbrido.
 
 ## Estructura
 
@@ -53,23 +68,28 @@ facium/
 ├── PIPELINE.md
 ├── ARCHITECTURE.md
 ├── DEVELOPMENT.md
-├── docker-compose.yml
+├── wrangler.toml              # Cloudflare Workers + Queues + R2 (prod)
 ├── backend/
 │   ├── pyproject.toml
+│   ├── modal_app.py           # Modal GPU workers (prod)
 │   ├── app/
+│   │   ├── api/
+│   │   ├── core/queue.py      # Adapter Redis ARQ (local) / Cloudflare Queues (prod)
+│   │   └── workers/
 │   └── tests/
 └── frontend/
-    ├── astro.config.mjs
+    ├── astro.config.mjs       # -> Cloudflare Pages en prod
     └── src/
 ```
 
 ## Flujo
 
-Usuario sube 2 jpgs en Astro.
-FastAPI valida y encola en Redis ARQ.
-Workers `MediaPipe -> FLAME -> FreeUV -> GNM Bake` procesan en paralelo por cara.
-Resultado vuelve a Redis con TTL 60s y se entrega como zip vía `StreamingResponse`.
-Tras 60s todo se borra de Redis y `/tmp`.
+Usuario sube 2 jpgs en Astro (Cloudflare Pages).
+Worker Cloudflare valida y sube a R2, encola puntero en Cloudflare Queues.
+Workers GPU en Modal (`MediaPipe -> FLAME -> FreeUV -> GNM Bake`) consumen vía HTTP Pull Consumer en paralelo por cara.
+Resultado vuelve a R2 con TTL 60s (lifecycle) y se entrega como zip vía `StreamingResponse` desde el Worker.
+Tras 60s todo se borra de R2 + Queues y `/tmp` del contenedor Modal.
+En dev local el flujo es idéntico pero con `Redis ARQ` en vez de `Queues + R2` (adapter).
 
 ## Documentación
 
@@ -88,10 +108,11 @@ Ver `ARCHITECTURE.md` para contratos completos.
 
 ## Stateless
 
-No hay Postgres ni S3.
-Todo vive en Redis 60s y `/tmp` en tmpfs.
+No hay Postgres ni S3 persistente.
+En prod: todo vive en `R2` 60s (lifecycle) + `Cloudflare Queues` 24h retención + `/tmp` tmpfs en Modal.
+En dev: `Redis 60s` + `tmpfs` para paridad local.
 Logs no contienen bytes de imagen.
-Ver `PIPELINE.md` sección 5.8 para verificación.
+Ver `PIPELINE.md` sección 5.8 y `ARCHITECTURE.md` ADR-004 para verificación.
 
 ## Testing
 

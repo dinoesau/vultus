@@ -37,16 +37,16 @@ Visualiza diferencias de textura.
 Convierte UV de topología BFM a UV de GNM sin reentrenar.
 
 - **stateless**: propiedad de no persistir nada tras entrega.
-Redis expira a 60s y `/tmp` se limpia.
+Local: Redis expira a 60s y `/tmp` se limpia. Prod: R2 `lifecycle 60s` + Queues 24h retención (TTL lógico 60s) y `/tmp` tmpfs en Modal.
 
 - **report**: PDF con imágenes originales, UVs, heatmap y tabla de distancias antropométricas.
 Incluye disclaimer de no identificación automática.
 
 ## Verbos
 
-- **enqueue**: poner un job en Redis ARQ.
+- **enqueue**: poner un job en la queue (Redis ARQ local / Cloudflare Queues + R2 prod via `core.queue` adapter).
 
-- **consume**: worker toma un job de la queue.
+- **consume**: worker toma un job de la queue (ARQ `consume` local / HTTP Pull Consumer desde Modal en prod).
 
 - **unwrap**: proyectar textura de mesh a UV.
 
@@ -63,11 +63,11 @@ Usada como normalizador para otras distancias.
 
 ## Boundaries
 
-- **Seam 1 API**: `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events`.
+- **Seam 1 API**: `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events` (FastAPI local / Cloudflare Workers + Durable Objects prod).
 
-- **Seam 2 Queue**: contrato `enqueue` y `consume` en Redis ARQ.
+- **Seam 2 Queue**: contrato `enqueue` y `consume` agnóstico a infra vía `core.queue` adapter. Local: `Redis ARQ`. Prod: `Cloudflare Queues + R2` (patrón `R2 pointer` por límite 128KB) + `HTTP Pull Consumer` en Modal.
 
-- **Seam 3 Worker**: contrato `image bytes -> {uv bytes, mesh bytes, landmarks}`.
+- **Seam 3 Worker**: contrato `image bytes -> {uv bytes, mesh bytes, landmarks}` (local Docker o Modal GPU containers).
 
 Fuera de seams: `fit_flame`, `bake`, `project_uv`.
 No se testean directo.

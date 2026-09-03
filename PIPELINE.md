@@ -4,26 +4,29 @@
 
 Este documento describe el flujo end-to-end desde que el usuario sube 2 caras hasta que descarga el resultado.
 El pipeline es asíncrono, stateless y sin persistencia.
-Cada etapa es un worker independiente que consume de Redis ARQ.
+En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` vía `HTTP Pull Consumer`; en dev local consume de `Redis ARQ` vía el mismo contrato `core.queue`.
 
 ## 2. Diagrama de pipeline
 
+> Infra prod: Cloudflare Pages + Workers + Queues + R2 + Durable Objects + Modal. Dev local: Redis ARQ equivalente vía adapter.
+
 ```mermaid
 graph TD
-    A[Cliente Astro - Upload 2 jpgs] --> B[FastAPI POST /v1/compare]
-    B --> C{Validacion}
-    C -->|ok| D[Enqueue job_id + images bytes a Redis]
+    A[Cliente Astro - Cloudflare Pages Upload 2 jpgs] --> B[Cloudflare Worker POST /v1/compare]
+    B --> C{Validacion + R2 PutObject}
+    C -->|ok| D[Enqueue {job_id, r2_keys} a Cloudflare Queues]
     C -->|fail| E[400 Bad Request]
-    D --> F[Worker 1 - MediaPipe 478 landmarks CPU]
-    F --> G[Worker 2 - FLAME Fitting GPU]
-    G --> H[Worker 3 - FreeUV UV completo GPU]
-    H --> I[Worker 4 - GNM Bake + Heatmap + Report]
-    I --> J[Result bytes en Redis TTL 60s]
-    J --> K[FastAPI StreamingResponse zip]
+    D --> F[Modal Worker 1 - MediaPipe 478 landmarks CPU]
+    F --> G[Modal Worker 2 - FLAME Fitting GPU]
+    G --> H[Modal Worker 3 - FreeUV UV completo GPU]
+    H --> I[Modal Worker 4 - GNM Bake + Heatmap + Report]
+    I --> J[Result bytes en R2 TTL 60s lifecycle]
+    J --> K[Cloudflare Worker StreamingResponse zip]
     K --> L[Cliente descarga - UV_A UV_B heatmap mesh PDF]
-    J -. EXPIRE 60s .-> M[Olvido total - tmpfs wipe + Redis DEL]
-    D -. progress .-> N[WS /v1/jobs/id/events]
+    J -. lifecycle 60s .-> M[Olvido total - tmpfs wipe + R2 DEL + Queue 24h]
+    D -. progress .-> N[Durable Objects WS /v1/jobs/id/events]
     N --> A
+    D -. local dev .-> D2[Redis ARQ fallback]
 ```
 
 ## 3. Secuencia de modelos
@@ -100,36 +103,41 @@ Paralelización:
 
 ```mermaid
 sequenceDiagram
-    participant FE as Astro Frontend
-    participant API as FastAPI
-    participant Q as Redis ARQ
+    participant FE as Astro Frontend (Pages)
+    participant CF as Cloudflare Worker API
+    participant R2 as R2 Bucket
+    participant Q as Cloudflare Queues
+    participant MO as Modal Workers
     participant W1 as Worker MediaPipe
     participant W2 as Worker FLAME
     participant W3 as Worker FreeUV
     participant W4 as Worker GNM/Report
+    participant DO as Durable Objects WS
 
-    FE->>API: POST /v1/compare multipart 2 images
-    API->>API: Validar tipo, tamaño, una cara por imagen
-    API->>Q: enqueue compare_job job_id=uuid images=bytes
-    API-->>FE: 202 Accepted {job_id, status: queued}
-    FE->>API: WS /v1/jobs/{id}/events subscribe
-    Q->>W1: consume job_id
-    W1->>Q: progress 0.15 landmarks done
+    FE->>CF: POST /v1/compare multipart 2 images
+    CF->>CF: Validar tipo, tamaño, una cara por imagen
+    CF->>R2: PutObject r2_keys (images, local: Redis bytes)
+    CF->>Q: enqueue compare_job job_id=uuid r2_keys (local: Redis ARQ)
+    CF-->>FE: 202 Accepted {job_id, status: queued}
+    FE->>DO: WS /v1/jobs/{id}/events subscribe
+    Q->>MO: HTTP Pull Consumer job_id
+    MO->>W1: consume job_id + R2 GetObject
+    W1->>DO: progress 0.15 landmarks done
     W1->>W2: landmarks + images
-    W2->>Q: progress 0.40 FLAME mesh done
+    W2->>DO: progress 0.40 FLAME mesh done
     W2->>W3: FLAME mesh + flaw-uv
-    W3->>Q: progress 0.75 UV complete done
+    W3->>DO: progress 0.75 UV complete done
     W3->>W4: UV_A UV_B
-    W4->>Q: progress 0.95 heatmap + bake done
-    W4->>Q: return {uv_a, uv_b, heatmap, mesh_gnm, report.pdf} keep_result=60
-    Q->>API: result ready
-    API->>Q: progress 1.0 done
-    Q-->>FE: WS event done
-    FE->>API: GET /v1/jobs/{id}/result
-    API->>Q: fetch result bytes
-    API-->>FE: 200 StreamingResponse zip
-    Q->>Q: EXPIRE 60s DEL
-    W1->>W1: unlink /tmp/job_id/*
+    W4->>DO: progress 0.95 heatmap + bake done
+    W4->>R2: PutObject result.zip keep 60s (local: Redis keep_result=60)
+    R2->>CF: result ready
+    CF->>DO: progress 1.0 done
+    DO-->>FE: WS event done
+    FE->>CF: GET /v1/jobs/{id}/result
+    CF->>R2: fetch result bytes (local: Redis)
+    CF-->>FE: 200 StreamingResponse zip
+    R2->>R2: lifecycle 60s DEL (local: EXPIRE 60s)
+    W1->>W1: unlink /tmp/job_id/* (Modal tmpfs)
 ```
 
 ## 5. Etapas
@@ -142,13 +150,14 @@ El API valida magic bytes, dimensiones mínimas 256x256 y que MediaPipe detecte 
 Si falla, retorna `400` con `detail` sin encolar.
 Si pasa, genera `job_id` uuid v4, encola en ARQ con `images` como bytes y retorna `202`.
 
-### 5.2 Queue - Redis ARQ
+### 5.2 Queue - Cloudflare Queues + R2 (prod) / Redis ARQ (local)
 
-ARQ serializa el job como `compare_job(job_id, image_a_bytes, image_b_bytes)`.
-TTL de queue 60s y `keep_result=60`.
-El API publica progreso vía `WS` leyendo `job.status` de Redis.
-No hay Postgres.
-No hay MinIO.
+El contrato es `enqueue(job_id, image_a, image_b)` agnóstico a la infra vía `core.queue` adapter.
+
+- **Prod (Cloudflare):** El Worker hace `R2 PutObject` con `image_a/b` y serializa solo `compare_job(job_id, r2_keys)` a `Cloudflare Queues` (límite 128KB/mensaje, no caben 2x8MB). `Cloudflare Queues` cobra `10k ops/día free` (write/read/delete = 3 ops por job -> ~3.333 jobs/día free), retención `24h` en free pero `TTL lógico 60s` vía `Durable Object alarm` + `R2 lifecycle 60s`. Modal consume vía `HTTP Pull Consumer`. El progreso va por `Durable Objects WS`.
+- **Local/dev:** `ARQ` serializa directo `compare_job(job_id, image_a_bytes, image_b_bytes)` a `Redis`. TTL `keep_result=60` y `EXPIRE 60s`. Progreso vía `job.progress`.
+
+No hay Postgres ni MinIO persistente. En prod el egress de R2 es free.
 
 ### 5.3 Worker 1 - MediaPipe 478 landmarks
 
@@ -186,24 +195,24 @@ Todo se escribe a `/tmp/{job_id}/` y se retorna como dict de bytes.
 
 ### 5.7 Entrega - GET /v1/jobs/{id}/result
 
-El frontend pide el resultado tras recibir `WS done`.
-El API hace `await queue.result(job_id)` y arma un `StreamingResponse` con `Content-Type: application/zip` y `Content-Disposition: attachment`.
+El frontend pide el resultado tras recibir `WS done` (Durable Objects en prod).
+En prod el Worker hace `R2 GetObject(job_id/result.zip)` y en local el API hace `await queue.result(job_id)` (Redis), y arma un `StreamingResponse` con `Content-Type: application/zip` y `Content-Disposition: attachment`.
 El zip contiene `uv_a.png, uv_b.png, heatmap.png, mesh_gnm.glb, report.pdf` en memoria, sin escribir a disco.
-Tras el stream, el API hace `DEL job_id` si aún existe.
+Tras el stream, en prod `R2 lifecycle 60s` borra solo y en local el API hace `DEL job_id` si aún existe.
 El frontend crea `URL.createObjectURL` para descarga y ofrece re-descarga local desde memoria sin volver al servidor.
 
 ### 5.8 Limpieza stateless
 
-Cada worker hace `unlink` de `/tmp/{job_id}/*` al terminar, éxito o fallo.
-Redis hace `EXPIRE 60` automático.
+Cada worker (local Docker o Modal container) hace `unlink` de `/tmp/{job_id}/*` al terminar, éxito o fallo.
+Local: `Redis EXPIRE 60` automático. Prod: `R2 lifecycle 60s` + `Queue retención 24h` pero `TTL lógico 60s` vía `Durable Object alarm`.
 Logs no contienen bytes de imagen, solo `job_id` y `duration_ms`.
-Verificación TDD: `test_compare_does_not_persist_after_delivery` comprueba `redis.exists == 0` y `tmpfs` vacío tras 65s.
+Verificación TDD: `test_compare_does_not_persist_after_delivery` comprueba `redis.exists == 0` (local) / `R2 exists == 0` (prod adapter) y `tmpfs` vacío tras 65s.
 
 ## 6. Contratos de datos
 
-Job enqueue: `{job_id: uuid, image_a: bytes, image_b: bytes}`.
-Worker return: `{uv_a: bytes png, uv_b: bytes png, heatmap: bytes png, mesh: bytes glb, report: bytes pdf}`.
-Progress events WS: `{job_id, progress: 0.0-1.0, stage: landmarks|flame|freeuv|bake}`.
+Job enqueue: `{job_id: uuid, image_a: bytes, image_b: bytes}` en local; `{job_id, r2_keys}` en prod (adapter traduce). Límite Queues 128KB obliga a `R2 pointer` en prod.
+Worker return: `{uv_a: bytes png, uv_b: bytes png, heatmap: bytes png, mesh: bytes glb, report: bytes pdf}` (a Redis local o R2 prod).
+Progress events WS: `{job_id, progress: 0.0-1.0, stage: landmarks|flame|freeuv|bake}` vía `Redis` local o `Durable Objects` prod.
 Error: `{job_id, status: failed, error: no_face_detected|invalid_image|gpu_oom}`.
 
 ## 7. Manejo de errores
@@ -216,13 +225,13 @@ Cliente cierra pestaña: Redis expira solo, sin leak.
 
 ## 8. Observabilidad
 
-Métricas por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms`.
-Logs estructurados con `job_id` sin datos biométricos.
-Health: `GET /health` verifica `redis ping` y `gpu available`.
+Métricas por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms` (local) / `Cloudflare Queues lag + Modal GPU util` (prod).
+Logs estructurados con `job_id` sin datos biométricos (Workers Logs 3 días free, Modal logs).
+Health: `GET /health` verifica `queue ping` (Redis `PING` local / Queues health prod) y `gpu available` (local `nvidia-smi` / Modal `torch.cuda.is_available`). En prod `Cloudflare Analytics` + `OpenTelemetry` + `Sentry` si se configura.
 
 ## 9. Escalado
 
-Workers CPU y GPU escalan independiente.
-Queue ARQ permite `concurrency` por worker.
-Sin storage, no hay cuello de botella de I/O.
-Cache opcional efímera `hash(image) -> UV` con TTL 60s si se quiere evitar recomputar misma cara en ventana corta, desactivada por defecto por stateless estricto.
+Local: Workers CPU y GPU escalan independiente vía `docker compose --scale`, `ARQ` `concurrency` por worker.
+Prod: `Cloudflare Workers` escala a 0 automático, `Modal` escala GPU `0 -> 100` (`Starter 10 GPU concurrency free`, `Team 50`), `1-2s` cold start, R2/Queues sin gestión. `FreeUV concurrency=1` por GPU para no OOM sigue vigente en Modal.
+Sin storage persistente, no hay cuello de botella de I/O.
+Cache opcional efímera `hash(image) -> UV` en R2 con TTL 60s si se quiere evitar recomputar misma cara en ventana corta, desactivada por defecto por stateless estricto.

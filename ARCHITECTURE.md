@@ -9,9 +9,10 @@ Usa vocabulario de `codebase-design` para seams y profundidad.
 ## 2. Principios
 
 Stateless por defecto.
-No hay persistencia más allá de 60s en Redis.
+No hay persistencia más allá de 60s (local: Redis `EXPIRE 60`; prod: R2 `lifecycle 60s` + Queues `retención 24h` pero `TTL lógico 60s`).
 Async por queue, no por threads en API.
 Deep modules con interfaces estrechas y lógica profunda dentro.
+Infra: `Cloudflare Pages + Workers + Queues + R2 + Durable Objects` para edge + `Modal` para GPU (ver ADR-004).
 
 ## 3. Seams
 
@@ -27,9 +28,11 @@ Contrato OpenAPI en `backend/app/api`.
 ### Seam 2 - Queue Contract
 
 `enqueue(job_id, image_a, image_b)` y `consume -> progress`.
-Implementación `Redis + ARQ`.
-Testeable con `fakeredis` o Redis de test en Docker.
-No se testea Redis interno.
+Contrato abstracto; implementación dual vía adapter `core.queue`:
+- **Local/dev/test:** `Redis + ARQ` (con `fakeredis` en tests).
+- **Prod:** `Cloudflare Queues + R2` (Queues limita a 128KB/mensaje, se encola solo `{job_id, r2_keys}` y los bytes viven en R2; consumo vía `HTTP Pull Consumer` desde Modal).
+Testeable con `fakeredis` o Redis de test en Docker sin tocar Cloudflare.
+No se testea Redis ni Queues interno.
 
 ### Seam 3 - Worker Contract
 
@@ -45,18 +48,27 @@ Se cubren indirectamente vía Seam 3.
 
 ```mermaid
 graph TD
-    API[api - FastAPI<br/>shallow, valida y encola]
-    CORE[core - queue + tmpfs<br/>deep, gestiona ciclo de vida]
+    FE[frontend - Astro islands<br/>shallow, orquesta UI<br/>Cloudflare Pages prod]
+    API[api - FastAPI / Cloudflare Worker<br/>shallow, valida y encola]
+    CORE[core - queue + tmpfs<br/>deep, gestiona ciclo de vida<br/>adapter Redis ARQ / Queues+R2]
+    CFQ[Cloudflare Queues + R2<br/>prod edge]
+    REDIS[Redis ARQ<br/>local dev]
+    MO[Modal GPU containers<br/>prod workers]
     W1[workers/mediapipe<br/>deep, 478 landmarks]
     W2[workers/flame<br/>deep, fitting 3D]
     W3[workers/freeuv<br/>deep, SD1.5 inpainting]
     W4[workers/gnm<br/>deep, bake + report]
     MODELS[models - wrappers<br/>adaptadores a libs externas]
-    FE[frontend - Astro islands<br/>shallow, orquesta UI]
+    DO[Durable Objects WS<br/>progress]
 
     FE --> API
     API --> CORE
-    CORE --> W1 & W2 & W3 & W4
+    CORE --> CFQ
+    CORE --> REDIS
+    CORE --> DO
+    CFQ --> MO
+    REDIS --> W1 & W2 & W3 & W4
+    MO --> W1 & W2 & W3 & W4
     W1 & W2 & W3 & W4 --> MODELS
 ```
 
@@ -71,9 +83,10 @@ No contiene lógica de visión.
 ### 4.2 core
 
 Módulo deep.
-Gestiona `ARQ` pool, `TTL 60`, `tmpfs` lifecycle y `progress` events.
-Esconde detalles de Redis al resto.
-Provee `core.queue.enqueue` y `core.queue.result`.
+Gestiona pool de queue, `TTL 60`, `tmpfs` lifecycle y `progress` events.
+Esconde detalles de `Redis ARQ` (local) y `Cloudflare Queues + R2 + Durable Objects` (prod) tras el mismo adapter.
+Patrón `R2 pointer`: en prod sube bytes a `R2` y encola solo `r2_keys` (Queues <128KB).
+Provee `core.queue.enqueue` y `core.queue.result` agnósticos a la infra.
 
 ### 4.3 workers
 
@@ -90,9 +103,9 @@ Son los únicos lugares donde se importan `mediapipe`, `torch`, `diffusers`.
 
 ### 4.5 frontend
 
-Astro 4 con React islands.
+Astro 4 con React islands desplegado en `Cloudflare Pages` en prod (static, free, global CDN).
 Islas: `UploadDrop`, `ProgressBar`, `UVViewer`, `HeatmapViewer`, `ThreeViewer`.
-Comunicación solo vía Seam 1.
+Comunicación solo vía Seam 1 (en prod `Pages -> Workers` via `wrangler.toml` routing).
 
 ## 5. Dependencias
 
@@ -128,26 +141,49 @@ Usar FLAME para extraer `flaw-uv` y GNM solo para render vía bake evita reentre
 ### ADR-003 Stateless sin Postgres ni S3
 
 Elimina coste de storage y simplifica GDPR.
-Redis con `EXPIRE 60` y tmpfs es suficiente para entregar zip en memoria.
+Local: Redis con `EXPIRE 60` y tmpfs es suficiente para entregar zip en memoria.
+Prod: R2 con `lifecycle 60s` + Queues `retención 24h` pero TTL lógico 60s vía Durable Object alarm.
 Se pierde cache y re-descarga desde servidor, pero se gana privacidad y simplicidad.
+
+### ADR-004 Cloudflare + Modal como infra elegida
+
+**Decisión:** Edge en `Cloudflare Pages + Workers + Queues + R2 + Durable Objects + Turnstile/WAF` y GPU en `Modal` via `HTTP Pull Consumer`.
+
+**Contexto:** Roadmap barajaba `Vercel + Fly.io + Upstash Redis` ($25-60/mes fijos + GPU) y `GCP`. Se buscaba capa gratuita real con `scale-to-zero` y `egress free`, manteniendo fidelidad forense (FreeUV 12GB VRAM).
+
+**Alternativas descartadas:**
+- `Vercel + Fly + Upstash`: $25-60 fijos, egress con coste, Redis gestionado extra.
+- `HF Spaces`: requiere PRO $9/mes para Docker, sleep 48h, cold start 30-60s, no apto para TTL 60s.
+- `100% Cloudflare Workers AI`: `flux-1-schnell` no es FreeUV entrenado en BFM UV, 10k neurons/día ~25 compares, pérdida de fidelidad forense.
+- `GCP Cloud Run GPU`: 80-200 usd/mes, sin free tier GPU.
+
+**Consecuencias:**
+- Coste fijo prod: `Cloudflare Workers Paid $5/mes` + `Modal $30/mes free` (~9.300 compares gratis), luego `$0.0032/compare` T4. Queues (`10k ops/día free`), R2 (`10GB free`), Pages free.
+- Queue debe usar patrón `R2 pointer` por límite `128KB` de Queues; `core.queue` abstrae `Redis ARQ` local vs `Queues+R2` prod.
+- Workers GPU despliegan con `modal deploy` y consumen Queues vía `HTTP Pull Consumer` (no binding Worker).
+- `wrangler.toml` versiona edge, `modal_app.py` versiona GPU. Paridad local intacta con `docker compose` + Redis.
 
 ## 7. Data Flow
 
-Imagen entra como `bytes` y nunca toca disco persistente.
-Cada worker lee de `/tmp` tmpfs y escribe siguiente artefacto a `/tmp`.
-El bundle final viaja `worker -> Redis bytes -> API -> StreamingResponse`.
-Ningún artefacto se guarda en S3.
+Imagen entra como `bytes` y nunca toca disco persistente más allá de `tmpfs`/`R2 60s`.
+Prod: `Browser -> R2 PutObject (via Worker presigned) -> Queues {job_id, r2_keys} -> Modal workers leen R2 -> /tmp tmpfs -> R2 result.zip -> Worker StreamingResponse`.
+Local: `Browser -> FastAPI -> Redis ARQ bytes -> workers -> /tmp -> Redis bytes -> StreamingResponse`.
+El bundle final viaja `worker -> R2/Rredis bytes -> API/Worker -> StreamingResponse`.
+Ningún artefacto se guarda en S3/Postgres persistente. `R2 lifecycle 60s` garantiza olvido.
 
 ## 8. Escalado
 
-`worker-cpu` y `worker-gpu` escalan independiente vía `docker compose --scale`.
+Local: `worker-cpu` y `worker-gpu` escalan independiente vía `docker compose --scale`.
+Prod: `Cloudflare Workers` autoescala edge a 0, `Modal` autoescala GPU `0 -> 100` con `10 GPU concurrency` en Starter free y `50` en Team, `1-2s` cold start.
 `FreeUV` es cuello de botella y debe tener `concurrency=1` por GPU para no OOM.
 `MediaPipe` puede tener `concurrency=4` en CPU.
+R2 y Queues escalan sin gestión (queues `10k ops/día free`, luego `$0.40/M ops`).
 
 ## 9. Observabilidad
 
 `core` emite `duration_ms` por etapa y `vram_mb`.
-`GET /health` verifica `redis ping` y `torch.cuda.is_available`.
+`GET /health` verifica `queue ping` (Redis `PING` local / Queues health en prod) y `torch.cuda.is_available` en Modal.
+En prod: `Cloudflare Analytics + Workers Logs` (3 días free), `Durable Objects` para progress, `Modal logs` para GPU.
 Logs con `job_id` sin bytes.
 Métricas expuestas para `OpenTelemetry`.
 

@@ -41,9 +41,9 @@ backend/
 `app/models` son adaptadores a `mediapipe`, `torch`, `diffusers`, `gnm`.
 Ningún otro módulo importa esas libs.
 
-## 4. Docker
+## 4. Docker (dev local)
 
-### 4.1 Full stack
+### 4.1 Full stack local
 
 ```bash
 docker compose up --build
@@ -51,8 +51,9 @@ docker compose up --build
 
 Levanta `api` en 8000, `frontend` en 4321 y `redis` en 6379.
 `/tmp` está montado como `tmpfs` para stateless.
+En prod este stack se reemplaza por `Cloudflare Workers + Queues + R2 + Modal`. El contrato `core.queue` es idéntico, solo cambia el adapter.
 
-### 4.2 Workers GPU
+### 4.2 Workers GPU local
 
 ```bash
 docker compose --profile gpu up --build
@@ -60,8 +61,27 @@ docker compose --profile gpu up --build
 
 Usa `Dockerfile.gpu` con `nvidia/cuda:12.2-runtime`.
 Verifica `docker exec facium-worker-gpu nvidia-smi`.
+En prod los workers GPU corren en `Modal` (`modal deploy backend/modal_app.py`) con `T4 16GB`, `cold start 1-2s`, `$30/mes free`.
 
-### 4.3 Rebuild rápido
+### 4.3 Workers GPU en Modal (prod)
+
+```bash
+modal deploy backend/modal_app.py   # despliega MediaPipe/FLAME/FreeUV/GNM en Modal
+modal app logs facium-workers        # logs GPU
+```
+
+Modal escala `0 -> 100` GPUs, paga por segundo. Ver `ARCHITECTURE.md` ADR-004.
+
+### 4.4 Edge en Cloudflare (prod)
+
+```bash
+npx wrangler dev     # Workers API + Queues + R2 + Durable Objects local
+npx wrangler deploy  # Pages (Astro) + Workers prod
+```
+
+Config en `wrangler.toml`. Queues `10k ops/día free`, R2 `10GB free`, Pages free.
+
+### 4.5 Rebuild rápido local
 
 ```bash
 docker compose build api
@@ -82,10 +102,12 @@ Islas React en `src/components`.
 
 ## 6. Queues y workers
 
-ARQ corre con `uv run arq app.core.queue.WorkerSettings`.
-El API encola con `await queue.enqueue_job("compare_job", job_id, image_a, image_b)`.
-Progreso se publica con `ctx["job"].progress`.
-En dev usa Redis de `docker compose`, en test usa `fakeredis`.
+El contrato es `app.core.queue` con adapter dual:
+
+- **Local/dev/test:** `Redis + ARQ` con `uv run arq app.core.queue.WorkerSettings`. El API encola con `await queue.enqueue_job("compare_job", job_id, image_a, image_b)`. Progreso con `ctx["job"].progress`. En test usa `fakeredis`.
+- **Prod:** `Cloudflare Queues + R2` vía `wrangler.toml`. El Worker encola `{job_id, r2_keys}` (Queues <128KB, bytes en R2). Modal consume vía `HTTP Pull Consumer` (`modal_app.py`). Progreso vía `Durable Objects WS`.
+
+El código de negocio no conoce la infra; solo `core.queue` decide por env `QUEUE_DRIVER=redis|cloudflare`.
 
 ## 7. Testing
 
@@ -126,6 +148,7 @@ Verifica `redis.exists == 0` tras 65s y `tmpfs` vacío.
 Si no tienes GPU local, corre tests de Seam 3 con mocks de boundary.
 Inyecta `uv_client` fake que retorna `GOLDEN_UV` sin cargar `torch`.
 En CI los workers GPU corren solo en runner con GPU o se skippean con `pytest -k "not gpu"`.
+En prod usa `Modal`: `modal run backend/modal_app.py::test_facium --gpu T4` ejecuta FreeUV real sin GPU local y consume tus `$30/mes free` (~50h T4).
 
 ## 9. Lint y formato
 
@@ -149,6 +172,9 @@ Abre PR y verifica `docker compose up` pasa E2E.
 ## 11. Troubleshooting
 
 `uv sync` falla: borra `.venv` y reintenta `uv sync --frozen`.
-`redis connection refused`: verifica `docker compose ps` y `redis` healthy.
-`CUDA out of memory`: baja `concurrency` de worker-gpu a 1 en `WorkerSettings`.
-`WS no conecta`: verifica `VITE_API_URL` en `frontend/.env`.
+`redis connection refused` (local): verifica `docker compose ps` y `redis` healthy.
+`wrangler deploy` falla (prod): verifica `wrangler.toml` bindings de Queues/R2 y `CLOUDFLARE_API_TOKEN`.
+`modal deploy` falla: verifica `modal token` y `modal_app.py` image con `nvidia/cuda:12.2-runtime`.
+`CUDA out of memory` (local o Modal): baja `concurrency` de worker-gpu a 1 en `WorkerSettings` / `@modal.function(gpu="T4", concurrency_limit=1)`.
+`WS no conecta`: verifica `VITE_API_URL` en `frontend/.env` y `Durable Objects` binding en `wrangler.toml` (prod).
+`Queues 128KB exceeded`: no encoles bytes, usa patrón `R2 pointer` via `core.queue` adapter.

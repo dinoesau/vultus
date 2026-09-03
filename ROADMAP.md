@@ -20,39 +20,43 @@ La textura UV es la fuente de verdad para métricas antropométricas, no la foto
 
 ### 3.1 Diagrama general stateless
 
+> **Infra elegida: Cloudflare + Modal** (ADR-004). Edge serverless para API/queue/storage, GPU serverless para visión.
+
 ```mermaid
 graph TB
-    U[Usuario] --> FE[Astro SSR + Islands]
-    FE -- POST multipart 2 jpgs --> API[FastAPI - API Gateway]
-    API -- enqueue bytes --> Q[Redis Queue ARQ TTL 60s]
-    Q --> WC[Worker CPU - MediaPipe 478]
-    Q --> WF[Worker GPU - FLAME Fitting]
-    Q --> WU[Worker GPU - FreeUV SD1.5]
-    Q --> WG[Worker CPU/GPU - GNM Bake]
-    WC & WF & WU & WG -- result bytes --> Q
-    Q -- result --> API
-    API -- StreamingResponse zip + WS progress --> FE
+    U[Usuario] --> FE[Astro - Cloudflare Pages]
+    FE -- POST multipart 2 jpgs --> CF[Cloudflare Worker - API Gateway]
+    CF -- PutObject R2 + enqueue pointer --> Q[Cloudflare Queues 10k ops/día free]
+    CF -- upload R2 presigned --> R2[R2 Bucket TTL 60s lifecycle]
+    Q -- HTTP Pull Consumer --> MO[Modal GPU Workers<br/>MediaPipe 478 + FLAME + FreeUV + GNM<br/>$30/mes free, 1-2s cold start]
+    MO -- result bytes --> R2
+    MO -- progress --> DO[Durable Objects WS]
+    R2 -- StreamingResponse zip --> CF
+    CF -- WS progress 0.0-1.0 --> FE
     FE --> DL[Descarga directa UV_A UV_B heatmap mesh PDF]
-    Q -. EXPIRE 60s + tmpfs wipe .-> X[Olvido total]
+    R2 -. lifecycle 60s + tmpfs wipe .-> X[Olvido total]
+    Q -. 24h retención free .-> X
 ```
 
 ### 3.2 Principio stateless
 
-No hay Postgres ni MinIO ni S3.
-El worker escribe solo a `/tmp` en `tmpfs`.
-El resultado vive en Redis `job_id -> bytes` solo 60 segundos.
+No hay Postgres ni S3 persistente.
+El worker escribe solo a `/tmp` en `tmpfs` (Docker local o Modal container).
+En prod el resultado vive en `R2` `job_id/result.zip` solo 60 segundos (lifecycle rule) y el mensaje en `Cloudflare Queues` con retención 24h (free) pero `TTL lógico 60s` vía Durable Object alarm + `R2 EXPIRE`.
+En dev se usa `Redis EXPIRE 60s` para paridad local vía adapter.
 Tras la descarga el cliente es dueño de los archivos.
 El servidor no recuerda nada.
 Esto simplifica infra, reduce coste y es GDPR friendly.
 
 ### 3.3 Flujo de un job
 
-El cliente sube 2 imágenes vía `POST /v1/compare`.
-El API encola el job y retorna `202 + job_id` inmediato.
-El frontend se suscribe a `WS /v1/jobs/{id}/events` para progreso.
-Los workers consumen de Redis, procesan y retornan bytes a Redis con `keep_result=60`.
-El API hace `await queue.result(job_id)` y responde con `StreamingResponse` zip en memoria.
-Redis hace `EXPIRE 60` y el worker hace `unlink` de `/tmp`.
+El cliente sube 2 imágenes vía `POST /v1/compare` en `Cloudflare Pages -> Worker`.
+El Worker valida, hace `R2 PutObject` con las 2 imágenes y encola solo `{job_id, r2_keys}` en `Cloudflare Queues` (Queues limita a 128KB por mensaje, no caben bytes). Retorna `202 + job_id` inmediato.
+El frontend se suscribe a `WS /v1/jobs/{id}/events` vía `Durable Objects`.
+Los workers en `Modal` consumen vía `HTTP Pull Consumer`, procesan `MediaPipe -> FLAME -> FreeUV -> GNM` y retornan bytes a `R2` con `lifecycle 60s`.
+El Worker hace `await R2 GetObject(job_id/result.zip)` y responde con `StreamingResponse` zip en memoria.
+`R2 lifecycle` hace `EXPIRE 60s` y el worker Modal hace `unlink` de `/tmp`.
+En dev local el flujo es idéntico pero `Redis ARQ` sustituye a `Queues + R2` vía el mismo `core.queue` adapter.
 Si el usuario cierra la pestaña antes de descargar, el resultado expira y debe reintentar.
 
 ## 4. Stack Tecnico
@@ -75,12 +79,20 @@ Comunicación `REST + WebSocket` contra FastAPI.
 
 ### 4.3 Infra
 
-Docker Compose para todos los servicios.
-`Dockerfile` multi-stage para backend con `uv`.
-`Dockerfile.gpu` basado en `nvidia/cuda:12.2-runtime` para workers GPU.
-Servicios `api`, `worker-cpu`, `worker-gpu`, `frontend`, `redis`.
-Sin `postgres` ni `minio` por stateless.
-CI con `GitHub Actions + buildx + GHCR`.
+**Prod elegida: Cloudflare + Modal.**
+
+- **Cloudflare Pages** para Astro frontend (static, free ilimitado).
+- **Cloudflare Workers** para API Gateway (`POST /v1/compare`, `WS` vía Durable Objects) - `100k req/día free`, `Paid $5/mes` para `>10ms CPU`.
+- **Cloudflare Queues** para `enqueue` (`10k ops/día free`, `24h retención free`) - reemplaza Redis ARQ en prod vía adapter.
+- **Cloudflare R2** para storage temporal `job_id/result.zip` con `lifecycle 60s` - `10GB-mes + 1M Class A + 10M Class B free`, egress free - reemplaza Redis bytes.
+- **Cloudflare Turnstile + WAF** para rate limiting y DDoS free.
+- **Modal** para workers GPU (`FreeUV SD1.5 12GB`, `FLAME`) - `T4 $0.59/h`, `Starter $30/mes free` (~9.300 compares/mes gratis), cold start 1-2s, `HTTP Pull Consumer` desde Queues, `tmpfs` en container.
+- **Docker Compose** solo para dev local: `api`, `worker-cpu`, `worker-gpu`, `frontend`, `redis` con paridad de contratos.
+- `Dockerfile` multi-stage para backend con `uv`.
+- `Dockerfile.gpu` basado en `nvidia/cuda:12.2-runtime` para workers GPU locales.
+- `modal_app.py` para deploy GPU en Modal, `wrangler.toml` para deploy edge en Cloudflare.
+- Sin `postgres` ni `minio` persistente por stateless.
+- CI con `GitHub Actions + buildx + GHCR` + `wrangler deploy` + `modal deploy`.
 
 ## 5. Estructura de Proyecto
 
@@ -89,23 +101,23 @@ facium/
 ├── ROADMAP.md
 ├── CONTEXT.md
 ├── README.md
-├── docker-compose.yml
-├── docker-compose.prod.yml
+├── wrangler.toml              # Cloudflare Workers + Queues + R2 + Durable Objects (prod)
 ├── backend/
 │   ├── pyproject.toml
 │   ├── uv.lock
+│   ├── modal_app.py           # Modal GPU workers: MediaPipe/FLAME/FreeUV/GNM (prod)
 │   ├── Dockerfile
 │   ├── Dockerfile.gpu
 │   ├── app/
 │   │   ├── api/
 │   │   ├── workers/
 │   │   ├── models/
-│   │   └── core/
+│   │   └── core/queue.py      # Adapter: Redis ARQ (local/test) <-> Cloudflare Queues+R2 (prod)
 │   └── tests/
 │       ├── api/
 │       └── workers/
 └── frontend/
-    ├── astro.config.mjs
+    ├── astro.config.mjs       # -> Cloudflare Pages en prod
     ├── src/
     └── e2e/
 ```
@@ -114,9 +126,9 @@ facium/
 
 ### Fase 0 - Infra base (1 semana)
 
-Objetivo: `uv + Docker + Async` corriendo end-to-end con job dummy stateless.
-Tasks: crear `pyproject.toml` con `uv`, `Dockerfile` multi-stage, `docker-compose.yml` con `api/redis/frontend`, configurar `ARQ` con `POST /v1/jobs` y `GET /v1/jobs/{id}` y `WS /v1/jobs/{id}/events`, implementar healthchecks.
-Done: `uv run pytest` pasa, `docker compose up` levanta todo, un job fake se encola en Redis, es consumido por worker, retorna bytes y expira a los 60s sin dejar archivos en `/tmp`.
+Objetivo: `uv + Docker + Async` corriendo end-to-end con job dummy stateless con paridad Cloudflare.
+Tasks: crear `pyproject.toml` con `uv`, `Dockerfile` multi-stage, `docker-compose.yml` con `api/redis/frontend` para dev local, configurar `core.queue` adapter `Redis ARQ` (local) / `Cloudflare Queues + R2` (prod) con `POST /v1/jobs` y `GET /v1/jobs/{id}` y `WS /v1/jobs/{id}/events` vía Durable Objects, implementar `wrangler.toml` y healthchecks.
+Done: `uv run pytest` pasa, `docker compose up` levanta todo en local, `wrangler dev` levanta edge, un job fake se encola (Redis local o Queues en prod), es consumido por worker (local o Modal), retorna bytes a Redis/R2 y expira a los 60s sin dejar archivos en `/tmp`.
 
 ### Fase 1 - MVP UV canónico (3 semanas)
 
@@ -144,26 +156,30 @@ Done: `docker compose -f docker-compose.prod.yml up` pasa E2E completo, ningún 
 
 ### Fase 5 - Produccion (1.5 semanas)
 
-Objetivo: deploy reproducible y observable.
-Tasks: `Dockerfile.gpu` final, `docker-compose.prod.yml` con `tmpfs` para `/tmp`, CI `buildx` y push a `GHCR`, deploy híbrido `Vercel para Astro + Fly.io para API + Modal o RunPod Serverless para Workers GPU + Upstash Redis EU`, observabilidad `OpenTelemetry + Grafana + Sentry` para queue lag y VRAM, guardrails de borrado a 24h si se usa TTL extendido, smoke tests contra URL prod.
-Done: `https://facium.com/compare` corre vuelta completa menor a 20s, autoescala GPU por uso, coste estimado 25-60 usd mes más GPU por segundo.
+Objetivo: deploy reproducible y observable en Cloudflare + Modal.
+Tasks: `Dockerfile.gpu` final, `tmpfs` para `/tmp` local y en Modal container, CI `buildx + GHCR` para local, `wrangler deploy` para `Cloudflare Pages (Astro) + Workers API + Queues + R2 + Durable Objects`, `modal deploy` para `Workers GPU` (`MediaPipe/FLAME/FreeUV/GNM`) con `HTTP Pull Consumer` desde `Cloudflare Queues`, `R2 lifecycle 60s` + `Queues retención 24h` + `alarm 60s`, observabilidad `Cloudflare Analytics + OpenTelemetry + Grafana + Sentry` para queue lag y VRAM, guardrails de borrado a 24h si se usa TTL extendido, smoke tests contra URL prod.
+Done: `https://facium.com/compare` (Pages + Workers) corre vuelta completa menor a 20s, autoescala GPU en Modal por uso, coste estimado **$5/mes (Cloudflare Workers Paid) + $0 GPU hasta 9.300 compares/mes (Modal $30 free)** y luego `$0.0032` por compare T4.
 
 ## 7. Deployment - Opciones evaluadas
 
-Opción A híbrida recomendada para MVP: `Astro en Vercel + FastAPI en Fly.io AMS + Workers GPU en Modal o RunPod Serverless + Upstash Redis EU`.
-Ventaja: pago por segundo de GPU, cold start 5-10s aceptable en forense.
-Coste: 25-60 usd mes más uso GPU.
+**Opción elegida: Cloudflare + Modal (híbrida serverless)**
 
-Opción B VPS soberano: `Hetzner CCX con GPU + Dokploy o Coolify` todo en un host con `docker compose`.
-Ventaja: datos no salen de tu servidor, ideal para GDPR forense.
+`Astro en Cloudflare Pages + Workers API + Queues + R2 + Durable Objects + Workers GPU en Modal via HTTP Pull Consumer`.
+Ventaja: edge global con 0 egress (R2), queue serverless, GPU pago por segundo, cold start Modal 1-2s vs 5-10s de Fly/RunPod, stateless con R2 lifecycle 60s.
+Coste: **$5/mes Workers Paid + $0 GPU hasta 9k compares (Modal $30 free/mes)**, luego `$0.0032/compare` T4. Pages/Queues/R2 free tiers cubren free tier completo.
+
+Opción B VPS soberano (alternativa GDPR): `Hetzner CCX con GPU + Dokploy o Coolify` todo en un host con `docker compose`.
+Ventaja: datos no salen de tu servidor, ideal para GDPR forense estricto.
 Coste: 40-90 usd mes fijo.
 
 Opción C cloud nativo: `GCP Cloud Run + Cloud Run GPU L4 + Memorystore + Cloud SQL`.
 Ventaja: autoescala real y compliance EU completo.
 Coste: 80-200 usd mes.
 
-Default del roadmap: Opción A con B como alternativa GDPR.
-El principio stateless hace que cualquier opción sea más barata al no pagar storage.
+Opción previa descartada: `Vercel + Fly.io + Upstash Redis` - más cara ($25-60 fijo) y con egress, reemplazada por Cloudflare free tier.
+
+Default del roadmap: **Cloudflare + Modal** con B como alternativa GDPR.
+El principio stateless + R2 lifecycle hace que cualquier opción sea más barata al no pagar storage persistente.
 
 ## 8. TDD - Seams y reglas
 

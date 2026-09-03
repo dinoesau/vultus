@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+uv.lock
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+.astro/
+frontend/dist/
+frontend/.astro/
+frontend/node_modules/
+
+# Docker
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Models checkpoints - no commitear pesos
+checkpoints/
+models/*.bin
+models/*.ckpt
+*.pth
+*.pt
+
+# Tmp stateless
+/tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

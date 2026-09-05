@@ -1,7 +1,10 @@
 name = "facium-api"
-main = "backend/app/worker_entry.py"
+# Híbrido ADR-005: el Worker edge es gateway fino (validar + R2 PutObject +
+# enqueue {job_id, r2_keys}). La API pesada vive en Rust Axum
+# (backend/crates/api) y el ML GPU en Python Modal (backend/modal_app.py).
+# main apunta al entry TS; se eliminó `python_workers`.
+main = "edge/worker.ts"
 compatibility_date = "2026-09-03"
-compatibility_flags = ["python_workers"]
 
 # Cloudflare Pages maneja el frontend Astro static; este Worker expone Seam 1
 # POST /v1/compare, GET /v1/jobs/:id, WS /v1/jobs/:id/events, GET /health

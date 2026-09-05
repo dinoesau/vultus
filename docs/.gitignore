@@ -1,0 +1,4 @@
+# Ignora todo en este folder excepto este archivo
+# Esto permite commitear docs/ siempre vacio en GitHub
+*
+!.gitignore

@@ -7,7 +7,6 @@ WORKDIR /work
 RUN apt-get update && apt-get install -y python3 python3-pip curl libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
 # Modal invoca `python` en sus probes: la imagen CUDA solo trae `python3`.
 RUN ln -sf /usr/bin/python3 /usr/bin/python && python --version
-COPY modal_app.py ./
 COPY requirements.txt ./
 # Pesos (nunca en repo ni en imagen): viven en volumen /weights en prod
 # (Modal Volume vultus-weights) y en WEIGHTS_DIR local. Receta versionada:
@@ -22,6 +21,8 @@ RUN pip3 install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url htt
 RUN pip3 install --no-cache-dir -r requirements.txt
 # pytorch3d para DECA renderer (wheel oficial py310 cu121 torch 2.4).
 RUN pip3 install --no-cache-dir fvcore iopath && pip3 install --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt241/download.html
+# Codigo al final: los cambios de codigo no invalidan las capas pesadas de pip.
+COPY modal_app.py ./
 ENV ML_PORT=8081 WEIGHTS_DIR=/weights
 EXPOSE 8081
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \

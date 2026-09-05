@@ -272,8 +272,12 @@ def _deca_model():
         cfg = deca_config.cfg.clone()
         cfg.deca_dir = DECA_CODE_DIR
         cfg.model.flame_model_path = flame_pkl
-        cfg.model.use_tex = True
-        cfg.model.extract_tex = True
+        # Sin modelo de textura (FLAME_albedo_from_BFM ausente del bundle):
+        # flaw-uv = remuestreo de la foto al UV 256 via geometria DECA+FLAME,
+        # con oclusiones visibles. El fitting sigue siendo DECA + Open.
+        cfg.model.use_tex = False
+        cfg.model.extract_tex = False
+        cfg.pretrained_modelpath = os.path.join(WEIGHTS_DIR, "deca", "deca_model.tar")
         try:
             _DECA = DECA(config=cfg, device="cuda")
             _DECA.eval()

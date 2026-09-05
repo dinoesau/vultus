@@ -192,27 +192,29 @@ def _landmarker():
         if not os.path.exists(task):
             raise RuntimeError(f"mediapipe task missing: {task}")
         try:
+            import mediapipe as mp
             from mediapipe.tasks.python import base_options as mp_base
-            from mediapipe.tasks.python.vision import face_landmarker as mp_lm
+            from mediapipe.tasks.python import vision as mp_vision
         except ImportError as e:
             raise RuntimeError(f"mediapipe package missing: {e}") from e
-        opts = mp_lm.FaceLandmarkerOptions(
+        opts = mp_vision.FaceLandmarkerOptions(
             base_options=mp_base.BaseOptions(model_asset_path=task),
-            running_mode=mp_lm.RunningMode.IMAGE,
+            running_mode=mp_vision.RunningMode.IMAGE,
             num_faces=1,
         )
-        _LM = mp_lm.FaceLandmarker.create_from_options(opts)
+        _LM = mp_vision.FaceLandmarker.create_from_options(opts)
         return _LM
 
 
 def _real_landmarks(image: bytes) -> bytes:
     """Landmarks reales 478 [[x,y,z]...] finitos. ValueError = 400, otro = 500."""
     import numpy as np
-    from mediapipe.tasks.python.vision import face_landmarker as mp_lm
+
+    import mediapipe as mp
 
     img = _pil_from_image_bytes(image)
     arr = np.asarray(img)
-    mp_image = mp_lm.Image(image_format=mp_lm.ImageFormat.SRGB, data=arr)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=arr)
     res = _landmarker().detect(mp_image)
     if not res.face_landmarks:
         raise ValueError("no face detected")

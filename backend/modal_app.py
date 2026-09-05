@@ -17,36 +17,34 @@ Deploy: modal deploy backend/modal_app.py
 Logs:   modal app logs vultus-workers
 """
 
-import modal
+try:
+    import modal
 
-app = modal.App("vultus-workers")
+    HAVE_MODAL = True
+except ImportError:  # local Docker sin modal: solo corre sidecar FastAPI
+    modal = None  # type: ignore
+    HAVE_MODAL = False
 
-# Imagen base GPU con torch + diffusers + mediapipe
-# Reusa Dockerfile.gpu local para paridad
-image = (
-    modal.Image.from_dockerfile("backend/Dockerfile.gpu")
-    .pip_install("boto3", "httpx")  # R2 + Queues HTTP Pull
-)
+if HAVE_MODAL:
+    app = modal.App("vultus-workers")
 
-# Volume para cachear pesos FreeUV / FLAME / GNM (evita re-descarga en cold start)
-weights = modal.Volume.from_name("vultus-weights", create_if_missing=True)
+    # Imagen base GPU con torch + diffusers + mediapipe
+    # Reusa Dockerfile.gpu local para paridad
+    image = modal.Image.from_dockerfile("backend/Dockerfile.gpu").pip_install(
+        "boto3", "httpx"
+    )  # R2 + Queues HTTP Pull
+
+    # Volume para cachear pesos FreeUV / FLAME / GNM (evita re-descarga en cold start)
+    weights = modal.Volume.from_name("vultus-weights", create_if_missing=True)
+else:
+    app = None  # type: ignore
+    image = None  # type: ignore
+    weights = None  # type: ignore
 
 # Secrets: Cloudflare R2 + Queues creds
 # modal secret create vultus-cloudflare CLOUDFLARE_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
 
 
-@app.function(
-    image=image,
-    gpu="T4",
-    cpu=2,
-    memory=16384,
-    volumes={"/weights": weights},
-    secrets=[modal.Secret.from_name("vultus-cloudflare")],
-    concurrency_limit=1,  # FreeUV OOM si >1 por GPU
-    timeout=60,
-    min_containers=0,
-    max_containers=10,  # Starter free: 10 GPU concurrency
-)
 def freeuv_worker(job_id: str, r2_keys: dict):
     """
     Worker 3 - FreeUV SD1.5 inpainting.
@@ -62,41 +60,55 @@ def freeuv_worker(job_id: str, r2_keys: dict):
     pass
 
 
-@app.function(
-    image=image,
-    gpu="T4",
-    cpu=4,
-    memory=32768,
-    volumes={"/weights": weights},
-    secrets=[modal.Secret.from_name("vultus-cloudflare")],
-    concurrency_limit=1,
-    timeout=60,
-)
+if HAVE_MODAL:
+    freeuv_worker = app.function(
+        image=image,
+        gpu="T4",
+        cpu=2,
+        memory=16384,
+        volumes={"/weights": weights},
+        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        concurrency_limit=1,  # FreeUV OOM si >1 por GPU
+        timeout=60,
+        min_containers=0,
+        max_containers=10,  # Starter free: 10 GPU concurrency
+    )(freeuv_worker)
+
+
 def flame_worker(job_id: str, r2_keys: dict):
     """Worker 2 - FLAME Fitting 3DDFA_V3/DECA."""
     pass
 
 
-@app.function(
-    image=image,
-    cpu=2,
-    memory=4096,
-    secrets=[modal.Secret.from_name("vultus-cloudflare")],
-    concurrency_limit=4,
-    timeout=30,
-)
+if HAVE_MODAL:
+    flame_worker = app.function(
+        image=image,
+        gpu="T4",
+        cpu=4,
+        memory=32768,
+        volumes={"/weights": weights},
+        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        concurrency_limit=1,
+        timeout=60,
+    )(flame_worker)
+
+
 def mediapipe_worker(job_id: str, r2_keys: dict):
     """Worker 1 - MediaPipe 478 landmarks CPU (puede correr también en Cloudflare Workers si se portara a WASM)."""
     pass
 
 
-@app.function(
-    image=image,
-    cpu=2,
-    memory=4096,
-    secrets=[modal.Secret.from_name("vultus-cloudflare")],
-    timeout=30,
-)
+if HAVE_MODAL:
+    mediapipe_worker = app.function(
+        image=image,
+        cpu=2,
+        memory=4096,
+        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        concurrency_limit=4,
+        timeout=30,
+    )(mediapipe_worker)
+
+
 def gnm_bake_worker(job_id: str, r2_keys: dict):
     """Worker 4 - DEPRECATED en híbrido: vive en Rust `vultus-workers-cpu`.
 
@@ -106,13 +118,16 @@ def gnm_bake_worker(job_id: str, r2_keys: dict):
     raise NotImplementedError("moved to Rust vultus-workers-cpu")
 
 
-@app.function(
-    image=image,
-    cpu=1,
-    memory=1024,
-    secrets=[modal.Secret.from_name("vultus-cloudflare")],
-    schedule=modal.Period(seconds=5),
-)
+if HAVE_MODAL:
+    gnm_bake_worker = app.function(
+        image=image,
+        cpu=2,
+        memory=4096,
+        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        timeout=30,
+    )(gnm_bake_worker)
+
+
 def queue_pull_consumer():
     """
     HTTP Pull Consumer para Cloudflare Queues.
@@ -124,6 +139,16 @@ def queue_pull_consumer():
     # messages = httpx.get(f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/queues/{QUEUE_ID}/messages/pull")
     # for msg in messages: freeuv_worker.spawn(msg["job_id"], msg["r2_keys"])
     pass
+
+
+if HAVE_MODAL:
+    queue_pull_consumer = app.function(
+        image=image,
+        cpu=1,
+        memory=1024,
+        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        schedule=modal.Period(seconds=5),
+    )(queue_pull_consumer)
 
 
 # --- Sidecar HTTP consumido por Rust (MlSidecarClient) ---
@@ -154,19 +179,21 @@ try:
         # TODO Fase 1: models.freeuv.inpaint(flaw_uv) -> complete-uv bytes
         return Response(content=b'{"todo":"complete-uv"}', media_type="application/octet-stream")
 
-    @app.function(image=image, cpu=1, memory=1024)
-    @modal.fastapi_endpoint(method="POST")
-    async def ml_endpoint(request: Request):
-        path = request.url.path
-        body = await request.body()
-        job_id = request.headers.get("X-Job-Id", "unknown")
-        if path.endswith("/landmarks"):
-            return Response(content=b'{"todo":"landmarks"}', media_type="application/octet-stream")
-        if path.endswith("/flame"):
-            return Response(content=b'{"todo":"flaw-uv"}', media_type="application/octet-stream")
-        if path.endswith("/freeuv"):
-            # En prod delega a freeuv_worker.spawn(job_id, ...) y lee R2.
-            return Response(content=b'{"todo":"complete-uv"}', media_type="application/octet-stream")
-        return Response(content=b'{"error":"unknown ml route"}', status_code=404)
+    if HAVE_MODAL:
+
+        @app.function(image=image, cpu=1, memory=1024)
+        @modal.fastapi_endpoint(method="POST")
+        async def ml_endpoint(request: Request):
+            path = request.url.path
+            body = await request.body()
+            job_id = request.headers.get("X-Job-Id", "unknown")
+            if path.endswith("/landmarks"):
+                return Response(content=b'{"todo":"landmarks"}', media_type="application/octet-stream")
+            if path.endswith("/flame"):
+                return Response(content=b'{"todo":"flaw-uv"}', media_type="application/octet-stream")
+            if path.endswith("/freeuv"):
+                # En prod delega a freeuv_worker.spawn(job_id, ...) y lee R2.
+                return Response(content=b'{"todo":"complete-uv"}', media_type="application/octet-stream")
+            return Response(content=b'{"error":"unknown ml route"}', status_code=404)
 except ImportError:  # Modal image sin fastapi en tests unitarios
     sidecar = None  # type: ignore

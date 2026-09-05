@@ -5,6 +5,8 @@ FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /work
 RUN apt-get update && apt-get install -y python3 python3-pip curl && rm -rf /var/lib/apt/lists/*
+# Modal invoca `python` en sus probes: la imagen CUDA solo trae `python3`.
+RUN ln -sf /usr/bin/python3 /usr/bin/python && python --version
 COPY modal_app.py ./
 COPY requirements.txt ./
 # Pesos (nunca en repo ni en imagen): viven en volumen /weights en prod

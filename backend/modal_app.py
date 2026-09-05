@@ -611,28 +611,31 @@ try:
         assert len(out) == UV_LEN
         logger.info("freeuv ok job=%s in_len=%d out_len=%d", job_id, len(body), len(out))
         return Response(content=out, media_type="application/octet-stream")
-
-    if HAVE_MODAL:
-
-        @app.function(
-            image=image,
-            gpu="T4",
-            cpu=4,
-            memory=16384,
-            volumes={"/weights": weights},
-            secrets=[modal.Secret.from_name("vultus-cloudflare")],
-            # Sin @modal.concurrent: 1 input por container = una inferencia
-            # pesada por GPU, sin OOM. max_containers=10 (Starter).
-            max_containers=10,
-            timeout=600,  # red amplia: la primera llamada paga cold + carga de pesos
-            env={"VULTUS_REAL_ML": "1"},
-        )
-        @modal.asgi_app()
-        def ml_sidecar_app():
-            # Misma tabla de rutas que el serve local: un solo contrato.
-            return sidecar
-except ImportError:  # Modal image sin fastapi en tests unitarios
+except ImportError:  # Entorno sin fastapi: solo dobles vía _impl_* (tests unitarios)
     sidecar = None  # type: ignore
+
+
+if HAVE_MODAL:
+
+    @app.function(
+        image=image,
+        gpu="T4",
+        cpu=4,
+        memory=16384,
+        volumes={"/weights": weights},
+        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        # Sin @modal.concurrent: 1 input por container = una inferencia
+        # pesada por GPU, sin OOM. max_containers=10 (Starter).
+        max_containers=10,
+        timeout=600,  # red amplia: la primera llamada paga cold + carga de pesos
+        env={"VULTUS_REAL_ML": "1"},
+    )
+    @modal.asgi_app()
+    def ml_sidecar_app():
+        # Misma tabla de rutas que el serve local: un solo contrato.
+        # Fuera del try de fastapi: el registro no depende del env local
+        # del CLI (la imagen remota sí trae fastapi vía requirements).
+        return sidecar
 
 
 def _serve_arg_port(argv) -> int:

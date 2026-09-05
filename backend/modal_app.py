@@ -68,8 +68,9 @@ except OSError as e:
 # Transform leve determinista para /ml/freeuv (eco +1 por byte, a nivel C).
 _FREEUV_TABLE = bytes((i + 1) % 256 for i in range(256))
 
-# Paso pesado sidecar: paridad local con Modal concurrency_limit=1.
-# En prod la serialización la impone Modal por réplica; aquí el semáforo
+# Paso pesado sidecar: paridad local con max_containers=1.
+# En prod la serialización la impone Modal por réplica (web endpoint sin
+# @modal.concurrent = 1 input por container); aquí el semáforo
 # local evita OOM concurrente en Docker CPU. No usar semáforo en Rust.
 _FREEUV_SEMAPHORE = asyncio.Semaphore(1)
 
@@ -467,7 +468,7 @@ if HAVE_MODAL:
         memory=16384,
         volumes={"/weights": weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
-        concurrency_limit=1,  # FreeUV OOM si >1 por GPU
+        max_containers=1,  # FreeUV OOM si >1 por GPU (pool de 1 container)
         timeout=60,
         min_containers=0,
         max_containers=10,  # Starter free: 10 GPU concurrency
@@ -487,7 +488,7 @@ if HAVE_MODAL:
         memory=32768,
         volumes={"/weights": weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
-        concurrency_limit=1,
+        max_containers=1,
         timeout=60,
     )(flame_worker)
 
@@ -503,7 +504,7 @@ if HAVE_MODAL:
         cpu=2,
         memory=4096,
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
-        concurrency_limit=4,
+        max_containers=4,
         timeout=30,
     )(mediapipe_worker)
 
@@ -621,7 +622,9 @@ try:
             memory=16384,
             volumes={"/weights": weights},
             secrets=[modal.Secret.from_name("vultus-cloudflare")],
-            concurrency_limit=1,  # T4 16G: una inferencia pesada por réplica, sin OOM
+            # Sin @modal.concurrent: 1 input por container = una inferencia
+            # pesada por GPU, sin OOM. max_containers=10 (Starter).
+            max_containers=10,
             timeout=600,  # red amplia: la primera llamada paga cold + carga de pesos
             env={"VULTUS_REAL_ML": "1"},
         )
@@ -635,7 +638,7 @@ try:
             if path.endswith("/flame"):
                 return await _run_impl(job_id, "flame", _impl_flame, body)
             if path.endswith("/freeuv"):
-                # En prod Modal ya serializa con concurrency_limit=1;
+                # En prod Modal ya serializa (1 input por container);
                 # el semáforo local mantiene paridad si el endpoint corre fuera.
                 # En prod delega a freeuv_worker.spawn(job_id, ...) y lee R2.
                 async with _FREEUV_SEMAPHORE:

@@ -118,5 +118,55 @@ async fn test_unknown_job_returns_404() {
 #[tokio::test]
 async fn test_health_ok() {
     let server = TestServer::new(router(AppState::new(MemoryQueue::default()))).unwrap();
-    server.get("/health").await.assert_status(StatusCode::OK);
+    let resp = server.get("/health").await;
+    resp.assert_status(StatusCode::OK);
+    let body: serde_json::Value = resp.json();
+    assert_eq!(body.get("status").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(body.get("queue").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(body.get("ttl_secs").and_then(|v| v.as_u64()), Some(60));
+}
+
+#[tokio::test]
+async fn test_events_bad_uuid_returns_400() {
+    let server = TestServer::new(router(AppState::new(MemoryQueue::default()))).unwrap();
+    server
+        .get("/v1/jobs/not-a-uuid/events")
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_events_without_ws_upgrade_is_rejected() {
+    // Sin headers WS, `WebSocketUpgrade` rechaza con 400 antes del handler.
+    // El 404 real con handshake WS se prueba en `tests/ws_events.rs::test_ws_unknown_job_handshake_fails`.
+    let server = TestServer::new(router(AppState::new(MemoryQueue::default()))).unwrap();
+    server
+        .get("/v1/jobs/11111111-1111-4111-8111-111111111111/events")
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_job_expires_to_expired_status() {
+    use std::sync::Arc;
+    use vultus_core::{ManualClock, TtlSecs};
+    let ttl = TtlSecs::parse(1).expect("ttl");
+    let clock = Arc::new(ManualClock::new());
+    let queue = MemoryQueue::with_ttl_and_clock(ttl, clock.clone());
+    let server = TestServer::new(router(AppState::with_ttl(queue, ttl))).unwrap();
+    let resp = server
+        .post("/v1/compare")
+        .multipart(compare_parts(png_bytes()))
+        .await;
+    resp.assert_status(StatusCode::ACCEPTED);
+    let body: serde_json::Value = resp.json();
+    let job_id = body.get("job_id").and_then(|v| v.as_str()).expect("job_id");
+    clock.advance(std::time::Duration::from_secs(2));
+    let status = server.get(&format!("/v1/jobs/{job_id}")).await;
+    status.assert_status(StatusCode::OK);
+    let sbody: serde_json::Value = status.json();
+    assert_eq!(
+        sbody.get("status").and_then(|v| v.as_str()),
+        Some("expired")
+    );
 }

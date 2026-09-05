@@ -8,9 +8,16 @@ RUN apt-get update && apt-get install -y python3 python3-pip curl && rm -rf /var
 COPY modal_app.py ./
 COPY requirements.txt ./
 # Pesos reales en Fase 1: mediapipe, torch, diffusers, 3DDFA_V3/DECA, FreeUV
+# Pesos (nunca en repo ni en imagen): viven en volumen /weights en prod
+# (Modal Volume vultus-weights) y en WEIGHTS_DIR local. Receta versionada:
+#   1. descargar MediaPipe face_mesh, 3DDFA_V3/DECA y FreeUV SD1.5 a $WEIGHTS_DIR
+#   2. cachear en volumen para evitar re-descarga en cold start
+# Fase1-UV-canonico usa dobles deterministas stdlib; torch/diffusers reales
+# se añaden a requirements.txt solo cuando haya GPU T4 para validarlos,
+# para no romper el build/run CPU local.
 RUN pip3 install --no-cache-dir -r requirements.txt
-ENV ML_PORT=8081
+ENV ML_PORT=8081 WEIGHTS_DIR=/weights
 EXPOSE 8081
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8081/docs')" || exit 1
-CMD ["sh", "-c", "python3 -c \"import modal_app; import uvicorn; uvicorn.run(modal_app.sidecar, host='0.0.0.0', port=8081)\""]
+  CMD python3 -c "import os,urllib.request; p=os.environ.get('ML_PORT','8081'); urllib.request.urlopen(f'http://localhost:{p}/docs')" || exit 1
+CMD ["sh", "-c", "python3 modal_app.py --serve :${ML_PORT:-8081}"]

@@ -471,7 +471,6 @@ if HAVE_MODAL:
         max_containers=1,  # FreeUV OOM si >1 por GPU (pool de 1 container)
         timeout=60,
         min_containers=0,
-        max_containers=10,  # Starter free: 10 GPU concurrency
     )(freeuv_worker)
 
 

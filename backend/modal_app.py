@@ -381,8 +381,15 @@ def _real_complete_uv(flaw: bytes) -> bytes:
     else:
         uv_img = flaw_img
     with torch.no_grad():
+        # 12 pasos: ~16s en T4 warm frente a ~26s con 20. El SLO warm (<20s
+        # p95 par) y el timeout Rust de 30s por cara lo exigen; la revision
+        # a ojo del golden congela la calidad a este valor.
         out = encoder.generate(
-            uv_structure_image=uv_img, flaw_uv_image=flaw_img, pipe=pipe, guidance_scale=1.4
+            uv_structure_image=uv_img,
+            flaw_uv_image=flaw_img,
+            pipe=pipe,
+            guidance_scale=1.4,
+            num_inference_steps=12,
         )
     if not isinstance(out, Image.Image):
         out = Image.open(_io.BytesIO(bytes(out)))
@@ -632,7 +639,9 @@ if HAVE_MODAL:
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
         # Sin @modal.concurrent: 1 input por container = una inferencia
         # pesada por GPU, sin OOM. max_containers=10 (Starter).
+        # buffer_containers=1 absorbe la rafaga A/B de Rust en paralelo.
         max_containers=10,
+        buffer_containers=1,
         timeout=600,  # red amplia: la primera llamada paga cold + carga de pesos
         env={"VULTUS_REAL_ML": "1"},
     )

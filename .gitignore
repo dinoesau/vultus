@@ -50,3 +50,6 @@ models/*.ckpt
 .idea/
 *.swp
 *.swo
+
+# Wrangler local state
+.wrangler/

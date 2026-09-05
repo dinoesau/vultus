@@ -43,7 +43,8 @@ graph TB
 No hay Postgres ni S3 persistente.
 El worker escribe solo a `/tmp` en `tmpfs` (Docker local o Modal container).
 En prod el resultado vive en `R2` `job_id/result.zip` solo 60 segundos (lifecycle rule) y el mensaje en `Cloudflare Queues` con retención 24h (free) pero `TTL lógico 60s` vía Durable Object alarm + `R2 EXPIRE`.
-En dev se usa `Redis EXPIRE 60s` para paridad local vía adapter.
+En dev se usa `Store` en memoria con `TTL 60s` (`MemoryQueue` local, `R2PointerQueue` para paridad prod) vía adapter.
+Sin `Redis` en código: `docker-compose.yml` no levanta `redis` desde ADR-005.
 Tras la descarga el cliente es dueño de los archivos.
 El servidor no recuerda nada.
 Esto simplifica infra, reduce coste y es GDPR friendly.
@@ -56,7 +57,7 @@ El frontend se suscribe a `WS /v1/jobs/{id}/events` vía `Durable Objects`.
 Los workers en `Modal` consumen vía `HTTP Pull Consumer`, procesan `MediaPipe -> FLAME -> FreeUV -> GNM` y retornan bytes a `R2` con `lifecycle 60s`.
 El Worker hace `await R2 GetObject(job_id/result.zip)` y responde con `StreamingResponse` zip en memoria.
 `R2 lifecycle` hace `EXPIRE 60s` y el worker Modal hace `unlink` de `/tmp`.
-En dev local el flujo es idéntico pero `Redis ARQ` sustituye a `Queues + R2` vía el mismo `core.queue` adapter.
+En dev local el flujo es idéntico pero `MemoryQueue` / `R2PointerQueue` en memoria sustituye a `Queues + R2` vía el mismo `core.queue` adapter (sin `Redis ARQ`; ver ADR-005).
 Si el usuario cierra la pestaña antes de descargar, el resultado expira y debe reintentar.
 
 ## 4. Stack Tecnico
@@ -83,11 +84,11 @@ Comunicación `REST + WebSocket` contra FastAPI.
 
 - **Cloudflare Pages** para Astro frontend (static, free ilimitado).
 - **Cloudflare Workers** para API Gateway (`POST /v1/compare`, `WS` vía Durable Objects) - `100k req/día free`, `Paid $5/mes` para `>10ms CPU`.
-- **Cloudflare Queues** para `enqueue` (`10k ops/día free`, `24h retención free`) - reemplaza Redis ARQ en prod vía adapter.
-- **Cloudflare R2** para storage temporal `job_id/result.zip` con `lifecycle 60s` - `10GB-mes + 1M Class A + 10M Class B free`, egress free - reemplaza Redis bytes.
+- **Cloudflare Queues** para `enqueue` (`10k ops/día free`, `24h retención free`) - reemplaza la queue local en prod vía adapter (`MemoryQueue` local vs `Queues+R2` prod).
+- **Cloudflare R2** para storage temporal `job_id/result.zip` con `lifecycle 60s` - `10GB-mes + 1M Class A + 10M Class B free`, egress free - reemplaza los bytes en memoria (`stored_lens`) en prod.
 - **Cloudflare Turnstile + WAF** para rate limiting y DDoS free.
 - **Modal** para workers GPU (`FreeUV SD1.5 12GB`, `FLAME`) - `T4 $0.59/h`, `Starter $30/mes free` (~9.300 compares/mes gratis), cold start 1-2s, `HTTP Pull Consumer` desde Queues, `tmpfs` en container.
-- **Docker Compose** solo para dev local: `api`, `worker-cpu`, `worker-gpu`, `frontend`, `redis` con paridad de contratos.
+- **Docker Compose** solo para dev local: `api`, `ml-sidecar`, `frontend` con paridad de contratos (`MemoryQueue` local / `R2PointerQueue` paridad prod, sin `redis`).
 - `Dockerfile` multi-stage para backend con `uv`.
 - `Dockerfile.gpu` basado en `nvidia/cuda:12.2-runtime` para workers GPU locales.
 - `modal_app.py` para deploy GPU en Modal, `wrangler.toml` para deploy edge en Cloudflare.
@@ -109,7 +110,7 @@ vultus/
 │   ├── Dockerfile
 │   ├── Dockerfile.gpu
 │   ├── crates/
-│   │   ├── api/               # Seam 1 Axum + tests/seam1.rs (8 tests TestServer)
+│   │   ├── api/               # Seam 1 Axum + tests/seam1.rs (11 tests TestServer + 2 config)
 │   │   ├── core/              # assert + error + job + ml + queue (MemoryQueue + R2PointerQueue + Store)
 │   │   └── workers_cpu/       # bake + heatmap infallibles (UV_LEN)
 └── frontend/
@@ -123,8 +124,8 @@ vultus/
 ### Fase 0 - Infra base (1 semana)
 
 Objetivo: `cargo + Docker + Async` corriendo end-to-end con job dummy stateless con paridad Cloudflare.
-Tasks: crear `Cargo.toml` workspace con `anyhow/nutype/proptest`, `Dockerfile` multi-stage, `docker-compose.yml` con `api/redis/frontend` para dev local, configurar trait `Queue` (`MemoryQueue` local/test + `R2PointerQueue` prod) con `POST /v1/compare` (`202 {job_id, status queued}`) y `GET /v1/jobs/{id}` (`200 {job_id, status}`) y `WS /v1/jobs/{id}/events` vía Durable Objects, implementar `wrangler.toml` y healthchecks.
-Done: `cargo test` pasa (36 tests: 8 seam1 + 25 core + 3 workers_cpu), `docker compose up` levanta todo en local, `wrangler dev` levanta edge, un job fake se encola (`MemoryQueue` local o `R2PointerQueue` en prod con `Some(R2Keys)`), es consumido, retorna longitudes vía `stored_lens` y expira a los 60s (`TtlSecs`) sin dejar archivos en `/tmp`.
+Tasks: crear `Cargo.toml` workspace con `anyhow/nutype/proptest`, `Dockerfile` multi-stage, `docker-compose.yml` con `api/ml-sidecar/frontend` para dev local (sin `redis`; `MemoryQueue` en memoria), configurar trait `Queue` (`MemoryQueue` local/test + `R2PointerQueue` prod) con `POST /v1/compare` (`202 {job_id, status queued}`) y `GET /v1/jobs/{id}` (`200 {job_id, status}`) y `WS /v1/jobs/{id}/events` vía Durable Objects, implementar `wrangler.toml` y healthchecks.
+Done: `cargo test` pasa (56 tests: 16 api con 2 config + 11 seam1 + 3 ws, 37 core con 32 unit + 5 edge_parity, 3 workers_cpu), `docker compose up` levanta todo en local, `wrangler dev` levanta edge, un job fake se encola (`MemoryQueue` local o `R2PointerQueue` en prod con `Some(R2Keys)`), es consumido, retorna longitudes vía `stored_lens` y expira a los 60s (`TtlSecs`) sin dejar archivos en `/tmp`.
 
 ### Fase 1 - MVP UV canónico (3 semanas)
 
@@ -182,7 +183,7 @@ El principio stateless + R2 lifecycle hace que cualquier opción sea más barata
 ### 8.1 Seams acordados
 
 Seam 1 HTTP API: `POST /v1/compare` (`202 {job_id, status queued}`), `GET /v1/jobs/{id}` (`200 {job_id, status}`, `400` uuid, `404` desconocido), `WS /v1/jobs/{id}/events`.
-`AppState(Arc<dyn Queue>)`, `AppError -> 400|404|500 {"detail":...}`, 8 tests `TestServer`.
+`AppState(Arc<dyn Queue>)`, `AppError -> 400|404|500 {"detail":...}`, 11 tests `TestServer` + 2 config.
 Seam 2 Queue Contract: `enqueue(EnqueueCommand) -> EnqueuedJob`, `status`, `progress -> (Progress, Stage)`, `set_progress(Progress, Stage)`, `stored_lens`.
 `MemoryQueue` (`None`) vs `R2PointerQueue` (`Some jobs/{id}/a|b`) con `Store` compartido.
 `Stage::{Queued, Landmarks, Flame, Freeuv, Bake, Done}`, `Progress 0.0..=1.0`, `TtlSecs 1..=3600` default 60.

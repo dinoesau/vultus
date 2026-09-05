@@ -8,7 +8,7 @@ En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` v�
 
 ## 2. Diagrama de pipeline
 
-> Infra prod: Cloudflare Pages + Workers + Queues + R2 + Durable Objects + Modal. Dev local: Redis ARQ equivalente vía adapter.
+> Infra prod: Cloudflare Pages + Workers + Queues + R2 + Durable Objects + Modal. Dev local: `Store` en memoria (`MemoryQueue` / `R2PointerQueue`) equivalente vía adapter, sin `Redis`.
 
 ```mermaid
 graph TD
@@ -26,7 +26,7 @@ graph TD
     J -. lifecycle 60s .-> M[Olvido total - tmpfs wipe + R2 DEL + Queue 24h]
     D -. progress .-> N[Durable Objects WS /v1/jobs/id/events]
     N --> A
-    D -. local dev .-> D2[Redis ARQ fallback]
+    D -. local dev .-> D2[Store en memoria local (MemoryQueue)]
 ```
 
 ## 3. Secuencia de modelos
@@ -116,8 +116,8 @@ sequenceDiagram
 
     FE->>CF: POST /v1/compare multipart 2 images
     CF->>CF: Validar tipo, tamaño, una cara por imagen
-    CF->>R2: PutObject r2_keys (images, local: Redis bytes)
-    CF->>Q: enqueue compare_job job_id=uuid r2_keys (local: Redis ARQ)
+    CF->>R2: PutObject r2_keys (images, local: stored_lens en memoria)
+    CF->>Q: enqueue compare_job job_id=uuid r2_keys (local: MemoryQueue en memoria)
     CF-->>FE: 202 Accepted {job_id, status: queued}
     FE->>DO: WS /v1/jobs/{id}/events subscribe
     Q->>MO: HTTP Pull Consumer job_id
@@ -129,12 +129,12 @@ sequenceDiagram
     W3->>DO: progress 0.75 UV complete done
     W3->>W4: UV_A UV_B
     W4->>DO: progress 0.95 heatmap + bake done
-    W4->>R2: PutObject result.zip keep 60s (local: Redis keep_result=60)
+    W4->>R2: PutObject result.zip keep 60s (local Fase 0: sin result, solo status en Store)
     R2->>CF: result ready
     CF->>DO: progress 1.0 done
     DO-->>FE: WS event done
     FE->>CF: GET /v1/jobs/{id}/result
-    CF->>R2: fetch result bytes (local: Redis)
+    CF->>R2: fetch result bytes (local Fase 0: n/a, solo Store status/progress)
     CF-->>FE: 200 StreamingResponse zip
     R2->>R2: lifecycle 60s DEL (local: EXPIRE 60s)
     W1->>W1: unlink /tmp/job_id/* (Modal tmpfs)
@@ -149,7 +149,7 @@ Cada imagen debe ser JPEG o PNG menor a 8MB (`ImageBytes::parse` + `ImageBytesRe
 Faltante o multipart roto es `400 {"detail":...}` vía `AppError::BadRequest`.
 Imagen inválida es `400` vía `AppError::Domain(InvalidImage)` sin encolar.
 Si pasa, construye `EnqueueCommand::new(a, b)`, encola en `Queue` y retorna `202 {job_id, status:"queued"}` (`CompareResponse`).
-`GET /v1/jobs/{id}` valida `JobId::parse(trim)` y retorna `200 {job_id, status: JobStatus::as_str}`; uuid roto es `400`, desconocido es `404`.
+`GET /v1/jobs/{id}` valida `JobId::parse(trim)` y retorna `200 {job_id, status: JobStatus::as_str}`; uuid roto es `400`, desconocido es `404`. En edge (ADR-007) el `GET` lee el `ProgressDO /status` como fuente de verdad, no dummy.
 
 ### 5.2 Queue - Cloudflare Queues + R2 (prod) / MemoryQueue + R2PointerQueue (local/test)
 
@@ -202,17 +202,17 @@ Sin dep `image`; tipos `FlawUv` / `CompleteUv` / `Heatmap` cruzan el seam.
 ### 5.7 Entrega - GET /v1/jobs/{id}/result
 
 El frontend pide el resultado tras recibir `WS done` (Durable Objects en prod).
-En prod el Worker hace `R2 GetObject(job_id/result.zip)` y en local el API hace `await queue.result(job_id)` (Redis), y arma un `StreamingResponse` con `Content-Type: application/zip` y `Content-Disposition: attachment`.
+En prod (Fase 1+) el Worker hace `R2 GetObject(job_id/result.zip)` y en local el API leerá del `Store`; en Fase 0 no hay `GET /result`, solo `GET status` + `WS events`. Cuando exista, armará un `StreamingResponse` con `Content-Type: application/zip` y `Content-Disposition: attachment`.
 El zip contiene `uv_a.png, uv_b.png, heatmap.png, mesh_gnm.glb, report.pdf` en memoria, sin escribir a disco.
-Tras el stream, en prod `R2 lifecycle 60s` borra solo y en local el API hace `DEL job_id` si aún existe.
+Tras el stream, en prod `R2 lifecycle 60s` borra solo y en local el reaper purga el `Store` a 2xTTL si aún existe.
 El frontend crea `URL.createObjectURL` para descarga y ofrece re-descarga local desde memoria sin volver al servidor.
 
 ### 5.8 Limpieza stateless
 
 Cada worker (local Docker o Modal container) hace `unlink` de `/tmp/{job_id}/*` al terminar, éxito o fallo.
-Local: `Redis EXPIRE 60` automático. Prod: `R2 lifecycle 60s` + `Queue retención 24h` pero `TTL lógico 60s` vía `Durable Object alarm`.
+Local: `Store` TTL 60s (`TtlSecs`) + reaper que purga a 2xTTL automático. Prod: `R2 lifecycle 60s` + `Queue retención 24h` pero `TTL lógico 60s` vía `Durable Object alarm`.
 Logs no contienen bytes de imagen, solo `job_id` y `duration_ms`.
-Verificación TDD: `test_compare_does_not_persist_after_delivery` comprueba `redis.exists == 0` (local) / `R2 exists == 0` (prod adapter) y `tmpfs` vacío tras 65s.
+Verificación TDD Fase 0: `test_job_expires_after_ttl_and_lens_gone` + `test_expired_job_is_purged_after_double_ttl` comprueban `status Expired` y `stored_lens NotFound`, y `test_cleanup_removes_dir` comprueba `tmpfs` vacío. Sin `redis.exists`.
 
 ## 6. Contratos de datos
 

@@ -41,7 +41,7 @@ backend/
 ├── Dockerfile.gpu           # sidecar Python ML (torch/diffusers)
 ├── modal_app.py             # sidecar ML: MediaPipe/FLAME/FreeUV + POST /ml/* (stubs Fase 1, gnm deprecated)
 ├── crates/
-│   ├── api/                 # Seam 1 Axum (AppError 400/404/500, AppState Arc<dyn Queue>) + tests/seam1.rs (8 tests)
+│   ├── api/                 # Seam 1 Axum (AppError 400/404/500, AppState Arc<dyn Queue>) + tests/seam1.rs (11 tests + 2 config)
 │   ├── core/                # assert + error taxonómico + job tipado + ml tipado + queue dual (deep)
 │   └── workers_cpu/         # bake + heatmap infallibles (deep, CPU puro, sin dep image)
 ```
@@ -49,7 +49,12 @@ backend/
 `crates/core` expone `ImageBytes` + `ImageBytesRef`, `JobId`, `JobStatus::as_str`, `Progress::zero`, `Stage`, `TtlSecs`, `Job<State>`, `R2Key` / `R2Keys`, `EnqueueCommand`, `EnqueuedJob`, `Landmarks` 478, `FlawUv` / `CompleteUv` / `Heatmap` (`UV_LEN`), `BaseUrl`, `FlamePayload`, `MlSidecarClient`, `Queue` + `MemoryQueue` + `R2PointerQueue`.
 Ningún otro módulo importa `torch/diffusers/mediapipe`.
 
-## 4. Docker (dev local)
+## 4. Docker (solo dev local, no CI ni prod)
+
+Docker es solo para paridad local.
+No se usa en CI ni en prod.
+Cloudflare (Workers + Pages) y Modal no ejecutan imágenes Docker.
+Modal solo reusa `backend/Dockerfile.gpu` como receta de build vía `modal.Image.from_dockerfile`.
 
 ### 4.1 Full stack local
 
@@ -57,7 +62,7 @@ Ningún otro módulo importa `torch/diffusers/mediapipe`.
 docker compose up --build
 ```
 
-Levanta `api` en 8000, `frontend` en 4321 y `redis` en 6379.
+Levanta `api` en 8000, `ml-sidecar` en 8081 y `frontend` en 4321 (sin `redis`; `Store` en memoria).
 `/tmp` está montado como `tmpfs` para stateless.
 En prod este stack se reemplaza por `Cloudflare Workers + Queues + R2 + Modal`. El trait `vultus-core::Queue` (`MemoryQueue` local / `R2PointerQueue` prod) es idéntico, solo cambia el adapter (`EnqueuedJob::is_r2_pointer()`).
 
@@ -130,8 +135,8 @@ cargo test -p vultus-core job:: -- --nocapture
 cargo test -p vultus-workers-cpu
 ```
 
-36 tests en verde (`8 seam1 + 25 core + 3 workers_cpu`).
-Seam 1 con `axum-test::TestServer` (`202 {job_id, status queued}`, `GET` queued, paridad `R2PointerQueue`, `400` imagen / faltante / uuid, `404` desconocido).
+56 tests en verde (`16 api: 2 config + 11 seam1 + 3 ws, 37 core: 32 unit + 5 edge_parity, 3 workers_cpu`).
+Seam 1 con `axum-test::TestServer` (`202 {job_id, status queued}`, `GET` queued, paridad `R2PointerQueue`, `400` imagen / faltante / uuid, `404` desconocido) más `tests/ws_events.rs` con cliente websocket real (`tokio-tungstenite` contra servidor real en `127.0.0.1:0`: snapshot `queued`, `processing/flame` tras `set_progress`, handshake falla en job desconocido).
 Seam 2 con `MemoryQueue` / `R2PointerQueue` (`stored_lens`, `progress`, `NotFound`).
 Seam 3 con golden `UV_LEN = 786432` (`black_heatmap`, `[10,200] vs [4,210] -> [6,10]`, `wrong_uv_length_rejected_at_parse`) + `Landmarks` 478 rechaza stubs.
 `proptest` para `parse_never_panics`, `Progress`, `TtlSecs 1..=3600`, `R2Key`.
@@ -146,6 +151,8 @@ npm run test:e2e
 ```
 
 Playwright contra `http://localhost:4321` con API real vía `docker compose`.
+`e2e/compare.spec.ts` sube 2 PNG mínimos vía `setInputFiles` y espera `job ... queued`.
+E2E stack en CI: `docker compose up -d` + `bash scripts/smoke-fase0.sh` (health + frontend + `POST 202` + `GET status queued`).
 
 ### 7.3 Stateless check
 
@@ -187,7 +194,7 @@ Abre PR y verifica `docker compose up` + `cargo test` pasan E2E.
 ## 11. Troubleshooting
 
 `cargo build` falla: borra `target/` y reintenta `cargo build`.
-`redis connection refused` (local legacy): el código actual usa `MemoryQueue` / `R2PointerQueue` en memoria, verifica `Store` y `stored_lens`, no Redis.
+`redis connection refused`: doc vieja, ya no aplica. El código usa `MemoryQueue` / `R2PointerQueue` en memoria (`Store`), sin `Redis`. Verifica `stored_lens` y `TtlSecs`.
 `wrangler deploy` falla (prod): verifica `wrangler.toml` bindings de Queues/R2 y `CLOUDFLARE_API_TOKEN`.
 `modal deploy` falla: verifica `modal token` y `modal_app.py` image con `nvidia/cuda:12.2-runtime`.
 `CUDA out of memory` (local o Modal): baja `concurrency_limit` a 1 en `freeuv_worker` / `flame_worker` (`modal_app.py`).

@@ -53,7 +53,7 @@ Convierte UV de topología BFM a UV de GNM sin reentrenar.
 Firma `bake_bfm_to_gnm(&FlawUv) -> CompleteUv` (infallible, copia preserva `UV_LEN`; matriz real precomputada llega en Fase 2).
 
 - **stateless**: propiedad de no persistir nada tras entrega.
-Local: Redis expira a 60s y `/tmp` se limpia. Prod: R2 `lifecycle 60s` + Queues 24h retención (TTL lógico 60s) y `/tmp` tmpfs en Modal.
+Local: `Store` TTL 60s (`TtlSecs`) con reaper que purga a 2xTTL y `/tmp` se limpia. Prod: R2 `lifecycle 60s` + Queues 24h retención (TTL lógico 60s) y `/tmp` tmpfs en Modal.
 
 - **r2key**: clave `R2Key::parse(String)` no vacía, `trim`, max 1024 chars, sin `..` (`InvalidR2Key`).
 Par `R2Keys::new(R2Key, R2Key)` con campos privados y accesores `image_a()` / `image_b()`.
@@ -136,4 +136,4 @@ Ejemplo malo: `test_worker_calls_freeuv`.
 Valor esperado viene de literal golden verificado manualmente, no de recomputar con misma función.
 Golden UV es `vec![fill; UV_LEN]` con cabeza literal (`[10, 200]` vs `[4, 210]` -> `[6, 10]`).
 `proptest` para `parse_never_panics`, rangos `Progress` / `TtlSecs`, `R2Key` trim / `..`, JPEG/PNG con filler.
-Seam 1 tiene 8 tests `axum-test::TestServer` (202 + `status queued`, `GET` queued, `R2PointerQueue` paridad, 400 imagen / faltante / uuid, 404 desconocido, `health`).
+Seam 1 tiene 11 tests `axum-test::TestServer` + 2 config + 3 WS (`tests/ws_events.rs` con `tokio-tungstenite`: snapshot `queued`, `processing/flame` tras `set_progress`, handshake falla en desconocido).

@@ -9,7 +9,7 @@ Usa vocabulario de `codebase-design` para seams y profundidad.
 ## 2. Principios
 
 Stateless por defecto.
-No hay persistencia más allá de 60s (local: Redis `EXPIRE 60`; prod: R2 `lifecycle 60s` + Queues `retención 24h` pero `TTL lógico 60s`).
+No hay persistencia más allá de 60s (local: `Store` TTL 60s + purga a 2xTTL; prod: R2 `lifecycle 60s` + Queues `retención 24h` pero `TTL lógico 60s`).
 Async por queue, no por threads en API.
 Deep modules con interfaces estrechas y lógica profunda dentro.
 Infra: `Cloudflare Pages + Workers + Queues + R2 + Durable Objects` para edge + `Modal` para GPU (ver ADR-004).
@@ -22,7 +22,7 @@ Seam es la frontera pública donde se testean comportamientos sin mirar internos
 
 `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events`, `GET /health`.
 Es la única entrada para el cliente Astro.
-Testeable con `axum-test::TestServer` real sin mocks (8 tests: 202 + `status queued`, `GET` queued, paridad `R2PointerQueue`, 400 imagen / faltante / uuid, 404 desconocido, `health`).
+Testeable con `axum-test::TestServer` real sin mocks (11 tests: 202 + `status queued`, `GET` queued, paridad `R2PointerQueue`, 400 imagen / faltante / uuid / events uuid, 404 desconocido, `health`, expiración `expired`) más 2 tests `config` y WS real con cliente websocket.
 Respuestas tipadas `CompareResponse` / `JobResponse` y errores `AppError -> {400,404,500}` con cuerpo `{"detail":...}`.
 Contrato en `backend/crates/api`.
 
@@ -33,7 +33,7 @@ Contrato abstracto; implementación dual vía `vultus-core::Queue` con `Store` c
 - **Local/dev/test:** `MemoryQueue` (guarda longitudes para probar que los bytes fluyen, `r2_keys None`).
 - **Prod:** `R2PointerQueue` que simula `Cloudflare Queues + R2` (Queues limita a 128KB/mensaje, se encola solo `{job_id, r2_keys jobs/{id}/a|b}` y los bytes viven en R2; consumo vía `HTTP Pull Consumer` desde Modal).
 Testeable con `MemoryQueue` o `R2PointerQueue` sin tocar Cloudflare (`test_r2_pointer_queue_serves_same_seam` prueba paridad).
-No se testea Redis ni Queues interno.
+No se testea Queues/R2 interno de Cloudflare.
 
 ### Seam 3 - Worker Contract
 
@@ -50,10 +50,10 @@ Se cubren indirectamente vía Seam 3.
 ```mermaid
 graph TD
     FE[frontend - Astro islands<br/>shallow, orquesta UI<br/>Cloudflare Pages prod]
-    API[api - FastAPI / Cloudflare Worker<br/>shallow, valida y encola]
-    CORE[core - queue + tmpfs<br/>deep, gestiona ciclo de vida<br/>adapter Redis ARQ / Queues+R2]
+    API[api - Axum / Cloudflare Worker<br/>shallow, valida y encola]
+    CORE[core - queue + tmpfs<br/>deep, gestiona ciclo de vida<br/>adapter MemoryQueue / Queues+R2]
     CFQ[Cloudflare Queues + R2<br/>prod edge]
-    REDIS[Redis ARQ<br/>local dev]
+    LOCAL[Store en memoria<br/>local dev y test]
     MO[Modal GPU containers<br/>prod workers]
     W1[workers/mediapipe<br/>deep, 478 landmarks]
     W2[workers/flame<br/>deep, fitting 3D]
@@ -65,10 +65,10 @@ graph TD
     FE --> API
     API --> CORE
     CORE --> CFQ
-    CORE --> REDIS
+    CORE --> LOCAL
     CORE --> DO
     CFQ --> MO
-    REDIS --> W1 & W2 & W3 & W4
+    LOCAL --> W1 & W2 & W3 & W4
     MO --> W1 & W2 & W3 & W4
     W1 & W2 & W3 & W4 --> MODELS
 ```
@@ -149,7 +149,7 @@ Usar FLAME para extraer `flaw-uv` y GNM solo para render vía bake evita reentre
 ### ADR-003 Stateless sin Postgres ni S3
 
 Elimina coste de storage y simplifica GDPR.
-Local: Redis con `EXPIRE 60` y tmpfs es suficiente para entregar zip en memoria.
+Local: `Store` con `TTL 60` + reaper a 2xTTL y tmpfs es suficiente para el job dummy en memoria (sin `Redis`).
 Prod: R2 con `lifecycle 60s` + Queues `retención 24h` pero TTL lógico 60s vía Durable Object alarm.
 Se pierde cache y re-descarga desde servidor, pero se gana privacidad y simplicidad.
 
@@ -167,9 +167,9 @@ Se pierde cache y re-descarga desde servidor, pero se gana privacidad y simplici
 
 **Consecuencias:**
 - Coste fijo prod: `Cloudflare Workers Paid $5/mes` + `Modal $30/mes free` (~9.300 compares gratis), luego `$0.0032/compare` T4. Queues (`10k ops/día free`), R2 (`10GB free`), Pages free.
-- Queue debe usar patrón `R2 pointer` por límite `128KB` de Queues; `core.queue` abstrae `Redis ARQ` local vs `Queues+R2` prod.
+- Queue debe usar patrón `R2 pointer` por límite `128KB` de Queues; `core.queue` abstrae `MemoryQueue` local vs `Queues+R2` prod (sin `Redis`).
 - Workers GPU despliegan con `modal deploy` y consumen Queues vía `HTTP Pull Consumer` (no binding Worker).
-- `wrangler.toml` versiona edge, `modal_app.py` versiona GPU. Paridad local intacta con `docker compose` + Redis.
+- `wrangler.toml` versiona edge, `modal_app.py` versiona GPU. Paridad local intacta con `docker compose` + `Store` en memoria (sin `Redis`).
 
 ### ADR-005 Híbrido Rust + Python sidecar ML (supera a ADR-001 en API)
 
@@ -198,12 +198,23 @@ Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
 - `MlSidecarClient` devuelve `Landmarks` / `FlawUv` / `CompleteUv`, no `Vec<u8>`.
 - `workers_cpu` es infallible porque la prueba ya ocurrió en el borde.
 
+### ADR-007 Edge GET lee Durable Object (no dummy)
+
+**Decisión:** `GET /v1/jobs/{id}` en edge lee el `ProgressDO` (`GET /status`) como fuente de verdad. Dummy `queued` solo como fallback si el binding DO falta en `wrangler dev`.
+
+**Contexto:** El gateway devolvía `queued` siempre, lo que ocultaba `processing/expired` y devolvía `queued` para jobs desconocidos. Rust en cambio distingue `queued/processing/expired` y `404`.
+
+**Consecuencias:**
+- `POST /v1/compare` hace `/init` en el DO; `GET` hace `/status`; `WS` va al DO directo.
+- DO sin `init` responde `404`, tras `alarm` 2xTTL purga y vuelve a `404`. Paridad con `Store::purge_expired`.
+- `wrangler dev` sin binding sigue con fallback `queued` solo para smoke local, nunca en prod.
+
 ## 7. Data Flow
 
 Imagen entra como `bytes` y nunca toca disco persistente más allá de `tmpfs`/`R2 60s`.
 Prod: `Browser -> R2 PutObject (via Worker presigned) -> Queues {job_id, r2_keys} -> Modal workers leen R2 -> /tmp tmpfs -> R2 result.zip -> Worker StreamingResponse`.
-Local: `Browser -> FastAPI -> Redis ARQ bytes -> workers -> /tmp -> Redis bytes -> StreamingResponse`.
-El bundle final viaja `worker -> R2/Rredis bytes -> API/Worker -> StreamingResponse`.
+Local Fase 0: `Browser -> Axum -> MemoryQueue (stored_lens) -> /tmp tmpfs -> GET status / WS events`. Sin `Redis`.
+El bundle final viajará `worker -> R2 bytes -> API/Worker -> StreamingResponse` en prod (Fase 1+); en Fase 0 local solo hay `stored_lens` en memoria.
 Ningún artefacto se guarda en S3/Postgres persistente. `R2 lifecycle 60s` garantiza olvido.
 
 ## 8. Escalado
@@ -217,17 +228,17 @@ R2 y Queues escalan sin gestión (queues `10k ops/día free`, luego `$0.40/M ops
 ## 9. Observabilidad
 
 `core` emite `duration_ms` por etapa y `vram_mb`.
-`GET /health` verifica `queue ping` (Redis `PING` local / Queues health en prod) y `torch.cuda.is_available` en Modal.
+`GET /health` verifica `queue ping` (`Store` probe `NotFound` local / Queues health en prod) y `torch.cuda.is_available` en Modal.
 En prod: `Cloudflare Analytics + Workers Logs` (3 días free), `Durable Objects` para progress, `Modal logs` para GPU.
 Logs con `job_id` sin bytes.
 Métricas expuestas para `OpenTelemetry`.
 
 ## 10. Testing
 
-Seam 1 con `axum-test::TestServer` real (8 tests).
+Seam 1 con `axum-test::TestServer` real (11 tests) + 2 config.
 Seam 2 con `MemoryQueue` y `R2PointerQueue` (`stored_lens`, `progress`, `unknown is NotFound`).
 Seam 3 con golden `UV_LEN` (`black_heatmap`, `known_diff [6,10]`, `wrong_uv_length_rejected_at_parse`) y `Landmarks` 478.
 `proptest` para `parse_never_panics` y rangos.
 Nada de unit tests a `fit_flame` interno.
-36 tests en verde (`8 seam1 + 25 core + 3 workers_cpu`).
+56 tests en verde (`16 api: 2 config + 11 seam1 + 3 ws, 37 core: 32 unit + 5 edge_parity, 3 workers_cpu`).
 Ver `CONTEXT.md` y `PIPELINE.md` para contratos.

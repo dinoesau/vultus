@@ -32,7 +32,7 @@ Sidecar ML local en `:8081` vía `modal_app.sidecar` (stubs `{"todo":...}` hasta
 docker compose up --build
 ```
 
-Servicios: `api` en 8000, `frontend` Astro en 4321, `redis` en 6379.
+Servicios: `api` en 8000, `ml-sidecar` en 8081, `frontend` Astro en 4321 (sin `redis`; `Store` en memoria).
 Para workers GPU usa `docker compose --profile gpu up`.
 En local/test se usa `MemoryQueue` (`r2_keys None`) y `R2PointerQueue` (`Some jobs/{id}/a|b`) tras el mismo trait `Queue`. En producción se usa `Cloudflare Queues + R2 + Modal` vía el mismo contrato.
 
@@ -73,7 +73,7 @@ vultus/
 │   ├── Cargo.toml             # workspace Rust + anyhow/nutype/proptest
 │   ├── modal_app.py           # sidecar Python ML (MediaPipe/FLAME/FreeUV) + POST /ml/* (stubs Fase 1)
 │   ├── crates/
-│   │   ├── api/               # Seam 1 Axum (AppError, Arc<dyn Queue>, tests/seam1.rs 8 tests)
+│   │   ├── api/               # Seam 1 Axum (AppError, Arc<dyn Queue>, tests/seam1.rs 11 tests + 2 config)
 │   │   ├── core/              # assert + error + job tipado + ml tipado + queue dual (deep)
 │   │   └── workers_cpu/       # bake + heatmap infallibles (deep CPU, sin dep image)
 └── frontend/
@@ -88,7 +88,7 @@ Worker Cloudflare valida y sube a R2, encola puntero en Cloudflare Queues.
 Workers GPU en Modal (`MediaPipe -> FLAME -> FreeUV -> GNM Bake`) consumen vía HTTP Pull Consumer en paralelo por cara.
 Resultado vuelve a R2 con TTL 60s (lifecycle) y se entrega como zip vía `StreamingResponse` desde el Worker.
 Tras 60s todo se borra de R2 + Queues y `/tmp` del contenedor Modal.
-En dev local el flujo es idéntico pero con `Redis ARQ` en vez de `Queues + R2` (adapter).
+En dev local el flujo es idéntico pero con `MemoryQueue` / `R2PointerQueue` en memoria en vez de `Queues + R2` (mismo trait `Queue`, sin `Redis`).
 
 ## Documentación
 
@@ -111,7 +111,7 @@ Ver `ARCHITECTURE.md` para contratos completos.
 
 No hay Postgres ni S3 persistente.
 En prod: todo vive en `R2` 60s (lifecycle) + `Cloudflare Queues` 24h retención + `/tmp` tmpfs en Modal.
-En dev: `Redis 60s` + `tmpfs` para paridad local.
+En dev: `Store` TTL 60s (`TtlSecs`) + reaper que purga a 2xTTL + `tmpfs` para paridad local.
 Logs no contienen bytes de imagen.
 Ver `PIPELINE.md` sección 5.8 y `ARCHITECTURE.md` ADR-004 para verificación.
 
@@ -122,7 +122,7 @@ cd backend
 cargo test
 ```
 
-36 tests en verde (`8 seam1 + 25 core + 3 workers_cpu`).
+56 tests en verde (`16 api: 2 config + 11 seam1 + 3 ws, 37 core: 32 unit + 5 edge_parity, 3 workers_cpu`).
 Tests Seam 1 en `backend/crates/api/tests/seam1.rs` con `axum-test::TestServer` y paridad `MemoryQueue` / `R2PointerQueue`.
 Dominio en `crates/core` con `proptest` + golden `UV_LEN`.
 CPU en `crates/workers_cpu` con golden heatmap.

@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use super::error::{CoreError, Result};
-use super::job::{EnqueueCommand, JobId, JobStatus, Progress, R2Key, R2Keys, Stage, TtlSecs};
+use super::job::{
+    CompareResult, EnqueueCommand, JobId, JobStatus, Progress, R2Key, R2Keys, Stage, TtlSecs,
+};
 use super::tmp::cleanup_job_dir;
 
 /// Contrato Seam 2. Mismo adapter para local (memoria) y prod (Queues+R2), sin Redis.
@@ -19,6 +21,12 @@ pub trait Queue: Send + Sync {
     async fn status(&self, job_id: &JobId) -> Result<JobStatus>;
     async fn progress(&self, job_id: &JobId) -> Result<(Progress, Stage)>;
     async fn set_progress(&self, job_id: &JobId, progress: Progress, stage: Stage) -> Result<()>;
+    /// Guarda el paquete resultado y marca `Done` con progreso 1.0.
+    async fn complete_with_result(&self, job_id: &JobId, result: CompareResult) -> Result<()>;
+    /// Lee el paquete resultado. Falla con `NotFound` si expiro/purgo o no hay resultado.
+    async fn fetch_result(&self, job_id: &JobId) -> Result<CompareResult>;
+    /// Marca `Failed` tras error o timeout total del pipeline.
+    async fn fail_job(&self, job_id: &JobId) -> Result<()>;
     async fn stored_lens(&self, job_id: &JobId) -> Result<(usize, usize)>;
     /// Purga expirados tras 2x TTL y limpia `/tmp/{job_id}` best-effort.
     async fn purge_expired(&self) -> usize;
@@ -130,6 +138,7 @@ struct MemoryEntry {
     stage: Stage,
     image_a_len: usize,
     image_b_len: usize,
+    result: Option<CompareResult>,
     created_at: Instant,
     ttl: TtlSecs,
 }
@@ -182,6 +191,7 @@ impl Store {
                 stage: Stage::Queued,
                 image_a_len,
                 image_b_len,
+                result: None,
                 created_at: self.clock.now(),
                 ttl,
             },
@@ -229,6 +239,41 @@ impl Store {
             return Err(not_found(job_id));
         }
         Ok((e.image_a_len, e.image_b_len))
+    }
+
+    async fn complete_with_result(&self, job_id: &JobId, result: CompareResult) -> Result<()> {
+        let now = self.clock.now();
+        let mut w = self.inner.write().await;
+        let e = w.get_mut(job_id).ok_or_else(|| not_found(job_id))?;
+        if e.is_expired_at(now) {
+            return Err(not_found(job_id));
+        }
+        e.result = Some(result);
+        e.progress = Progress::parse(1.0).map_err(|_| not_found(job_id))?;
+        e.stage = Stage::Done;
+        e.status = JobStatus::Done;
+        Ok(())
+    }
+
+    async fn fetch_result(&self, job_id: &JobId) -> Result<CompareResult> {
+        let now = self.clock.now();
+        let inner = self.inner.read().await;
+        let e = inner.get(job_id).ok_or_else(|| not_found(job_id))?;
+        if e.is_expired_at(now) {
+            return Err(not_found(job_id));
+        }
+        e.result.clone().ok_or_else(|| not_found(job_id))
+    }
+
+    async fn fail_job(&self, job_id: &JobId) -> Result<()> {
+        let now = self.clock.now();
+        let mut w = self.inner.write().await;
+        let e = w.get_mut(job_id).ok_or_else(|| not_found(job_id))?;
+        if e.is_expired_at(now) {
+            return Err(not_found(job_id));
+        }
+        e.status = JobStatus::Failed;
+        Ok(())
     }
 
     /// Purga expirados y limpia `/tmp/{job_id}` best-effort.
@@ -302,6 +347,18 @@ impl Shared {
         self.store.set_progress(job_id, progress, stage).await
     }
 
+    async fn complete_with_result(&self, job_id: &JobId, result: CompareResult) -> Result<()> {
+        self.store.complete_with_result(job_id, result).await
+    }
+
+    async fn fetch_result(&self, job_id: &JobId) -> Result<CompareResult> {
+        self.store.fetch_result(job_id).await
+    }
+
+    async fn fail_job(&self, job_id: &JobId) -> Result<()> {
+        self.store.fail_job(job_id).await
+    }
+
     async fn stored_lens(&self, job_id: &JobId) -> Result<(usize, usize)> {
         self.store.stored_lens(job_id).await
     }
@@ -364,6 +421,18 @@ impl Queue for MemoryQueue {
 
     async fn set_progress(&self, job_id: &JobId, progress: Progress, stage: Stage) -> Result<()> {
         self.shared.set_progress(job_id, progress, stage).await
+    }
+
+    async fn complete_with_result(&self, job_id: &JobId, result: CompareResult) -> Result<()> {
+        self.shared.complete_with_result(job_id, result).await
+    }
+
+    async fn fetch_result(&self, job_id: &JobId) -> Result<CompareResult> {
+        self.shared.fetch_result(job_id).await
+    }
+
+    async fn fail_job(&self, job_id: &JobId) -> Result<()> {
+        self.shared.fail_job(job_id).await
     }
 
     async fn stored_lens(&self, job_id: &JobId) -> Result<(usize, usize)> {
@@ -432,6 +501,18 @@ impl Queue for R2PointerQueue {
 
     async fn set_progress(&self, job_id: &JobId, progress: Progress, stage: Stage) -> Result<()> {
         self.shared.set_progress(job_id, progress, stage).await
+    }
+
+    async fn complete_with_result(&self, job_id: &JobId, result: CompareResult) -> Result<()> {
+        self.shared.complete_with_result(job_id, result).await
+    }
+
+    async fn fetch_result(&self, job_id: &JobId) -> Result<CompareResult> {
+        self.shared.fetch_result(job_id).await
+    }
+
+    async fn fail_job(&self, job_id: &JobId) -> Result<()> {
+        self.shared.fail_job(job_id).await
     }
 
     async fn stored_lens(&self, job_id: &JobId) -> Result<(usize, usize)> {

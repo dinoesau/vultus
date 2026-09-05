@@ -1,0 +1,181 @@
+---
+// Isla presentacional: progreso + visores UV/heatmap + descarga.
+// Sin lógica de red aquí; el wiring vive en el script de index.astro
+// que importa los helpers de compare-client.ts.
+---
+
+<section aria-label="Progreso del análisis" class="panel">
+  <h2>Progreso</h2>
+  <progress
+    id="job-progress"
+    max="100"
+    value="0"
+    aria-label="Progreso del análisis"
+  >
+    0%
+  </progress>
+  <p id="stage-text" role="status">sin job</p>
+</section>
+
+<section aria-label="Visores UV y heatmap" class="panel">
+  <h2>Visores</h2>
+  <div class="viewers">
+    <figure>
+      <figcaption>UV A canónico</figcaption>
+      <img
+        data-testid="panel-uv-a"
+        alt="Mapa UV canónico de la cara A"
+        hidden
+      />
+      <p class="placeholder">pendiente de resultado</p>
+    </figure>
+    <figure>
+      <figcaption>UV B canónico</figcaption>
+      <img
+        data-testid="panel-uv-b"
+        alt="Mapa UV canónico de la cara B"
+        hidden
+      />
+      <p class="placeholder">pendiente de resultado</p>
+    </figure>
+    <figure>
+      <figcaption>Fusión forense</figcaption>
+      {
+        /* Por qué overlay y no solo heatmap suelto: el heatmap |a-b| sin
+           referencia anatómica pierde contexto espacial. Superponerlo sobre
+           UV A con opacidad ajustable conserva ambas lecturas. */
+      }
+      <div class="fusion">
+        <img id="fusion-base" alt="" aria-hidden="true" hidden />
+        <img
+          data-testid="panel-heatmap"
+          alt="Heatmap de diferencias superpuesto sobre UV A"
+          hidden
+        />
+      </div>
+      <p class="placeholder">pendiente de resultado</p>
+    </figure>
+  </div>
+  <label class="opacity" for="heatmap-opacity">
+    Opacidad heatmap
+    <input
+      id="heatmap-opacity"
+      type="range"
+      min="0"
+      max="100"
+      value="65"
+      aria-label="Opacidad del heatmap sobre UV A"
+    />
+    <output id="heatmap-opacity-value" for="heatmap-opacity">65%</output>
+  </label>
+  <p class="download-row">
+    <a id="download-zip" hidden download="">Descargar zip</a>
+  </p>
+  <p id="result-error" role="alert" hidden></p>
+</section>
+
+<style>
+  .panel {
+    background: #fff;
+    border: 1px solid #d7dde5;
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin-top: 1.25rem;
+  }
+  .panel h2 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #8a5a2b;
+    margin: 0 0 0.75rem;
+  }
+  #job-progress {
+    width: 100%;
+    height: 0.9rem;
+    accent-color: #c2410c;
+  }
+  #stage-text {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9rem;
+    background: #14202e;
+    color: #ffd9c2;
+    border-radius: 6px;
+    padding: 0.6rem 0.8rem;
+    min-height: 1.2em;
+  }
+  .viewers {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+  }
+  @media (max-width: 760px) {
+    .viewers {
+      grid-template-columns: 1fr;
+    }
+  }
+  figure {
+    margin: 0;
+    border: 1px solid #d7dde5;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  figcaption {
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.5rem 0.75rem;
+    background: #14202e;
+    color: #f4f6f8;
+  }
+  figure img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: contain;
+    background: #0c141d;
+  }
+  .placeholder {
+    font-size: 0.85rem;
+    color: #6b7684;
+    padding: 0.5rem 0.75rem;
+    margin: 0;
+  }
+  .fusion {
+    position: relative;
+  }
+  .fusion img[data-testid="panel-heatmap"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0.65;
+  }
+  .opacity {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .opacity input[type="range"] {
+    flex: 1;
+    accent-color: #c2410c;
+  }
+  .download-row {
+    margin: 1rem 0 0;
+  }
+  #download-zip {
+    display: inline-block;
+    background: #c2410c;
+    color: #fff;
+    font-weight: 700;
+    text-decoration: none;
+    padding: 0.6rem 1.2rem;
+    border-radius: 8px;
+  }
+  #download-zip[hidden] {
+    display: none;
+  }
+  #result-error {
+    color: #9a1c1c;
+    font-size: 0.9rem;
+  }
+</style>

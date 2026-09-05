@@ -35,6 +35,14 @@ Formato estricto: Given (estado inicial) - When (accion) - Then (resultado obser
 - When `POST /v1/compare` + `GET /v1/jobs/{id}` + uuid roto + desconocido
 - Then `202 queued`, `200 queued` desde el DO, `400` uuid, `404` desconocido (nunca `queued` fantasma en prod)
 
+## Escenarios Fase 1
+
+**E2E-6 Golden pair done + slider + zip**
+
+- Given stack sano con sidecar (`/health` con `sidecar:ok`) y fixtures `frontend/e2e/fixtures/a.png`, `b.png` (PNG 1x1 válidos, par sintético, no forense)
+- When subir el par vía `input[name=image_a|image_b]` + click `Comparar` en `http://localhost:4321` (`npx playwright test e2e/compare.spec.ts`)
+- Then `#status` contiene `done`, 3 paneles `panel-uv-a|panel-uv-b|panel-heatmap` visibles con `src blob:` y `naturalWidth>0`, slider `#heatmap-opacity` en `20` deja output `20%` y overlay `opacity 0.2`, `#download-zip` con `href blob:` y `download result-*.zip`, evento `download` con filename `result-*.zip` y tamaño>0
+
 ## Plantilla para escenarios nuevos
 
 ```text

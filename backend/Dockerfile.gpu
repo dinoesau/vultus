@@ -4,13 +4,27 @@
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /work
-RUN apt-get update && apt-get install -y python3 python3-pip curl && rm -rf /var/lib/apt/lists/*
-COPY modal_app.py ./
+RUN apt-get update && apt-get install -y python3 python3-pip curl libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+# Modal invoca `python` en sus probes: la imagen CUDA solo trae `python3`.
+RUN ln -sf /usr/bin/python3 /usr/bin/python && python --version
 COPY requirements.txt ./
-# Pesos reales en Fase 1: mediapipe, torch, diffusers, 3DDFA_V3/DECA, FreeUV
+# Pesos (nunca en repo ni en imagen): viven en volumen /weights en prod
+# (Modal Volume vultus-weights) y en WEIGHTS_DIR local. Receta versionada:
+#   sdv1-5 trimmed (unet+vae+text_encoder .bin, sin .ckpt/safety_checker/dups)
+#   image_encoder_l trimmed (pytorch_model.bin + tokenizer, sin flax/tf/safetensors)
+#   freeuv-checkpoints (2 .bin), deca (tar+resnet50), flame (Open+pkl+masks+npz),
+#   mediapipe (face_landmarker.task), freeuv-resources (uv.jpg),
+#   deca-code (decalib+data), freeuv-code (detail_encoder+pipeline_sd15).
+# Fase deploy-real-models: torch/diffusers reales pineados arriba; el build
+# instala primero torch cu121 y luego el resto desde PyPI.
+RUN pip3 install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu121
 RUN pip3 install --no-cache-dir -r requirements.txt
-ENV ML_PORT=8081
+# pytorch3d para DECA renderer (wheel oficial py310 cu121 torch 2.4).
+RUN pip3 install --no-cache-dir fvcore iopath && pip3 install --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt241/download.html
+# Codigo al final: los cambios de codigo no invalidan las capas pesadas de pip.
+COPY modal_app.py ./
+ENV ML_PORT=8081 WEIGHTS_DIR=/weights
 EXPOSE 8081
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8081/docs')" || exit 1
-CMD ["sh", "-c", "python3 -c \"import modal_app; import uvicorn; uvicorn.run(modal_app.sidecar, host='0.0.0.0', port=8081)\""]
+  CMD python3 -c "import os,urllib.request; p=os.environ.get('ML_PORT','8081'); urllib.request.urlopen(f'http://localhost:{p}/docs')" || exit 1
+CMD ["sh", "-c", "python3 modal_app.py --serve :${ML_PORT:-8081}"]

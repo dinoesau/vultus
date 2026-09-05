@@ -72,6 +72,50 @@ export default {
       return Response.json({ job_id, status: "queued" }, { status: 202 });
     }
 
+    const resultMatch = pathname.match(/^\/v1\/jobs\/([^/]+)\/result$/);
+    if (resultMatch && req.method === "GET") {
+      const id = resultMatch[1];
+      if (!isUuid(id)) {
+        return Response.json({ detail: "invalid job_id" }, { status: 400 });
+      }
+      // Fuente de verdad: DO /status como en jobStatus. 404 si nunca existio o purgo.
+      // Si no esta done (queued/processing/expired) => 409 para no esperar en vano.
+      // Si done, intenta R2 jobs/{id}/result.zip; si no hay binding (wrangler dev) => 404 trazable.
+      try {
+        const doId = env.VULTUS_PROGRESS.idFromName(id);
+        const stub = env.VULTUS_PROGRESS.get(doId);
+        const res = await stub.fetch(`https://do/status`);
+        if (res.status === 404) {
+          return Response.json({ detail: "not found" }, { status: 404 });
+        }
+        const body = (await res.json()) as { job_id?: unknown; status?: unknown };
+        if (typeof body.status !== "string") {
+          return Response.json({ detail: "not found" }, { status: 404 });
+        }
+        if (body.status !== "done") {
+          return Response.json({ detail: "not done" }, { status: 409 });
+        }
+        try {
+          // R2 directo; si no hay binding (wrangler dev) cae al catch => 404 trazable.
+          const obj = await env.VULTUS_BUCKET.get(`jobs/${id}/result.zip`);
+          if (obj && obj.body) {
+            return new Response(obj.body, {
+              headers: {
+                "Content-Type": "application/zip",
+                "Content-Disposition": `attachment; filename="result-${id}.zip"`,
+              },
+            });
+          }
+          return Response.json({ detail: "not found" }, { status: 404 });
+        } catch {
+          return Response.json({ detail: "not found" }, { status: 404 });
+        }
+      } catch {
+        // `wrangler dev` sin binding DO: fallback trazable para no romper smoke local.
+        return Response.json({ detail: "not found" }, { status: 404 });
+      }
+    }
+
     const jobMatch = pathname.match(/^\/v1\/jobs\/([^/]+)$/);
     if (jobMatch && req.method === "GET") {
       const id = jobMatch[1];

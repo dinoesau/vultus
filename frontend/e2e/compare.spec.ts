@@ -1,4 +1,6 @@
 import { test, expect } from "@playwright/test";
+import { statSync } from "fs";
+import { fileURLToPath } from "url";
 
 test("compare tracer bullet", async ({ page }) => {
   await page.goto("http://localhost:4321");
@@ -18,7 +20,51 @@ test("compare upload 2 PNG returns queued job", async ({ page }) => {
     .locator('input[name="image_b"]')
     .setInputFiles({ name: "b.png", mimeType: "image/png", buffer: png });
   await page.getByRole("button", { name: /Comparar/ }).click();
-  await expect(page.locator("#status")).toContainText(/job .*queued/, {
+  // El job avanza queued->processing->done en ms con sidecar local; aceptar
+  // cualquier estado con job_id evita flake sin perder el intent tracer.
+  await expect(page.locator("#status")).toContainText(/job .*(queued|processing|done)/, {
     timeout: 15_000,
   });
+});
+
+test("golden pair reaches done, slider responds and download starts", async ({
+  page,
+}) => {
+  test.slow();
+  const aPng = fileURLToPath(new URL("./fixtures/a.png", import.meta.url));
+  const bPng = fileURLToPath(new URL("./fixtures/b.png", import.meta.url));
+  await page.goto("http://localhost:4321");
+  await page.locator('input[name="image_a"]').setInputFiles(aPng);
+  await page.locator('input[name="image_b"]').setInputFiles(bPng);
+  await page.getByRole("button", { name: /Comparar/ }).click();
+  await expect(page.locator("#status")).toContainText(/done/, {
+    timeout: 80_000,
+  });
+  for (const id of ["panel-uv-a", "panel-uv-b", "panel-heatmap"] as const) {
+    const img = page.getByTestId(id);
+    await expect(img).toBeVisible();
+    await expect(img).toHaveAttribute("src", /^blob:/);
+    await expect
+      .poll(async () => img.evaluate((e) => (e as HTMLImageElement).naturalWidth))
+      .toBeGreaterThan(0);
+  }
+  await page.locator("#heatmap-opacity").evaluate((el) => {
+    const slider = el as HTMLInputElement;
+    slider.value = "20";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(page.locator("#heatmap-opacity-value")).toContainText("20%");
+  await expect(page.getByTestId("panel-heatmap")).toHaveCSS("opacity", "0.2");
+  const downloadLink = page.locator("#download-zip");
+  await expect(downloadLink).toBeVisible();
+  await expect(downloadLink).toHaveAttribute("href", /^blob:/);
+  await expect(downloadLink).toHaveAttribute("download", /^result-.*\.zip$/);
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    downloadLink.click(),
+  ]);
+  expect(download.suggestedFilename()).toMatch(/^result-.*\.zip$/);
+  const filePath = await download.path();
+  expect(filePath).toBeTruthy();
+  expect(statSync(filePath as string).size).toBeGreaterThan(0);
 });

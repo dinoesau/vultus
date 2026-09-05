@@ -23,6 +23,8 @@ binding = "VULTUS_QUEUE"
 binding = "VULTUS_BUCKET"
 bucket_name = "vultus-jobs"
 preview_bucket_name = "vultus-jobs-preview"
+# Prod real: olvido logico 60s en ProgressDO/Rust; R2 lifecycle `vultus-jobs-1d`
+# (jobs/ expire 1 dia, minimo R2) es solo red de seguridad via CLI.
 
 [[durable_objects.bindings]]
 name = "VULTUS_PROGRESS"

@@ -1,4 +1,6 @@
 ---
+import UvViewers from "../components/UvViewers.astro";
+
 const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 ---
 
@@ -6,16 +8,54 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width" />
-    <title>Vultus - Fase 0</title>
+    <title>Vultus - Comparador forense (Fase 1)</title>
     <style>
-      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
-      form { display: grid; gap: 0.75rem; }
-      #status { white-space: pre-wrap; background: #f5f5f5; padding: 1rem; }
+      :root {
+        color-scheme: light;
+      }
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        max-width: 1080px;
+        margin: 2rem auto;
+        padding: 0 1rem 3rem;
+        background: #eef1f4;
+        color: #14202e;
+      }
+      header p {
+        color: #46536a;
+      }
+      form {
+        display: grid;
+        gap: 0.75rem;
+        background: #fff;
+        border: 1px solid #d7dde5;
+        border-radius: 10px;
+        padding: 1rem 1.25rem;
+      }
+      form button {
+        justify-self: start;
+        background: #14202e;
+        color: #fff;
+        font-weight: 700;
+        border: 0;
+        border-radius: 8px;
+        padding: 0.6rem 1.4rem;
+        cursor: pointer;
+      }
+      #status {
+        white-space: pre-wrap;
+        background: #f5f5f5;
+        padding: 1rem;
+        border: 1px solid #d7dde5;
+        border-radius: 10px;
+      }
     </style>
   </head>
-  <body>
-    <h1>Vultus - Comparador visual (Fase 0)</h1>
-    <p>Sube 2 imágenes JPEG/PNG y sigue el job dummy stateless (TTL 60s).</p>
+  <body data-api-url={apiUrl}>
+    <header>
+      <h1>Vultus - Comparador forense (Fase 1)</h1>
+      <p>Sube 2 imágenes JPEG/PNG y sigue el job stateless (TTL 60s).</p>
+    </header>
     <form id="compare">
       <label>Imagen A <input type="file" name="image_a" accept="image/jpeg,image/png" required /></label>
       <label>Imagen B <input type="file" name="image_b" accept="image/jpeg,image/png" required /></label>
@@ -23,30 +63,240 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
     </form>
     <h2>Estado</h2>
     <div id="status">sin job</div>
-    <script define:vars={{ apiUrl }}>
-      const form = document.getElementById("compare");
-      const statusEl = document.getElementById("status");
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const fd = new FormData(form);
-        statusEl.textContent = "enviando...";
-        const res = await fetch(`${apiUrl}/v1/compare`, { method: "POST", body: fd });
-        const body = await res.json();
-        if (!res.ok) {
-          statusEl.textContent = `error ${res.status}: ${JSON.stringify(body)}`;
+    <UvViewers />
+    <script>
+      import {
+        API_PATHS,
+        extractResultImages,
+        isTerminal,
+        statusMessage,
+        toWsUrl,
+      } from "../components/compare-client.ts";
+
+      const api = document.body.dataset.apiUrl ?? "http://localhost:8000";
+      const form = document.getElementById("compare") as HTMLFormElement;
+      const statusEl = document.getElementById("status") as HTMLElement;
+      const progressEl = document.getElementById("job-progress") as HTMLProgressElement;
+      const stageEl = document.getElementById("stage-text") as HTMLElement;
+      const downloadEl = document.getElementById("download-zip") as HTMLAnchorElement;
+      const errorEl = document.getElementById("result-error") as HTMLElement;
+      const slider = document.getElementById("heatmap-opacity") as HTMLInputElement;
+      const sliderOut = document.getElementById("heatmap-opacity-value") as HTMLOutputElement;
+
+      // Blob URL del zip en memoria: permite re-descarga local sin volver
+      // al servidor (cumple stateless + TTL: tras 60s el servidor olvida).
+      let zipUrl: string | null = null;
+      let imgUrls: string[] = [];
+      let pollTimer: number | null = null;
+      let ws: WebSocket | null = null;
+      let settled = false;
+
+      function setProgress(pct: number): void {
+        progressEl.value = pct;
+        progressEl.textContent = `${pct}%`;
+      }
+
+      function showStage(jobId: string, status: string, stage: string, progress: number): void {
+        const pct = Math.round(progress * 100);
+        stageEl.textContent = `job ${jobId}: ${statusMessage(status, stage, progress, jobId)}`;
+        statusEl.textContent = `job ${jobId}: ${status} ${stage} ${pct}%`;
+        setProgress(pct);
+      }
+
+      function showError(msg: string): void {
+        errorEl.hidden = false;
+        errorEl.textContent = msg;
+      }
+
+      function clearResult(): void {
+        if (zipUrl) URL.revokeObjectURL(zipUrl);
+        for (const u of imgUrls) URL.revokeObjectURL(u);
+        zipUrl = null;
+        imgUrls = [];
+        downloadEl.hidden = true;
+        downloadEl.removeAttribute("href");
+        errorEl.hidden = true;
+        errorEl.textContent = "";
+        for (const img of document.querySelectorAll<HTMLImageElement>(
+          'img[data-testid="panel-uv-a"], img[data-testid="panel-uv-b"], img[data-testid="panel-heatmap"], #fusion-base',
+        )) {
+          img.hidden = true;
+          img.removeAttribute("src");
+        }
+        for (const p of document.querySelectorAll(".placeholder")) {
+          (p as HTMLElement).hidden = false;
+        }
+      }
+
+      function stopLive(): void {
+        settled = true;
+        if (pollTimer !== null) {
+          window.clearInterval(pollTimer);
+          pollTimer = null;
+        }
+        if (ws) {
+          try {
+            ws.close();
+          } catch {
+            // Cierre best-effort: el socket ya puede estar caído.
+          }
+          ws = null;
+        }
+      }
+
+      function setImage(selector: string, blob: Blob): void {
+        const img = document.querySelector<HTMLImageElement>(selector);
+        if (!img) return;
+        const url = URL.createObjectURL(blob);
+        imgUrls.push(url);
+        img.src = url;
+        img.hidden = false;
+        img.closest("figure")?.querySelector(".placeholder")?.setAttribute("hidden", "");
+      }
+
+      async function renderResult(zipBlob: Blob, jobId: string): Promise<void> {
+        zipUrl = URL.createObjectURL(zipBlob);
+        downloadEl.href = zipUrl;
+        downloadEl.download = `result-${jobId}.zip`;
+        downloadEl.textContent = `Descargar zip (result-${jobId}.zip)`;
+        downloadEl.hidden = false;
+        const { uvA, uvB, heat } = await extractResultImages(zipBlob);
+        setImage('[data-testid="panel-uv-a"]', uvA);
+        setImage('[data-testid="panel-uv-b"]', uvB);
+        setImage('[data-testid="panel-heatmap"]', heat);
+        setImage("#fusion-base", uvA);
+        stageEl.textContent = `job ${jobId}: listo. Zip guardado en memoria para re-descarga local.`;
+        statusEl.textContent = `job ${jobId}: done (zip en memoria)`;
+        setProgress(100);
+      }
+
+      // Tolerante a 404 durante processing: el zip solo existe tras done y
+      // el worker puede tardar en exponerlo; reintento acotado, sin colgar la UI.
+      async function fetchResult(jobId: string, attempt = 0): Promise<void> {
+        let res: Response;
+        try {
+          res = await fetch(`${api}${API_PATHS.result(jobId)}`);
+        } catch {
+          showError(`job ${jobId}: sin conexión al descargar el resultado.`);
           return;
         }
-        const { job_id } = body;
-        statusEl.textContent = `job ${job_id} queued...`;
-        const poll = async () => {
-          const r = await fetch(`${apiUrl}/v1/jobs/${job_id}`);
-          const j = await r.json();
-          statusEl.textContent = `job ${job_id}: ${JSON.stringify(j)}`;
-          if (j.status === "queued" || j.status === "processing") {
-            setTimeout(poll, 1000);
+        if (res.status === 404 && attempt < 10) {
+          stageEl.textContent = `job ${jobId}: resultado aún no disponible (404), reintentando...`;
+          window.setTimeout(() => void fetchResult(jobId, attempt + 1), 1000);
+          return;
+        }
+        if (!res.ok) {
+          showError(`job ${jobId}: no se pudo descargar el resultado (HTTP ${res.status}).`);
+          return;
+        }
+        try {
+          await renderResult(await res.blob(), jobId);
+        } catch (err) {
+          showError(`job ${jobId}: zip inválido (${(err as Error).message}).`);
+        }
+      }
+
+      function onEvent(jobId: string, status: string, progress: number, stage: string): void {
+        if (settled) return;
+        showStage(jobId, status, stage, progress);
+        if (!isTerminal(status)) return;
+        stopLive();
+        if (status === "done") void fetchResult(jobId);
+      }
+
+      // Fallback a polling 1s si el WS falla o cierra antes de un estado
+      // terminal. GET status solo da {job_id, status}: sin etapa/progreso.
+      function startPolling(jobId: string): void {
+        if (pollTimer !== null || settled) return;
+        const tick = async () => {
+          let res: Response;
+          try {
+            res = await fetch(`${api}${API_PATHS.job(jobId)}`);
+          } catch {
+            return;
+          }
+          if (res.status === 404) {
+            stopLive();
+            statusEl.textContent = `job ${jobId}: no encontrado (404).`;
+            return;
+          }
+          if (!res.ok) return;
+          const body = (await res.json()) as { status: string };
+          if (body.status === "done") {
+            stopLive();
+            stageEl.textContent = `job ${jobId}: listo. Descargando resultado...`;
+            statusEl.textContent = `job ${jobId}: done`;
+            setProgress(100);
+            void fetchResult(jobId);
+          } else if (isTerminal(body.status)) {
+            onEvent(jobId, body.status, body.status === "failed" ? 0 : 1, "?");
+          } else {
+            statusEl.textContent = `job ${jobId}: ${body.status} (polling, sin WS)...`;
+            stageEl.textContent = `job ${jobId}: ${body.status} (polling, sin WS)...`;
           }
         };
-        poll();
+        pollTimer = window.setInterval(() => void tick(), 1000);
+        void tick();
+      }
+
+      function subscribe(jobId: string): void {
+        let socket: WebSocket;
+        try {
+          socket = new WebSocket(toWsUrl(api, jobId));
+        } catch {
+          startPolling(jobId);
+          return;
+        }
+        ws = socket;
+        socket.addEventListener("message", (ev) => {
+          try {
+            const msg = JSON.parse(ev.data as string) as {
+              job_id: string;
+              status: string;
+              progress: number;
+              stage: string;
+            };
+            onEvent(jobId, msg.status, msg.progress, msg.stage);
+          } catch {
+            // Evento WS malformado: se ignora, el siguiente tick lo corrige.
+          }
+        });
+        const onDrop = () => {
+          if (!settled) startPolling(jobId);
+        };
+        socket.addEventListener("error", onDrop);
+        socket.addEventListener("close", onDrop);
+      }
+
+      slider.addEventListener("input", () => {
+        const overlay = document.querySelector<HTMLImageElement>(
+          'img[data-testid="panel-heatmap"]',
+        );
+        if (overlay) overlay.style.opacity = String(Number(slider.value) / 100);
+        sliderOut.textContent = `${slider.value}%`;
+      });
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        stopLive();
+        settled = false;
+        clearResult();
+        const fd = new FormData(form);
+        statusEl.textContent = "enviando...";
+        stageEl.textContent = "enviando...";
+        setProgress(0);
+        const res = await fetch(`${api}${API_PATHS.compare}`, { method: "POST", body: fd });
+        const body = (await res.json()) as { job_id?: string; detail?: string };
+        if (!res.ok || !body.job_id) {
+          const detail = body.detail ?? JSON.stringify(body);
+          statusEl.textContent = `error ${res.status}: ${detail}`;
+          stageEl.textContent = `error ${res.status}: ${detail}`;
+          return;
+        }
+        const jobId = body.job_id;
+        statusEl.textContent = `job ${jobId} queued...`;
+        stageEl.textContent = `job ${jobId}: en cola...`;
+        subscribe(jobId);
       });
     </script>
   </body>

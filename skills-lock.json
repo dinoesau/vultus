@@ -25,12 +25,6 @@
       "skillPath": "skills/coding-guide/SKILL.md",
       "computedHash": "22fe70b280cfc83e258f4038c812bcbd47433d45c283efe5af1eee406e178813"
     },
-    "error-handling": {
-      "source": "dinoesau/skills",
-      "sourceType": "github",
-      "skillPath": "skills/error-handling/SKILL.md",
-      "computedHash": "15ae203fc4c22d53e82879558a71adb685ff5f4c3a723607aa07964bf3a031b1"
-    },
     "frontend-design": {
       "source": "anthropics/skills",
       "sourceType": "github",
@@ -60,6 +54,12 @@
       "sourceType": "github",
       "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
       "computedHash": "2449db6ab1ded9581f69fcc56c1f64818112d05e271fd4c5da23c6523f9d3d9d"
+    },
+    "rusty": {
+      "source": "dinoesau/skills",
+      "sourceType": "github",
+      "skillPath": "skills/rusty/SKILL.md",
+      "computedHash": "891b27e49bc5584a5fd8e7921153946c60482da015703b7da00e26468c682df2"
     },
     "setup-matt-pocock-skills": {
       "source": "mattpocock/skills",

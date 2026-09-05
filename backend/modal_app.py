@@ -193,12 +193,12 @@ def _landmarker():
             raise RuntimeError(f"mediapipe task missing: {task}")
         try:
             import mediapipe as mp
-            from mediapipe.tasks.python import base_options as mp_base
+            from mediapipe.tasks import python as mp_python
             from mediapipe.tasks.python import vision as mp_vision
         except ImportError as e:
             raise RuntimeError(f"mediapipe package missing: {e}") from e
         opts = mp_vision.FaceLandmarkerOptions(
-            base_options=mp_base.BaseOptions(model_asset_path=task),
+            base_options=mp_python.BaseOptions(model_asset_path=task),
             running_mode=mp_vision.RunningMode.IMAGE,
             num_faces=1,
         )

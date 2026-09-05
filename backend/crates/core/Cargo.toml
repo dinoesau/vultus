@@ -12,6 +12,7 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 nutype = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

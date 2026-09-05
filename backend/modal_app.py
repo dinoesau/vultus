@@ -430,11 +430,9 @@ if HAVE_MODAL:
 
     # Imagen base GPU con torch + diffusers + mediapipe
     # Reusa Dockerfile.gpu local para paridad (contexto backend como compose).
-    image = modal.Image.from_dockerfile(
-        "backend/Dockerfile.gpu", context_dir="backend"
-    ).pip_install(
-        "boto3", "httpx"
-    )  # R2 + Queues HTTP Pull
+    # Sin .pip_install extra: boto3+httpx ya van en requirements.txt y la
+    # imagen CUDA solo expone `python3` (sin `python`).
+    image = modal.Image.from_dockerfile("backend/Dockerfile.gpu", context_dir="backend")
 
     # Volume para cachear pesos FreeUV / FLAME / GNM (evita re-descarga en cold start)
     weights = modal.Volume.from_name("vultus-weights", create_if_missing=True)

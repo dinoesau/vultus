@@ -1,0 +1,13 @@
+# ML sidecar GPU (Python). El binario Rust NO va aquí.
+# Rust llama a este contenedor vía ML_SIDECAR_URL (POST /ml/landmarks|flame|freeuv).
+# Paridad con Modal: misma imagen base que modal_app.py.
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+WORKDIR /work
+RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
+COPY modal_app.py ./
+# Pesos reales en Fase 1: mediapipe, torch, diffusers, 3DDFA_V3/DECA, FreeUV
+RUN pip3 install --no-cache-dir fastapi uvicorn httpx boto3
+ENV ML_PORT=8081
+EXPOSE 8081
+CMD ["sh", "-c", "python3 -c \"import modal_app; import uvicorn; uvicorn.run(modal_app.sidecar, host='0.0.0.0', port=8081)\""]

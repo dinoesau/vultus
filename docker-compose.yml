@@ -24,6 +24,11 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Orquestador Fase 1: corre INLINE en api (tokio::spawn + sidecar
+  # concurrency 1, no negociable por GPU). No hay worker separado para no
+  # duplicar el pipeline. En prod Modal escala 0->10 con el mismo patron
+  # (modal_app.py). GPU local: descomenta el bloque `deploy` de ml-sidecar
+  # y corre `docker compose up --build -d` con un solo comando.
   ml-sidecar:
     build:
       context: ./backend
@@ -34,6 +39,24 @@ services:
       ML_PORT: "8081"
     tmpfs:
       - /tmp
+    # Probe real: /docs responde 200 en FastAPI (verificado). /ml/landmarks
+    # con body vacio da 400, tambien sano; /docs es mas barato y estable.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/docs"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    # GPU con un solo comando (T4): descomentar para `docker compose up`.
+    # Comentado por defecto para que el arranque CPU local siga verde sin
+    # runtime nvidia. FreeUV concurrency=1 por GPU vive en modal_app.py.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     restart: unless-stopped
 
   frontend:

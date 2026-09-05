@@ -1,0 +1,53 @@
+---
+const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Vultus - Fase 0</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+      form { display: grid; gap: 0.75rem; }
+      #status { white-space: pre-wrap; background: #f5f5f5; padding: 1rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Vultus - Comparador visual (Fase 0)</h1>
+    <p>Sube 2 imágenes JPEG/PNG y sigue el job dummy stateless (TTL 60s).</p>
+    <form id="compare">
+      <label>Imagen A <input type="file" name="image_a" accept="image/jpeg,image/png" required /></label>
+      <label>Imagen B <input type="file" name="image_b" accept="image/jpeg,image/png" required /></label>
+      <button type="submit">Comparar</button>
+    </form>
+    <h2>Estado</h2>
+    <div id="status">sin job</div>
+    <script define:vars={{ apiUrl }}>
+      const form = document.getElementById("compare");
+      const statusEl = document.getElementById("status");
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const fd = new FormData(form);
+        statusEl.textContent = "enviando...";
+        const res = await fetch(`${apiUrl}/v1/compare`, { method: "POST", body: fd });
+        const body = await res.json();
+        if (!res.ok) {
+          statusEl.textContent = `error ${res.status}: ${JSON.stringify(body)}`;
+          return;
+        }
+        const { job_id } = body;
+        statusEl.textContent = `job ${job_id} queued...`;
+        const poll = async () => {
+          const r = await fetch(`${apiUrl}/v1/jobs/${job_id}`);
+          const j = await r.json();
+          statusEl.textContent = `job ${job_id}: ${JSON.stringify(j)}`;
+          if (j.status === "queued" || j.status === "processing") {
+            setTimeout(poll, 1000);
+          }
+        };
+        poll();
+      });
+    </script>
+  </body>
+</html>

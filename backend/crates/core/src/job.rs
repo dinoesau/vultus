@@ -201,6 +201,18 @@ impl TtlSecs {
     pub fn default_ttl() -> Self {
         Self::try_from(RESULT_TTL_SECONDS).expect("60 esta en 1..=3600")
     }
+
+    /// Intervalo del reaper stateless: TTL/2, minimo 1s.
+    /// Un solo lugar para el ciclo de vida; `main` y tests lo reusan.
+    pub fn reaper_interval(self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.value().div_ceil(2).max(1))
+    }
+
+    /// Ventana extra para distinguir `Expired` de `NotFound` antes de purgar.
+    /// Espejo de `Store::purge_expired` (2x TTL) y de `ProgressDO` en edge.
+    pub fn purge_after(self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.value().saturating_mul(2))
+    }
 }
 
 impl Default for TtlSecs {
@@ -462,10 +474,7 @@ macro_rules! opaque_uv_bytes {
             pub fn parse(bytes: Vec<u8>) -> Result<Self> {
                 if bytes.len() != UV_LEN {
                     return Err(CoreError::Ml(crate::error::MlError::Decode {
-                        details: format!(
-                            "expected {UV_LEN} uv bytes, got {}",
-                            bytes.len()
-                        ),
+                        details: format!("expected {UV_LEN} uv bytes, got {}", bytes.len()),
                     }));
                 }
                 Ok(Self(bytes))
@@ -545,6 +554,22 @@ mod tests {
         assert_eq!(TtlSecs::default().value(), 60);
         assert!(TtlSecs::parse(0).is_err());
         assert!(TtlSecs::parse(3601).is_err());
+    }
+
+    #[test]
+    fn test_ttl_reaper_is_half_with_floor() {
+        assert_eq!(
+            TtlSecs::parse(60).expect("ttl").reaper_interval(),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            TtlSecs::parse(1).expect("ttl").reaper_interval(),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            TtlSecs::parse(60).expect("ttl").purge_after(),
+            std::time::Duration::from_secs(120)
+        );
     }
 
     fn landmarks_fixture() -> Vec<u8> {

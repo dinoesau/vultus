@@ -97,7 +97,7 @@ Comunicación `REST + WebSocket` contra FastAPI.
 ## 5. Estructura de Proyecto
 
 ```
-facium/
+vultus/
 ├── ROADMAP.md
 ├── CONTEXT.md
 ├── README.md
@@ -158,7 +158,7 @@ Done: `docker compose -f docker-compose.prod.yml up` pasa E2E completo, ningún 
 
 Objetivo: deploy reproducible y observable en Cloudflare + Modal.
 Tasks: `Dockerfile.gpu` final, `tmpfs` para `/tmp` local y en Modal container, CI `buildx + GHCR` para local, `wrangler deploy` para `Cloudflare Pages (Astro) + Workers API + Queues + R2 + Durable Objects`, `modal deploy` para `Workers GPU` (`MediaPipe/FLAME/FreeUV/GNM`) con `HTTP Pull Consumer` desde `Cloudflare Queues`, `R2 lifecycle 60s` + `Queues retención 24h` + `alarm 60s`, observabilidad `Cloudflare Analytics + OpenTelemetry + Grafana + Sentry` para queue lag y VRAM, guardrails de borrado a 24h si se usa TTL extendido, smoke tests contra URL prod.
-Done: `https://facium.com/compare` (Pages + Workers) corre vuelta completa menor a 20s, autoescala GPU en Modal por uso, coste estimado **$5/mes (Cloudflare Workers Paid) + $0 GPU hasta 9.300 compares/mes (Modal $30 free)** y luego `$0.0032` por compare T4.
+Done: `https://vultus.com/compare` (Pages + Workers) corre vuelta completa menor a 20s, autoescala GPU en Modal por uso, coste estimado **$5/mes (Cloudflare Workers Paid) + $0 GPU hasta 9.300 compares/mes (Modal $30 free)** y luego `$0.0032` por compare T4.
 
 ## 7. Deployment - Opciones evaluadas
 

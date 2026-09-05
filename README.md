@@ -61,7 +61,7 @@ Ver `ROADMAP.md` sección 7 y `ARCHITECTURE.md` ADR-004 para el diseño híbrido
 ## Estructura
 
 ```
-facium/
+vultus/
 ├── README.md
 ├── ROADMAP.md
 ├── CONTEXT.md

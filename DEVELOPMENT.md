@@ -65,14 +65,14 @@ docker compose --profile gpu up --build
 ```
 
 Usa `Dockerfile.gpu` con `nvidia/cuda:12.2-runtime`.
-Verifica `docker exec facium-worker-gpu nvidia-smi`.
+Verifica `docker exec vultus-worker-gpu nvidia-smi`.
 En prod los workers GPU corren en `Modal` (`modal deploy backend/modal_app.py`) con `T4 16GB`, `cold start 1-2s`, `$30/mes free`.
 
 ### 4.3 Workers GPU en Modal (prod)
 
 ```bash
 modal deploy backend/modal_app.py   # despliega MediaPipe/FLAME/FreeUV/GNM en Modal
-modal app logs facium-workers        # logs GPU
+modal app logs vultus-workers        # logs GPU
 ```
 
 Modal escala `0 -> 100` GPUs, paga por segundo. Ver `ARCHITECTURE.md` ADR-004.
@@ -153,7 +153,7 @@ Verifica `redis.exists == 0` tras 65s y `tmpfs` vacío.
 Si no tienes GPU local, corre tests de Seam 3 con mocks de boundary.
 Inyecta `uv_client` fake que retorna `GOLDEN_UV` sin cargar `torch`.
 En CI los workers GPU corren solo en runner con GPU o se skippean con `pytest -k "not gpu"`.
-En prod usa `Modal`: `modal run backend/modal_app.py::test_facium --gpu T4` ejecuta FreeUV real sin GPU local y consume tus `$30/mes free` (~50h T4).
+En prod usa `Modal`: `modal run backend/modal_app.py::test_vultus --gpu T4` ejecuta FreeUV real sin GPU local y consume tus `$30/mes free` (~50h T4).
 
 ## 9. Lint y formato
 

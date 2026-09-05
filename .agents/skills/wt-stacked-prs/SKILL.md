@@ -7,7 +7,7 @@ description: >-
   break work into small PRs, or whenever stack PRs have been merged and the
   cycle needs to be closed. It tells you exactly where you are standing: you
   are inside a worktree managed by Worktrunk (wt), a trunk worktree for the
-  default branch (main) already exists at /Users/esau.martinez/Code/facium,
+  default branch (main) already exists at /Users/esau.martinez/Code/vultus,
   and the current worktree already has a gh stack registered. It also documents
   the expected, non-fatal warnings of `gh stack sync --prune` (branches used by
   worktrees) and the required closing sequence: notify the user to run `wtr`
@@ -20,8 +20,8 @@ description: >-
 ## Where you are standing
 
 - You are inside a **git worktree**, not a normal single-checkout repo.
-- This project is a bare repo + worktrees setup: `/Users/esau.martinez/Code/facium/` contains `.bare/` (git metadata), `main/` (trunk worktree) and one folder per active branch (e.g. `feat-resend/`). Before `wt` bare conversion, `/Users/esau.martinez/Code/facium` itself is the trunk checkout on `main`.
-- **A trunk worktree for the default branch already exists**: `/Users/esau.martinez/Code/facium` (or `/Users/esau.martinez/Code/facium/main` after bare conversion) on branch `main`.
+- This project is a bare repo + worktrees setup: `/Users/esau.martinez/Code/vultus/` contains `.bare/` (git metadata), `main/` (trunk worktree) and one folder per active branch (e.g. `feat-resend/`). Before `wt` bare conversion, `/Users/esau.martinez/Code/vultus` itself is the trunk checkout on `main`.
+- **A trunk worktree for the default branch already exists**: `/Users/esau.martinez/Code/vultus` (or `/Users/esau.martinez/Code/vultus/main` after bare conversion) on branch `main`.
 - The current worktree already has a **`gh stack` registered**; stack state lives in the shared git dir (`.bare/gh-stack` or `.git/gh-stack` before conversion).
 - `main` is checked out in its own worktree, so **never** try to `git checkout main`, `git switch main` or `git pull` from the current worktree when in worktree mode.
 - Git will reject those with `fatal: 'main' is already used by worktree` / `cannot force update the branch 'main' used by worktree`. That is expected by design, not something to fix.
@@ -43,10 +43,10 @@ description: >-
 3. The expected warnings look like this:
 
 ```
-⚠ Could not update local main: failed to run git: fatal: cannot force update the branch 'main' used by worktree at '/Users/esau.martinez/Code/facium'
+⚠ Could not update local main: failed to run git: fatal: cannot force update the branch 'main' used by worktree at '/Users/esau.martinez/Code/vultus'
   Rebasing the stack onto origin/main instead; local main is unchanged.
-⚠ Failed to switch from feat/sentry to main: failed to run git: fatal: 'main' is already used by worktree at '/Users/esau.martinez/Code/facium'
-⚠ Failed to delete feat/sentry: failed to run git: error: cannot delete branch 'feat/sentry' used by worktree at '/Users/esau.martinez/Code/facium/feat-sentry'
+⚠ Failed to switch from feat/sentry to main: failed to run git: fatal: 'main' is already used by worktree at '/Users/esau.martinez/Code/vultus'
+⚠ Failed to delete feat/sentry: failed to run git: error: cannot delete branch 'feat/sentry' used by worktree at '/Users/esau.martinez/Code/vultus/feat-sentry'
 ```
 
 4. What each warning means:

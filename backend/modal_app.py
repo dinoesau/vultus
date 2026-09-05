@@ -627,22 +627,10 @@ try:
             timeout=600,  # red amplia: la primera llamada paga cold + carga de pesos
             env={"VULTUS_REAL_ML": "1"},
         )
-        @modal.fastapi_endpoint(method="POST")
-        async def ml_endpoint(request: Request):
-            path = request.url.path
-            body = await request.body()
-            job_id = request.headers.get("X-Job-Id", "unknown")
-            if path.endswith("/landmarks"):
-                return await _run_impl(job_id, "landmarks", _impl_landmarks, body)
-            if path.endswith("/flame"):
-                return await _run_impl(job_id, "flame", _impl_flame, body)
-            if path.endswith("/freeuv"):
-                # En prod Modal ya serializa (1 input por container);
-                # el semáforo local mantiene paridad si el endpoint corre fuera.
-                # En prod delega a freeuv_worker.spawn(job_id, ...) y lee R2.
-                async with _FREEUV_SEMAPHORE:
-                    return await _run_impl(job_id, "freeuv", _impl_freeuv, body)
-            return JSONResponse(status_code=404, content={"detail": "unknown ml route"})
+        @modal.asgi_app()
+        def ml_sidecar_app():
+            # Misma tabla de rutas que el serve local: un solo contrato.
+            return sidecar
 except ImportError:  # Modal image sin fastapi en tests unitarios
     sidecar = None  # type: ignore
 

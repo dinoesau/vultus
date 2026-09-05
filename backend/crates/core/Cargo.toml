@@ -11,3 +11,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+nutype = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

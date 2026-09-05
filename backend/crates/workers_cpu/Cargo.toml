@@ -7,4 +7,3 @@ edition = "2021"
 vultus-core = { path = "../core" }
 serde = { workspace = true }
 thiserror = { workspace = true }
-image = "0.25"

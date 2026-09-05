@@ -4,10 +4,13 @@
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /work
-RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y python3 python3-pip curl && rm -rf /var/lib/apt/lists/*
 COPY modal_app.py ./
+COPY requirements.txt ./
 # Pesos reales en Fase 1: mediapipe, torch, diffusers, 3DDFA_V3/DECA, FreeUV
-RUN pip3 install --no-cache-dir fastapi uvicorn httpx boto3
+RUN pip3 install --no-cache-dir -r requirements.txt
 ENV ML_PORT=8081
 EXPOSE 8081
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8081/docs')" || exit 1
 CMD ["sh", "-c", "python3 -c \"import modal_app; import uvicorn; uvicorn.run(modal_app.sidecar, host='0.0.0.0', port=8081)\""]

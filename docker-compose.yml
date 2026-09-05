@@ -1,0 +1,50 @@
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: "8000"
+      QUEUE_DRIVER: "memory"
+      R2_TTL_SECONDS: "60"
+      RUST_LOG: "info"
+      ML_SIDECAR_URL: "http://ml-sidecar:8081"
+    depends_on:
+      ml-sidecar:
+        condition: service_started
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  ml-sidecar:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.gpu
+    ports:
+      - "8081:8081"
+    environment:
+      ML_PORT: "8081"
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "4321:4321"
+    environment:
+      VITE_API_URL: "http://localhost:8000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

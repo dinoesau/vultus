@@ -5,6 +5,8 @@ name = "vultus-api"
 # main apunta al entry TS; se eliminó `python_workers`.
 main = "edge/worker.ts"
 compatibility_date = "2026-09-03"
+# workers.dev como fallback hasta hardening (Fase 4 apaga con `false`).
+workers_dev = true
 
 # Cloudflare Pages maneja el frontend Astro static; este Worker expone Seam 1
 # POST /v1/compare, GET /v1/jobs/:id, WS /v1/jobs/:id/events, GET /health
@@ -13,12 +15,9 @@ compatibility_date = "2026-09-03"
 queue = "vultus-jobs"
 binding = "VULTUS_QUEUE"
 
-[[queues.consumers]]
-queue = "vultus-jobs"
-max_batch_size = 1
-max_batch_timeout = 5
-# Nota: consumo real GPU vía HTTP Pull Consumer desde Modal (ver backend/modal_app.py)
-# Este consumer es para progress WS via Durable Objects, no para FreeUV
+# Sin [[queues.consumers]]: el consumo GPU es via HTTP Pull Consumer desde
+# Modal (ver backend/modal_app.py), no via binding Worker. Declarar un
+# consumer sin exportar queue() hace que `wrangler dev` descarte mensajes.
 
 [[r2_buckets]]
 binding = "VULTUS_BUCKET"
@@ -36,3 +35,8 @@ new_sqlite_classes = ["ProgressDO"]
 [vars]
 QUEUE_DRIVER = "cloudflare"
 R2_TTL_SECONDS = "60"
+
+# Custom Domain: Cloudflare crea el DNS + certificado solo en `deploy`.
+[[routes]]
+pattern = "api.vultus.esau.com.mx"
+custom_domain = true

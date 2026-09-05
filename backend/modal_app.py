@@ -630,7 +630,7 @@ except ImportError:  # Entorno sin fastapi: solo dobles vía _impl_* (tests unit
 
 if HAVE_MODAL:
 
-    @app.function(
+    @app.cls(
         image=image,
         gpu="T4",
         cpu=4,
@@ -645,12 +645,24 @@ if HAVE_MODAL:
         timeout=600,  # red amplia: la primera llamada paga cold + carga de pesos
         env={"VULTUS_REAL_ML": "1"},
     )
-    @modal.asgi_app()
-    def ml_sidecar_app():
-        # Misma tabla de rutas que el serve local: un solo contrato.
-        # Fuera del try de fastapi: el registro no depende del env local
-        # del CLI (la imagen remota sí trae fastapi vía requirements).
-        return sidecar
+    class MlSidecar:
+        @modal.enter()
+        def warm(self):
+            # Precalienta los tres modelos al arrancar el container para que
+            # el primer request ya este en warm (el timeout Rust de 5s en
+            # landmarks no perdona la carga lazy de TFLite/CUDA).
+            # Sin fastapi aqui: importa pesado lazy igual que en remoto.
+            _landmarker()
+            _deca_model()
+            _freeuv_pipe()
+            logger.info("sidecar warm: mediapipe+deca+freeuv cargados")
+
+        @modal.asgi_app()
+        def app(self):
+            # Misma tabla de rutas que el serve local: un solo contrato.
+            # Fuera del try de fastapi: el registro no depende del env local
+            # del CLI (la imagen remota sí trae fastapi vía requirements).
+            return sidecar
 
 
 def _serve_arg_port(argv) -> int:

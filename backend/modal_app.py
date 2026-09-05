@@ -1,5 +1,5 @@
 """
-Modal GPU workers para Vultus - facium (híbrido Rust + Python).
+Modal GPU workers para Vultus (híbrido Rust + Python).
 
 Arquitectura híbrida (ADR-005):
 - Rust (Axum) es dueño de Seam 1 API + Seam 2 queue + Worker 4 CPU
@@ -14,12 +14,12 @@ contrato /ml/* y el binario Rust lo consume vía ML_SIDECAR_URL.
 
 Starter plan: $30/mes free (~50h T4 = ~9.300 compares). Cold start 1-2s.
 Deploy: modal deploy backend/modal_app.py
-Logs:   modal app logs facium-workers
+Logs:   modal app logs vultus-workers
 """
 
 import modal
 
-app = modal.App("facium-workers")
+app = modal.App("vultus-workers")
 
 # Imagen base GPU con torch + diffusers + mediapipe
 # Reusa Dockerfile.gpu local para paridad
@@ -29,10 +29,10 @@ image = (
 )
 
 # Volume para cachear pesos FreeUV / FLAME / GNM (evita re-descarga en cold start)
-weights = modal.Volume.from_name("facium-weights", create_if_missing=True)
+weights = modal.Volume.from_name("vultus-weights", create_if_missing=True)
 
 # Secrets: Cloudflare R2 + Queues creds
-# modal secret create facium-cloudflare CLOUDFLARE_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
+# modal secret create vultus-cloudflare CLOUDFLARE_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
 
 
 @app.function(
@@ -41,7 +41,7 @@ weights = modal.Volume.from_name("facium-weights", create_if_missing=True)
     cpu=2,
     memory=16384,
     volumes={"/weights": weights},
-    secrets=[modal.Secret.from_name("facium-cloudflare")],
+    secrets=[modal.Secret.from_name("vultus-cloudflare")],
     concurrency_limit=1,  # FreeUV OOM si >1 por GPU
     timeout=60,
     min_containers=0,
@@ -56,9 +56,9 @@ def freeuv_worker(job_id: str, r2_keys: dict):
     """
     # TODO: import models.freeuv, descargar pesos a /weights si no existen
     # r2 = boto3.client("s3", endpoint_url=f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com")
-    # flaw_uv = r2.get_object(Bucket="facium-jobs", Key=r2_keys["flaw_uv"])["Body"].read()
+    # flaw_uv = r2.get_object(Bucket="vultus-jobs", Key=r2_keys["flaw_uv"])["Body"].read()
     # complete_uv = models.freeuv.inpaint(flaw_uv)
-    # r2.put_object(Bucket="facium-jobs", Key=f"{job_id}/uv.png", Body=complete_uv)
+    # r2.put_object(Bucket="vultus-jobs", Key=f"{job_id}/uv.png", Body=complete_uv)
     pass
 
 
@@ -68,7 +68,7 @@ def freeuv_worker(job_id: str, r2_keys: dict):
     cpu=4,
     memory=32768,
     volumes={"/weights": weights},
-    secrets=[modal.Secret.from_name("facium-cloudflare")],
+    secrets=[modal.Secret.from_name("vultus-cloudflare")],
     concurrency_limit=1,
     timeout=60,
 )
@@ -81,7 +81,7 @@ def flame_worker(job_id: str, r2_keys: dict):
     image=image,
     cpu=2,
     memory=4096,
-    secrets=[modal.Secret.from_name("facium-cloudflare")],
+    secrets=[modal.Secret.from_name("vultus-cloudflare")],
     concurrency_limit=4,
     timeout=30,
 )
@@ -94,7 +94,7 @@ def mediapipe_worker(job_id: str, r2_keys: dict):
     image=image,
     cpu=2,
     memory=4096,
-    secrets=[modal.Secret.from_name("facium-cloudflare")],
+    secrets=[modal.Secret.from_name("vultus-cloudflare")],
     timeout=30,
 )
 def gnm_bake_worker(job_id: str, r2_keys: dict):
@@ -110,7 +110,7 @@ def gnm_bake_worker(job_id: str, r2_keys: dict):
     image=image,
     cpu=1,
     memory=1024,
-    secrets=[modal.Secret.from_name("facium-cloudflare")],
+    secrets=[modal.Secret.from_name("vultus-cloudflare")],
     schedule=modal.Period(seconds=5),
 )
 def queue_pull_consumer():

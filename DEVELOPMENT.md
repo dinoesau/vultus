@@ -7,35 +7,40 @@ Instala `Docker` 24+ y `Docker Compose` v2.
 Para GPU instala `nvidia-container-toolkit` y verifica con `nvidia-smi`.
 Node 20+ para frontend Astro.
 
-## 2. Setup con uv
+## 2. Setup híbrido
 
 ```bash
 cd backend
-uv sync --frozen
-uv run pytest
+cargo build
+cargo test
+cargo run -p vultus-api
 ```
 
-`uv sync` crea `.venv` y instala desde `pyproject.toml` y `uv.lock`.
-Nunca uses `pip` directo.
-Para añadir dependencia usa `uv add fastapi` y commitea `pyproject.toml` y `uv.lock`.
+API en `http://localhost:8000` (`/health`, `POST /v1/compare`).
+Sidecar ML local (sin GPU real, stubs hasta Fase 1):
+
+```bash
+pip install fastapi uvicorn
+python3 -c "import sys; sys.path.insert(0,'backend'); import modal_app; import uvicorn; uvicorn.run(modal_app.sidecar, port=8081)"
+```
+
+`ML_SIDECAR_URL=http://localhost:8081` lo consume `MlSidecarClient`.
+Nunca uses `pip` para la API: la API es Rust.
 
 ## 3. Estructura backend
 
 ```
 backend/
-├── pyproject.toml
-├── uv.lock
-├── Dockerfile
-├── Dockerfile.gpu
-├── app/
-│   ├── main.py
-│   ├── api/
-│   ├── workers/
-│   ├── models/
-│   └── core/
-└── tests/
-    ├── api/
-    └── workers/
+├── Cargo.toml               # workspace Rust (api, core, workers_cpu)
+├── Cargo.lock               # versionado para builds reproducibles
+├── Dockerfile               # binario Rust vultus-api
+├── Dockerfile.gpu           # sidecar Python ML (torch/diffusers)
+├── modal_app.py             # sidecar ML: MediaPipe/FLAME/FreeUV + POST /ml/*
+├── crates/
+│   ├── api/                 # Seam 1 Axum (shallow)
+│   ├── core/                # queue trait + MlSidecarClient + tipos (deep)
+│   └── workers_cpu/         # bake + heatmap + report (deep, CPU puro)
+└── tests/                   # Seam 1 en crates/api/tests, Seam 3 golden Fase 1
 ```
 
 `app/models` son adaptadores a `mediapipe`, `torch`, `diffusers`, `gnm`.

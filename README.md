@@ -14,17 +14,17 @@ Necesitas `uv` 0.4+, `Docker` 24+ y `Docker Compose` v2.
 Para workers GPU necesitas `nvidia-container-toolkit`.
 Sin GPU puedes correr solo validación y tests de Seam 1 y 2.
 
-### Backend con uv
+### Backend híbrido (Rust API + Python ML)
 
 ```bash
 cd backend
-uv sync --frozen
-uv run pytest
-uv run fastapi dev app/main.py
+cargo test
+cargo run -p vultus-api
 ```
 
 El API queda en `http://localhost:8000`.
-Docs en `http://localhost:8000/docs`.
+Docs en `http://localhost:8000/docs` (utoipa, Fase 1).
+Sidecar ML local en `:8081` vía `modal_app.sidecar` (stubs hasta Fase 1).
 
 ### Full stack con Docker (dev local)
 
@@ -68,15 +68,14 @@ facium/
 ├── PIPELINE.md
 ├── ARCHITECTURE.md
 ├── DEVELOPMENT.md
-├── wrangler.toml              # Cloudflare Workers + Queues + R2 (prod)
+├── wrangler.toml              # gateway edge fino (prod)
 ├── backend/
-│   ├── pyproject.toml
-│   ├── modal_app.py           # Modal GPU workers (prod)
-│   ├── app/
-│   │   ├── api/
-│   │   ├── core/queue.py      # Adapter Redis ARQ (local) / Cloudflare Queues (prod)
-│   │   └── workers/
-│   └── tests/
+│   ├── Cargo.toml             # workspace Rust
+│   ├── modal_app.py           # sidecar Python ML (MediaPipe/FLAME/FreeUV) + POST /ml/*
+│   ├── crates/
+│   │   ├── api/               # Seam 1 Axum
+│   │   ├── core/              # queue trait + MlSidecarClient (deep)
+│   │   └── workers_cpu/       # bake + heatmap + report (deep CPU)
 └── frontend/
     ├── astro.config.mjs       # -> Cloudflare Pages en prod
     └── src/

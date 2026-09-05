@@ -74,8 +74,8 @@ graph TD
 
 ### 4.1 api
 
-Módulo shallow.
-Valida `multipart`, magic bytes y tamaño.
+Módulo shallow en Rust (`Axum`).
+Valida `multipart`, magic bytes y tamaño vía `ImageBytes::parse`.
 Genera `job_id` y encola.
 Expone `StreamingResponse` y `WS`.
 No contiene lógica de visión.
@@ -91,15 +91,17 @@ Provee `core.queue.enqueue` y `core.queue.result` agnósticos a la infra.
 ### 4.3 workers
 
 Cada worker es módulo deep con una sola responsabilidad.
-Recibe bytes, escribe a `/tmp/{job_id}` en tmpfs, retorna bytes.
+`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/*`.
+`Worker 4 CPU` (`bake`, `heatmap`, `report`) vive en Rust `vultus-workers-cpu`.
+Reciben bytes, escriben a `/tmp/{job_id}` en tmpfs, retornan bytes.
 No conocen HTTP ni frontend.
 
 ### 4.4 models
 
 Adaptadores a librerías externas.
-`models.mediapipe`, `models.flame`, `models.freeuv`, `models.gnm`.
-Aíslan cambios de API de terceros.
-Son los únicos lugares donde se importan `mediapipe`, `torch`, `diffusers`.
+Python: `models.mediapipe`, `models.flame`, `models.freeuv` (torch/diffusers, solo tras sidecar).
+Rust: adaptadores CPU en `vultus-workers-cpu` (`image`, `ndarray`, `printpdf`).
+Son los únicos lugares donde se importan esas libs.
 
 ### 4.5 frontend
 
@@ -162,6 +164,18 @@ Se pierde cache y re-descarga desde servidor, pero se gana privacidad y simplici
 - Queue debe usar patrón `R2 pointer` por límite `128KB` de Queues; `core.queue` abstrae `Redis ARQ` local vs `Queues+R2` prod.
 - Workers GPU despliegan con `modal deploy` y consumen Queues vía `HTTP Pull Consumer` (no binding Worker).
 - `wrangler.toml` versiona edge, `modal_app.py` versiona GPU. Paridad local intacta con `docker compose` + Redis.
+
+### ADR-005 Híbrido Rust + Python sidecar ML (supera a ADR-001 en API)
+
+**Decisión:** `Seam 1 API + Seam 2 queue + Worker 4 CPU` en Rust (`Axum + tokio`, `backend/crates/`). `Worker 1/2/3 ML GPU` se quedan en Python (`backend/modal_app.py`) tras contrato HTTP `POST /ml/landmarks|flame|freeuv` consumido por `MlSidecarClient` en `vultus-core`.
+
+**Contexto:** ADR-001 elegía `ARQ` por ser asyncio nativo. Al mover la API a Rust, `ARQ` (Python-only) y `Modal SDK` (Python-only) no son portables. Reescribir `MediaPipe/FLAME/FreeUV` a `ort/candle/burn` costaría meses y rompería fidelidad forense (golden `sha256(uv)`).
+
+**Consecuencias:**
+- Rust nunca importa `torch/diffusers/mediapipe`. Frontera: bytes por HTTP + `X-Job-Id`.
+- `gnm_bake_worker` Python queda deprecated; `compute_heatmap` + `bake_bfm_to_gnm` viven en `vultus-workers-cpu` con tests `black_heatmap` golden.
+- `wrangler.toml` sin `python_workers`; edge es gateway fino, API pesada en Rust.
+- `Dockerfile` compila binario Rust; `Dockerfile.gpu` solo sidecar Python.
 
 ## 7. Data Flow
 

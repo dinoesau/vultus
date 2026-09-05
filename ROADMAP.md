@@ -61,14 +61,14 @@ Si el usuario cierra la pestaña antes de descargar, el resultado expira y debe 
 
 ## 4. Stack Tecnico
 
-### 4.1 Backend Python
+### 4.1 Backend híbrido Rust + Python ML
 
-Python 3.12 gestionado con `uv`.
-Dependencias declaradas en `pyproject.toml` con `uv.lock` y `uv sync --frozen`.
-Framework `FastAPI + Pydantic` para API.
-Queue `Redis + ARQ` nativo asyncio, más ligero que Celery.
-Validación en bordes con `Result` y `assert_ok` en core.
-Modelos: `MediaPipe Tasks Vision`, `3DDFA_V3 o DECA para FLAME`, `FreeUV`, `GNM Head`.
+Rust gestionado con `cargo` en `backend/` workspace (`api`, `core`, `workers_cpu`).
+Framework `Axum + tokio + serde + utoipa` para Seam 1.
+Queue con trait `Queue` en `vultus-core` (`MemoryQueue` en tests, `Redis` local, `Queues+R2` prod).
+Validación en bordes con `ImageBytes::parse`/`JobId`/`Progress` y `assert_ok` en core.
+CPU: `vultus-workers-cpu` (`compute_heatmap`, `bake_bfm_to_gnm`).
+ML GPU: sidecar Python en `backend/modal_app.py` (`MediaPipe Tasks Vision`, `3DDFA_V3 o DECA para FLAME`, `FreeUV`, `GNM Head`) tras `POST /ml/*`, consumido por `MlSidecarClient`. Rust nunca importa `torch`.
 
 ### 4.2 Frontend
 

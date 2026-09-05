@@ -429,8 +429,10 @@ if HAVE_MODAL:
     app = modal.App("vultus-workers")
 
     # Imagen base GPU con torch + diffusers + mediapipe
-    # Reusa Dockerfile.gpu local para paridad
-    image = modal.Image.from_dockerfile("backend/Dockerfile.gpu").pip_install(
+    # Reusa Dockerfile.gpu local para paridad (contexto backend como compose).
+    image = modal.Image.from_dockerfile(
+        "backend/Dockerfile.gpu", context_dir="backend"
+    ).pip_install(
         "boto3", "httpx"
     )  # R2 + Queues HTTP Pull
 

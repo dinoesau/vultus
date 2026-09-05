@@ -14,7 +14,7 @@ En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` vÃ
 graph TD
     A[Cliente Astro - Cloudflare Pages Upload 2 jpgs] --> B[Cloudflare Worker POST /v1/compare]
     B --> C{Validacion + R2 PutObject}
-    C -->|ok| D[Enqueue {job_id, r2_keys} a Cloudflare Queues]
+    C -->|ok| D["Enqueue {job_id, r2_keys} a Cloudflare Queues"]
     C -->|fail| E[400 Bad Request]
     D --> F[Modal Worker 1 - MediaPipe 478 landmarks CPU]
     F --> G[Modal Worker 2 - FLAME Fitting GPU]
@@ -35,12 +35,12 @@ Esta secciÃ³n muestra como se encadenan los 4 modelos y que dato produce cada un
 
 ```mermaid
 graph LR
-    I[Imagen 512x512] --> M[MediaPipe<br/>Tasks Vision<br/>CPU 25ms]
-    M -->|478 landmarks 3D| F[FLAME Fitting<br/>3DDFA_V3 / DECA<br/>GPU 300ms]
-    F -->|mesh 5023 verts<br/>+ flaw-uv 512| U[FreeUV<br/>SD1.5 + CLIP<br/>GPU 10s]
-    U -->|complete-uv 512| G[GNM Bake<br/>BFM->GNM<br/>CPU 150ms]
-    G -->|mesh GNM 10k verts<br/>+ textura horneada| H[Heatmap + Report<br/>CPU 200ms]
-    H --> O[Salida: uv_a, uv_b, heatmap, mesh.glb, report.pdf]
+    I["Imagen 512x512"] --> M["MediaPipe<br/>Tasks Vision<br/>CPU 25ms"]
+    M -->|"478 landmarks 3D"| F["FLAME Fitting<br/>3DDFA_V3 / DECA<br/>GPU 300ms"]
+    F -->|"mesh 5023 verts + flaw-uv 512"| U["FreeUV<br/>SD1.5 + CLIP<br/>GPU 10s"]
+    U -->|"complete-uv 512"| G["GNM Bake<br/>BFM->GNM<br/>CPU 150ms"]
+    G -->|"mesh GNM 10k verts + textura horneada"| H["Heatmap + Report<br/>CPU 200ms"]
+    H --> O["Salida: uv_a, uv_b, heatmap, mesh.glb, report.pdf"]
 
     style M fill:#e3f2fd
     style F fill:#fff3e0

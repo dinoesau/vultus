@@ -503,6 +503,43 @@ opaque_uv_bytes!(FlawUv);
 opaque_uv_bytes!(CompleteUv);
 opaque_uv_bytes!(Heatmap);
 
+/// Paquete resultado efimero del par: dos UV canonicas + heatmap.
+/// Vive en `job.rs` (no en `pipeline.rs`) para que `queue` lo almacene
+/// sin dependencia circular `queue <-> pipeline`.
+/// Campos privados: solo construible via `new` con tipos ya probados.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompareResult {
+    uv_a: CompleteUv,
+    uv_b: CompleteUv,
+    heatmap: Heatmap,
+}
+
+impl CompareResult {
+    pub fn new(uv_a: CompleteUv, uv_b: CompleteUv, heatmap: Heatmap) -> Self {
+        Self {
+            uv_a,
+            uv_b,
+            heatmap,
+        }
+    }
+
+    pub fn uv_a(&self) -> &CompleteUv {
+        &self.uv_a
+    }
+
+    pub fn uv_b(&self) -> &CompleteUv {
+        &self.uv_b
+    }
+
+    pub fn heatmap(&self) -> &Heatmap {
+        &self.heatmap
+    }
+
+    pub fn into_parts(self) -> (CompleteUv, CompleteUv, Heatmap) {
+        (self.uv_a, self.uv_b, self.heatmap)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -22,23 +22,24 @@ Seam es la frontera pública donde se testean comportamientos sin mirar internos
 
 `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events`, `GET /health`.
 Es la única entrada para el cliente Astro.
-Testeable con `httpx.AsyncClient` real sin mocks.
-Contrato OpenAPI en `backend/app/api`.
+Testeable con `axum-test::TestServer` real sin mocks (8 tests: 202 + `status queued`, `GET` queued, paridad `R2PointerQueue`, 400 imagen / faltante / uuid, 404 desconocido, `health`).
+Respuestas tipadas `CompareResponse` / `JobResponse` y errores `AppError -> {400,404,500}` con cuerpo `{"detail":...}`.
+Contrato en `backend/crates/api`.
 
 ### Seam 2 - Queue Contract
 
-`enqueue(job_id, image_a, image_b)` y `consume -> progress`.
-Contrato abstracto; implementación dual vía adapter `core.queue`:
-- **Local/dev/test:** `Redis + ARQ` (con `fakeredis` en tests).
-- **Prod:** `Cloudflare Queues + R2` (Queues limita a 128KB/mensaje, se encola solo `{job_id, r2_keys}` y los bytes viven en R2; consumo vía `HTTP Pull Consumer` desde Modal).
-Testeable con `fakeredis` o Redis de test en Docker sin tocar Cloudflare.
+`enqueue(EnqueueCommand) -> EnqueuedJob`, `status`, `progress -> (Progress, Stage)`, `set_progress(Progress, Stage)`, `stored_lens -> (usize, usize)`.
+Contrato abstracto; implementación dual vía `vultus-core::Queue` con `Store` compartido (`HashMap<JobId, MemoryEntry>`):
+- **Local/dev/test:** `MemoryQueue` (guarda longitudes para probar que los bytes fluyen, `r2_keys None`).
+- **Prod:** `R2PointerQueue` que simula `Cloudflare Queues + R2` (Queues limita a 128KB/mensaje, se encola solo `{job_id, r2_keys jobs/{id}/a|b}` y los bytes viven en R2; consumo vía `HTTP Pull Consumer` desde Modal).
+Testeable con `MemoryQueue` o `R2PointerQueue` sin tocar Cloudflare (`test_r2_pointer_queue_serves_same_seam` prueba paridad).
 No se testea Redis ni Queues interno.
 
 ### Seam 3 - Worker Contract
 
-`image bytes -> {uv_a, uv_b, heatmap, mesh, report}`.
+`&ImageBytes -> Landmarks (478 JSON) -> FlawUv (UV_LEN) -> CompleteUv (UV_LEN) -> Heatmap (UV_LEN)` vía `MlSidecarClient { landmarks, flame, freeuv }` + `BaseUrl` + `FlamePayload (u32 BE len + landmarks_json + image_bytes)`.
 Cada worker es caja negra.
-Input imagen golden, output bytes verificables.
+Input imagen golden (`ImageBytes::parse`), output `UV_LEN = 512x512x3 = 786432` verificable.
 No se mockean `MediaPipe` ni `FreeUV` entre sí.
 
 No son seams: `fit_flame`, `bake_bfm_to_gnm`, `project_uv`, `compute_heatmap`.
@@ -75,33 +76,37 @@ graph TD
 ### 4.1 api
 
 Módulo shallow en Rust (`Axum`).
-Valida `multipart`, magic bytes y tamaño vía `ImageBytes::parse`.
-Genera `job_id` y encola.
-Expone `StreamingResponse` y `WS`.
+Valida `multipart`, magic bytes y tamaño vía `ImageBytes::parse` y construye `EnqueueCommand::new(a, b)`.
+`AppState(Arc<dyn Queue>)` genérico vía `AppState::new(impl Queue)` para paridad `MemoryQueue` / `R2PointerQueue`.
+Errores `AppError::{BadRequest, Domain(CoreError)}` mapean a `400` (validación + `Empty`), `404` (`NotFound`), `500` (`Queue | Ml | Invariant` con `detail internal error`).
+`main` retorna `anyhow::Result` con `context` en `bind :8000` y `serve`.
+Expone `CompareResponse{job_id, status:"queued"}` (`202`), `JobResponse{job_id, status: JobStatus::as_str}` (`200`) y `WS`.
 No contiene lógica de visión.
 
 ### 4.2 core
 
 Módulo deep.
-Gestiona pool de queue, `TTL 60`, `tmpfs` lifecycle y `progress` events.
-Esconde detalles de `Redis ARQ` (local) y `Cloudflare Queues + R2 + Durable Objects` (prod) tras el mismo adapter.
+Gestiona `Store` compartido, `TTL 60` (`TtlSecs` nutype `1..=3600`), ciclo tipado `Job<Queued|Processing|Done|Failed|Expired>`, `tmpfs` lifecycle y `progress` events.
+Esconde detalles de `MemoryQueue` (local) y `R2PointerQueue` (prod `Queues+R2`) tras el mismo trait `Queue`.
+Tipos `ImageBytes` + `ImageBytesRef` zero-cost, `R2Key` / `R2Keys` privados, `EnqueuedJob` con `is_r2_pointer()`, `Stage` enum (prohibido `&str`), `Progress::zero()`, `Landmarks` 478 JSON, `FlawUv` / `CompleteUv` / `Heatmap` con `UV_LEN`, `BaseUrl`, `FlamePayload`, `CoreError` taxonómico (`Image | JobId | Progress | R2Key | BaseUrl | Empty | Queue | Ml | NotFound | Invariant`).
 Patrón `R2 pointer`: en prod sube bytes a `R2` y encola solo `r2_keys` (Queues <128KB).
-Provee `core.queue.enqueue` y `core.queue.result` agnósticos a la infra.
+Provee `Queue::{enqueue, status, progress, set_progress, stored_lens}` agnósticos a la infra.
+Deps nuevas del workspace: `anyhow`, `nutype`, `proptest` (dev).
 
 ### 4.3 workers
 
 Cada worker es módulo deep con una sola responsabilidad.
-`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/*`.
-`Worker 4 CPU` (`bake`, `heatmap`, `report`) vive en Rust `vultus-workers-cpu`.
-Reciben bytes, escriben a `/tmp/{job_id}` en tmpfs, retornan bytes.
+`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|flame|freeuv` consumido por `MlSidecarClient::new(BaseUrl)` con firmas tipadas (`-> Landmarks`, `-> FlawUv`, `-> CompleteUv`) y errores `Ml::{Transport, BadStatus, Decode, Empty}`.
+`Worker 4 CPU` (`bake`, `heatmap`, `report`) vive en Rust `vultus-workers-cpu` con firmas infallibles `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` y `bake_bfm_to_gnm(&FlawUv) -> CompleteUv` (sin dep `image`).
+Reciben tipos ya probados, escriben a `/tmp/{job_id}` en tmpfs, retornan tipos con `UV_LEN`.
 No conocen HTTP ni frontend.
 
 ### 4.4 models
 
 Adaptadores a librerías externas.
-Python: `models.mediapipe`, `models.flame`, `models.freeuv` (torch/diffusers, solo tras sidecar).
-Rust: adaptadores CPU en `vultus-workers-cpu` (`image`, `ndarray`, `printpdf`).
-Son los únicos lugares donde se importan esas libs.
+Python: sidecar `backend/modal_app.py` (`/ml/landmarks|flame|freeuv`, stubs `{"todo":...}` hasta Fase 1, `gnm_bake_worker` deprecated a `NotImplementedError`).
+Rust: CPU puro en `vultus-workers-cpu` (`compute_heatmap`, `bake_bfm_to_gnm`, sin `torch/diffusers/mediapipe/image`).
+Son los únicos lugares donde viven esas dependencias.
 
 ### 4.5 frontend
 
@@ -128,11 +133,12 @@ Esto permite testear `workers` sin levantar `FastAPI`.
 
 ## 6. Decisiones
 
-### ADR-001 ARQ sobre Celery
+### ADR-001 ARQ sobre Celery (histórico, superado por ADR-005)
 
-ARQ es nativo asyncio y no requiere `billiard` ni `kombu`.
-Menor footprint y mejor integración con `FastAPI`.
-Celery es más maduro pero más pesado para un pipeline corto con TTL.
+ARQ era nativo asyncio y no requería `billiard` ni `kombu`.
+Al mover la API a Rust, `ARQ` (Python-only) dejó de aplicar.
+El contrato actual es trait `Queue` con `MemoryQueue` / `R2PointerQueue` + `Store`, sin Redis ni Celery en código.
+Se conserva por contexto, no como decisión vigente.
 
 ### ADR-002 FLAME para extracción, GNM para render
 
@@ -172,10 +178,25 @@ Se pierde cache y re-descarga desde servidor, pero se gana privacidad y simplici
 **Contexto:** ADR-001 elegía `ARQ` por ser asyncio nativo. Al mover la API a Rust, `ARQ` (Python-only) y `Modal SDK` (Python-only) no son portables. Reescribir `MediaPipe/FLAME/FreeUV` a `ort/candle/burn` costaría meses y rompería fidelidad forense (golden `sha256(uv)`).
 
 **Consecuencias:**
-- Rust nunca importa `torch/diffusers/mediapipe`. Frontera: bytes por HTTP + `X-Job-Id`.
-- `gnm_bake_worker` Python queda deprecated; `compute_heatmap` + `bake_bfm_to_gnm` viven en `vultus-workers-cpu` con tests `black_heatmap` golden.
+- Rust nunca importa `torch/diffusers/mediapipe`. Frontera: tipos probados por HTTP + `X-Job-Id` vía `BaseUrl::join` y `FlamePayload`.
+- `gnm_bake_worker` Python queda deprecated (`NotImplementedError`); `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` + `bake_bfm_to_gnm(&FlawUv) -> CompleteUv` viven en `vultus-workers-cpu` (infallibles, tests `black_heatmap` con `UV_LEN`) sin dep `image`.
 - `wrangler.toml` sin `python_workers`; edge es gateway fino, API pesada en Rust.
 - `Dockerfile` compila binario Rust; `Dockerfile.gpu` solo sidecar Python.
+
+### ADR-006 Parse-don-t-validate con typestate + proptest
+
+**Decisión:** Dominio con tipos opacos que prueban en `parse` (`ImageBytes` + `ImageBytesRef` zero-cost, `JobId` trim, `R2Key`, `Landmarks` 478 JSON, `FlawUv` / `CompleteUv` / `Heatmap` con `UV_LEN`, `BaseUrl`, `TtlSecs` nutype) y ciclo `Job<State>` con moves.
+Errores taxonómicos `CoreError` (+ `ImageError`, `BaseUrlError`, `MlError`, `QueueError`) con mapeo fijo `AppError -> 400|404|500`.
+Propiedades con `proptest` (`parse_never_panics`, rangos, `R2Key`), golden literales para heatmap.
+
+**Contexto:** El diff mostraba `Vec<u8>` y `&str` sueltos cruzando seams (`enqueue(a,b)`, `stage: &str`, `job.status String`, `base_url String`).
+Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
+
+**Consecuencias:**
+- `Queue` recibe `EnqueueCommand`, no bytes sueltos; `set_progress` exige `Stage`, no `&str`.
+- `EnqueuedJob` / `R2Keys` con campos privados y `is_r2_pointer()`.
+- `MlSidecarClient` devuelve `Landmarks` / `FlawUv` / `CompleteUv`, no `Vec<u8>`.
+- `workers_cpu` es infallible porque la prueba ya ocurrió en el borde.
 
 ## 7. Data Flow
 
@@ -203,8 +224,10 @@ Métricas expuestas para `OpenTelemetry`.
 
 ## 10. Testing
 
-Seam 1 con `httpx` real.
-Seam 2 con `fakeredis`.
-Seam 3 con golden images y `assert sha256(uv) == GOLDEN_HASH`.
+Seam 1 con `axum-test::TestServer` real (8 tests).
+Seam 2 con `MemoryQueue` y `R2PointerQueue` (`stored_lens`, `progress`, `unknown is NotFound`).
+Seam 3 con golden `UV_LEN` (`black_heatmap`, `known_diff [6,10]`, `wrong_uv_length_rejected_at_parse`) y `Landmarks` 478.
+`proptest` para `parse_never_panics` y rangos.
 Nada de unit tests a `fit_flame` interno.
+36 tests en verde (`8 seam1 + 25 core + 3 workers_cpu`).
 Ver `CONTEXT.md` y `PIPELINE.md` para contratos.

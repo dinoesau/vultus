@@ -63,12 +63,12 @@ Si el usuario cierra la pestaña antes de descargar, el resultado expira y debe 
 
 ### 4.1 Backend híbrido Rust + Python ML
 
-Rust gestionado con `cargo` en `backend/` workspace (`api`, `core`, `workers_cpu`).
-Framework `Axum + tokio + serde + utoipa` para Seam 1.
-Queue con trait `Queue` en `vultus-core` (`MemoryQueue` en tests, `Redis` local, `Queues+R2` prod).
-Validación en bordes con `ImageBytes::parse`/`JobId`/`Progress` y `assert_ok` en core.
-CPU: `vultus-workers-cpu` (`compute_heatmap`, `bake_bfm_to_gnm`).
-ML GPU: sidecar Python en `backend/modal_app.py` (`MediaPipe Tasks Vision`, `3DDFA_V3 o DECA para FLAME`, `FreeUV`, `GNM Head`) tras `POST /ml/*`, consumido por `MlSidecarClient`. Rust nunca importa `torch`.
+Rust gestionado con `cargo` en `backend/` workspace (`api`, `core`, `workers_cpu` + `anyhow`, `nutype`, `proptest` dev).
+Framework `Axum + tokio + serde + utoipa` para Seam 1 (`AppError 400/404/500`, `AppState(Arc<dyn Queue>)`, `CompareResponse` / `JobResponse`, `main -> anyhow::Result`).
+Queue con trait `Queue` en `vultus-core` (`MemoryQueue` local/test con `stored_lens`, `R2PointerQueue` prod con `Some(R2Keys)`, `Store` compartido, `EnqueueCommand`, `Stage` enum, `progress` / `set_progress`).
+Validación en bordes con `ImageBytes::parse` + `ImageBytesRef` zero-cost, `JobId::parse(trim)`, `Progress::parse` + `zero`, `R2Key` / `R2Keys` privados, `TtlSecs` nutype `1..=3600` default 60, `Job<State>` typestate, `assert_ok` para invariantes (500).
+CPU: `vultus-workers-cpu` infallible (`compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap`, `bake_bfm_to_gnm(&FlawUv) -> CompleteUv`, sin dep `image`, `UV_LEN = 786432`).
+ML GPU: sidecar Python en `backend/modal_app.py` (`MediaPipe Tasks Vision`, `3DDFA_V3 o DECA para FLAME`, `FreeUV`, `GNM Head`, stubs `{"todo":...}` hasta Fase 1, `gnm_bake_worker` deprecated) tras `POST /ml/landmarks|flame|freeuv`, consumido por `MlSidecarClient::new(BaseUrl)` tipado (`-> Landmarks 478 JSON`, `-> FlawUv`, `-> CompleteUv` vía `FlamePayload u32 BE`). Rust nunca importa `torch`.
 
 ### 4.2 Frontend
 
@@ -103,19 +103,15 @@ vultus/
 ├── README.md
 ├── wrangler.toml              # Cloudflare Workers + Queues + R2 + Durable Objects (prod)
 ├── backend/
-│   ├── pyproject.toml
-│   ├── uv.lock
-│   ├── modal_app.py           # Modal GPU workers: MediaPipe/FLAME/FreeUV/GNM (prod)
+│   ├── Cargo.toml             # workspace Rust + anyhow/nutype/proptest
+│   ├── Cargo.lock
+│   ├── modal_app.py           # Modal GPU workers: MediaPipe/FLAME/FreeUV (prod, stubs Fase 1, gnm deprecated) + sidecar /ml/*
 │   ├── Dockerfile
 │   ├── Dockerfile.gpu
-│   ├── app/
-│   │   ├── api/
-│   │   ├── workers/
-│   │   ├── models/
-│   │   └── core/queue.py      # Adapter: Redis ARQ (local/test) <-> Cloudflare Queues+R2 (prod)
-│   └── tests/
-│       ├── api/
-│       └── workers/
+│   ├── crates/
+│   │   ├── api/               # Seam 1 Axum + tests/seam1.rs (8 tests TestServer)
+│   │   ├── core/              # assert + error + job + ml + queue (MemoryQueue + R2PointerQueue + Store)
+│   │   └── workers_cpu/       # bake + heatmap infallibles (UV_LEN)
 └── frontend/
     ├── astro.config.mjs       # -> Cloudflare Pages en prod
     ├── src/
@@ -126,9 +122,9 @@ vultus/
 
 ### Fase 0 - Infra base (1 semana)
 
-Objetivo: `uv + Docker + Async` corriendo end-to-end con job dummy stateless con paridad Cloudflare.
-Tasks: crear `pyproject.toml` con `uv`, `Dockerfile` multi-stage, `docker-compose.yml` con `api/redis/frontend` para dev local, configurar `core.queue` adapter `Redis ARQ` (local) / `Cloudflare Queues + R2` (prod) con `POST /v1/jobs` y `GET /v1/jobs/{id}` y `WS /v1/jobs/{id}/events` vía Durable Objects, implementar `wrangler.toml` y healthchecks.
-Done: `uv run pytest` pasa, `docker compose up` levanta todo en local, `wrangler dev` levanta edge, un job fake se encola (Redis local o Queues en prod), es consumido por worker (local o Modal), retorna bytes a Redis/R2 y expira a los 60s sin dejar archivos en `/tmp`.
+Objetivo: `cargo + Docker + Async` corriendo end-to-end con job dummy stateless con paridad Cloudflare.
+Tasks: crear `Cargo.toml` workspace con `anyhow/nutype/proptest`, `Dockerfile` multi-stage, `docker-compose.yml` con `api/redis/frontend` para dev local, configurar trait `Queue` (`MemoryQueue` local/test + `R2PointerQueue` prod) con `POST /v1/compare` (`202 {job_id, status queued}`) y `GET /v1/jobs/{id}` (`200 {job_id, status}`) y `WS /v1/jobs/{id}/events` vía Durable Objects, implementar `wrangler.toml` y healthchecks.
+Done: `cargo test` pasa (36 tests: 8 seam1 + 25 core + 3 workers_cpu), `docker compose up` levanta todo en local, `wrangler dev` levanta edge, un job fake se encola (`MemoryQueue` local o `R2PointerQueue` en prod con `Some(R2Keys)`), es consumido, retorna longitudes vía `stored_lens` y expira a los 60s (`TtlSecs`) sin dejar archivos en `/tmp`.
 
 ### Fase 1 - MVP UV canónico (3 semanas)
 
@@ -185,10 +181,14 @@ El principio stateless + R2 lifecycle hace que cualquier opción sea más barata
 
 ### 8.1 Seams acordados
 
-Seam 1 HTTP API: `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events`.
-Seam 2 Queue Contract: `enqueue -> job_id` y `worker consume -> progress`.
-Seam 3 Worker Contract: `image bytes -> {uv bytes, mesh bytes, landmarks}`.
-No son seams: `fit_flame`, `bake_bfm_to_gnm`, `project_uv`.
+Seam 1 HTTP API: `POST /v1/compare` (`202 {job_id, status queued}`), `GET /v1/jobs/{id}` (`200 {job_id, status}`, `400` uuid, `404` desconocido), `WS /v1/jobs/{id}/events`.
+`AppState(Arc<dyn Queue>)`, `AppError -> 400|404|500 {"detail":...}`, 8 tests `TestServer`.
+Seam 2 Queue Contract: `enqueue(EnqueueCommand) -> EnqueuedJob`, `status`, `progress -> (Progress, Stage)`, `set_progress(Progress, Stage)`, `stored_lens`.
+`MemoryQueue` (`None`) vs `R2PointerQueue` (`Some jobs/{id}/a|b`) con `Store` compartido.
+`Stage::{Queued, Landmarks, Flame, Freeuv, Bake, Done}`, `Progress 0.0..=1.0`, `TtlSecs 1..=3600` default 60.
+Seam 3 Worker Contract: `&ImageBytes -> Landmarks (478 JSON) -> FlawUv (UV_LEN) -> CompleteUv (UV_LEN) -> Heatmap (UV_LEN)` vía `MlSidecarClient(BaseUrl)` + `FlamePayload u32 BE`.
+`compute_heatmap` / `bake_bfm_to_gnm` infallibles.
+No son seams: `fit_flame`, `bake` interno, `project_uv`.
 Se testean indirectamente vía Seam 3.
 
 ### 8.2 Anti-patrones a evitar
@@ -196,15 +196,18 @@ Se testean indirectamente vía Seam 3.
 No mockear colaboradores internos.
 No recomputar esperado con la misma pipeline.
 No hacer horizontal slicing de todos los modelos antes de tener API.
-Mock solo en boundaries externos: Redis, tiempo, filesystem efímero.
-Usar inyección de dependencias para `uv_client` y `storage`.
+Mock solo en boundaries externos: queue (`MemoryQueue` vs `R2PointerQueue`), tiempo (`TtlSecs`), filesystem efímero, sidecar (`BaseUrl`).
+Usar inyección de dependencias para `MlSidecarClient` y `Queue` (`AppState::new(impl Queue)`).
+No soltar `Vec<u8>` ni `&str` en seams: usa `EnqueueCommand`, `Stage`, `Landmarks`, `FlawUv` / `CompleteUv` / `Heatmap`, `R2Key`.
+No `unwrap` en request path: usa `AppError` + `anyhow::Context`.
 
 ### 8.3 Vertical slices
 
 Cada fase avanza como `1 seam, 1 test RED, 1 implementación mínima GREEN`.
-Ejemplo Fase 0: `test_create_job_returns_202` en Seam 1 antes de implementar worker real.
-Ejemplo Fase 1: `test_frontal_face_produces_512_uv` en Seam 3 con `golden_frontal.jpg` y `assert uv.shape == (512,512,3)`.
-Ejemplo stateless: `test_compare_does_not_persist_after_delivery` verifica `redis.exists == 0` tras 65s y `tmpfs` vacío.
+Ejemplo Fase 0: `test_create_job_returns_202` + `test_create_then_status_is_queued` + `test_r2_pointer_queue_serves_same_seam` en Seam 1 antes de worker real.
+Ejemplo Fase 1: `test_frontal_face_produces_512_uv` en Seam 3 con `CompleteUv::parse(vec![...; UV_LEN])` y `assert heat.as_bytes()[..2] == [6,10]`.
+Ejemplo stateless: `test_memory_queue_keeps_bytes_and_tracks_progress` verifica `stored_lens == (64,64)` y `progress (zero, Queued) -> (0.4, Flame)`; `test_unknown_job_is_not_found` verifica `NotFound`.
+Propiedades `proptest`: `parse_never_panics`, `Progress`, `TtlSecs`, `R2Key`.
 
 ## 9. Riesgos y mitigaciones
 

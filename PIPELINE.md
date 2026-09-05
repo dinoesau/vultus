@@ -4,7 +4,7 @@
 
 Este documento describe el flujo end-to-end desde que el usuario sube 2 caras hasta que descarga el resultado.
 El pipeline es asíncrono, stateless y sin persistencia.
-En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` vía `HTTP Pull Consumer`; en dev local consume de `Redis ARQ` vía el mismo contrato `core.queue`.
+En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` vía `HTTP Pull Consumer`; en dev local/test consume de `MemoryQueue` o `R2PointerQueue` vía el mismo trait `vultus-core::Queue` (`Store` compartido).
 
 ## 2. Diagrama de pipeline
 
@@ -145,32 +145,35 @@ sequenceDiagram
 ### 5.1 Entrada - POST /v1/compare
 
 El cliente envía `multipart/form-data` con `image_a` y `image_b`.
-Cada imagen debe ser JPEG o PNG menor a 8MB.
-El API valida magic bytes, dimensiones mínimas 256x256 y que MediaPipe detecte exactamente una cara por imagen en validación rápida.
-Si falla, retorna `400` con `detail` sin encolar.
-Si pasa, genera `job_id` uuid v4, encola en ARQ con `images` como bytes y retorna `202`.
+Cada imagen debe ser JPEG o PNG menor a 8MB (`ImageBytes::parse` + `ImageBytesRef`, errores `SizeOutOfRange | UnsupportedFormat`).
+Faltante o multipart roto es `400 {"detail":...}` vía `AppError::BadRequest`.
+Imagen inválida es `400` vía `AppError::Domain(InvalidImage)` sin encolar.
+Si pasa, construye `EnqueueCommand::new(a, b)`, encola en `Queue` y retorna `202 {job_id, status:"queued"}` (`CompareResponse`).
+`GET /v1/jobs/{id}` valida `JobId::parse(trim)` y retorna `200 {job_id, status: JobStatus::as_str}`; uuid roto es `400`, desconocido es `404`.
 
-### 5.2 Queue - Cloudflare Queues + R2 (prod) / Redis ARQ (local)
+### 5.2 Queue - Cloudflare Queues + R2 (prod) / MemoryQueue + R2PointerQueue (local/test)
 
-El contrato es `enqueue(job_id, image_a, image_b)` agnóstico a la infra vía `core.queue` adapter.
+El contrato es `Queue::{enqueue(EnqueueCommand), status, progress, set_progress(Progress, Stage), stored_lens}` agnóstico a la infra con `Store` compartido.
 
-- **Prod (Cloudflare):** El Worker hace `R2 PutObject` con `image_a/b` y serializa solo `compare_job(job_id, r2_keys)` a `Cloudflare Queues` (límite 128KB/mensaje, no caben 2x8MB). `Cloudflare Queues` cobra `10k ops/día free` (write/read/delete = 3 ops por job -> ~3.333 jobs/día free), retención `24h` en free pero `TTL lógico 60s` vía `Durable Object alarm` + `R2 lifecycle 60s`. Modal consume vía `HTTP Pull Consumer`. El progreso va por `Durable Objects WS`.
-- **Local/dev:** `ARQ` serializa directo `compare_job(job_id, image_a_bytes, image_b_bytes)` a `Redis`. TTL `keep_result=60` y `EXPIRE 60s`. Progreso vía `job.progress`.
+- **Prod (Cloudflare):** El Worker hace `R2 PutObject` con `image_a/b` y serializa solo `compare_job(job_id, r2_keys jobs/{id}/a|b)` a `Cloudflare Queues` (límite 128KB/mensaje, no caben 2x8MB). `Cloudflare Queues` cobra `10k ops/día free` (write/read/delete = 3 ops por job -> ~3.333 jobs/día free), retención `24h` en free pero `TTL lógico 60s` (`TtlSecs` default 60) vía `Durable Object alarm` + `R2 lifecycle 60s`. Modal consume vía `HTTP Pull Consumer`. El progreso va por `Durable Objects WS` con `Stage::{queued, landmarks, flame, freeuv, bake, done}`.
+- **Local/dev/test:** `MemoryQueue` (adapter en memoria, `r2_keys None`, guarda `stored_lens` para probar flujo) y `R2PointerQueue` (simula prod con `Some(R2Keys)`, misma `Store`). Progreso vía `set_progress(Progress::zero() -> parse(0.0..=1.0), Stage)`; `status` pasa a `Processing` al avanzar.
 
 No hay Postgres ni MinIO persistente. En prod el egress de R2 es free.
 
 ### 5.3 Worker 1 - MediaPipe 478 landmarks
 
-Input: `image bytes`.
-Output: `landmarks 478 x 3` por imagen.
+Input: `&ImageBytes`.
+Output: `Landmarks` (JSON `[[x,y,z],...]` 478 finitos, `LANDMARKS_LEN`).
+Firma `MlSidecarClient::landmarks(&JobId, &ImageBytes) -> Landmarks` (`POST /ml/landmarks` con `X-Job-Id`, `BaseUrl::join`).
 Runtime CPU, 20-30ms por cara.
-Si no detecta cara, falla el job con `error: no_face_detected`.
+Si el sidecar retorna stub `{"todo":...}` o largo wrong, `Landmarks::parse` falla con `Ml::Decode`.
 Escribe landmarks a `/tmp/{job_id}/landmarks.json` en tmpfs.
 
 ### 5.4 Worker 2 - FLAME Fitting
 
-Input: `image bytes + landmarks`.
-Output: `FLAME mesh` y `flaw-uv` incompleta.
+Input: `&ImageBytes + &Landmarks`.
+Output: `FlawUv` (`UV_LEN = 786432`).
+Firma `MlSidecarClient::flame(&JobId, &ImageBytes, &Landmarks) -> FlawUv` con `FlamePayload::encode/decode` (`u32 BE len + landmarks_json + image_bytes`) sobre `POST /ml/flame`.
 Runtime GPU con `3DDFA_V3` o `DECA`.
 Estima `shape, expression, pose` y proyecta a `mesh` con `UV` de BFM.
 Genera `flaw-uv` de 512x512 con huecos por oclusión.
@@ -178,20 +181,23 @@ Tiempo 200-400ms por cara en T4.
 
 ### 5.5 Worker 3 - FreeUV
 
-Input: `flaw-uv` + `image`.
-Output: `complete-uv` 512x512.
+Input: `&FlawUv` (`UV_LEN`).
+Output: `CompleteUv` (`UV_LEN`).
+Firma `MlSidecarClient::freeuv(&JobId, &FlawUv) -> CompleteUv` sobre `POST /ml/freeuv`.
 Runtime GPU con `SD1.5 + CLIP`.
 Hace inpainting de regiones ocluidas y normaliza iluminación.
 Tiempo 8-12s por cara en T4.
 Es la etapa más costosa.
+`BaseUrl::parse` exige `http(s)://` y recorta `/`; payload vacío es `Ml::Empty`, status no-2xx es `Ml::BadStatus`, truncate es `Ml::Decode`.
 
 ### 5.6 Worker 4 - GNM Bake, Heatmap y Report
 
-Input: `complete-uv` de ambas caras en topología BFM.
-Pasos: bake baricéntrico `BFM -> GNM` precomputado, render mesh GNM con textura, cálculo `heatmap = |UV_A - UV_B|` por canal, cálculo de distancias antropométricas normalizadas por interpupilar en UV canónico, generación de `report.pdf` con imágenes originales, UVs, heatmap y tabla de métricas con disclaimer.
+Input: `&CompleteUv` de ambas caras en topología BFM (`UV_LEN` ya probado).
+Pasos: bake infallible `bake_bfm_to_gnm(&FlawUv) -> CompleteUv` (identidad Fase 0, matriz precomputada en Fase 2), `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` (`|a-b|` por byte, `expect` seguro porque ambas prueban `UV_LEN`), cálculo de distancias antropométricas normalizadas por interpupilar en UV canónico, generación de `report.pdf` con imágenes originales, UVs, heatmap y tabla de métricas con disclaimer.
 Output: `uv_a.png, uv_b.png, heatmap.png, mesh_gnm.glb, report.pdf`.
 Runtime CPU/GPU 300-500ms.
 Todo se escribe a `/tmp/{job_id}/` y se retorna como dict de bytes.
+Sin dep `image`; tipos `FlawUv` / `CompleteUv` / `Heatmap` cruzan el seam.
 
 ### 5.7 Entrega - GET /v1/jobs/{id}/result
 
@@ -210,28 +216,35 @@ Verificación TDD: `test_compare_does_not_persist_after_delivery` comprueba `red
 
 ## 6. Contratos de datos
 
-Job enqueue: `{job_id: uuid, image_a: bytes, image_b: bytes}` en local; `{job_id, r2_keys}` en prod (adapter traduce). Límite Queues 128KB obliga a `R2 pointer` en prod.
-Worker return: `{uv_a: bytes png, uv_b: bytes png, heatmap: bytes png, mesh: bytes glb, report: bytes pdf}` (a Redis local o R2 prod).
-Progress events WS: `{job_id, progress: 0.0-1.0, stage: landmarks|flame|freeuv|bake}` vía `Redis` local o `Durable Objects` prod.
-Error: `{job_id, status: failed, error: no_face_detected|invalid_image|gpu_oom}`.
+Job enqueue: `EnqueueCommand::new(ImageBytes, ImageBytes)` en local; `EnqueuedJob{job_id, Some(R2Keys jobs/{id}/a|b)}` en prod (adapter traduce). Límite Queues 128KB obliga a `R2 pointer` en prod.
+`stored_lens(job_id) -> (len_a, len_b)` prueba que los bytes fluyen.
+Worker return tipado: `Landmarks -> FlawUv -> CompleteUv -> Heatmap` (cada `parse` exige forma, `Ml::Decode` si no).
+`FlamePayload` es `u32 BE len + landmarks_json + image_bytes` para paridad Rust-Python.
+Progress events WS: `{job_id, progress: Progress 0.0-1.0, stage: Stage queued|landmarks|flame|freeuv|bake|done}` vía `Store` local o `Durable Objects` prod.
+Error HTTP: `400` validación (`InvalidImage | InvalidJobId | InvalidProgress | InvalidR2Key | InvalidBaseUrl | Empty` + multipart), `404` (`NotFound`), `500` (`Queue::Backend | Ml::{Transport,BadStatus,Decode,Empty} | Invariant`) con `{"detail":...}`.
 
 ## 7. Manejo de errores
 
-Imagen inválida: `400` inmediato sin encolar.
-No face: job `failed` con `progress 1.0` y `error` en WS, resultado no se genera.
-GPU OOM: reintento 1 vez con `retry` de ARQ, si falla marca `failed`.
-Timeout: `job_timeout=30s` por etapa, `max 60s` total.
-Cliente cierra pestaña: Redis expira solo, sin leak.
+Imagen inválida: `400 {"detail":...}` inmediato sin encolar (`InvalidImage`).
+Faltante / multipart roto: `400` (`BadRequest`).
+UUID roto: `400` (`InvalidJobId` con `trim`).
+Job desconocido: `404` (`NotFound`).
+No face / UV wrong / stub: `Ml::Decode` (500 infra, solo desde sidecar, nunca cliente directo).
+Sidecar caído / status no-2xx / vacío: `Ml::{Transport, BadStatus, Empty}` (500 `internal error` al cliente, detalle en logs con `job_id`).
+Invariante rota (`TtlSecs`, `assert_ok`): `Invariant` (500, pagina al dev).
+Timeout: `job_timeout=30s` por etapa, `max 60s` total (`TtlSecs` default 60).
+Cliente cierra pestaña: `Store` expira solo, sin leak.
 
 ## 8. Observabilidad
 
-Métricas por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms` (local) / `Cloudflare Queues lag + Modal GPU util` (prod).
+Métricas por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms` (local `Store` / `Cloudflare Queues lag + Modal GPU util` prod).
 Logs estructurados con `job_id` sin datos biométricos (Workers Logs 3 días free, Modal logs).
-Health: `GET /health` verifica `queue ping` (Redis `PING` local / Queues health prod) y `gpu available` (local `nvidia-smi` / Modal `torch.cuda.is_available`). En prod `Cloudflare Analytics` + `OpenTelemetry` + `Sentry` si se configura.
+`main` con `anyhow::Context` en `bind` y `serve`; `tracing_subscriber::EnvFilter`.
+Health: `GET /health` verifica `queue ping` (local `Store` / Queues health prod) y `gpu available` (local `nvidia-smi` / Modal `torch.cuda.is_available`). En prod `Cloudflare Analytics` + `OpenTelemetry` + `Sentry` si se configura.
 
 ## 9. Escalado
 
-Local: Workers CPU y GPU escalan independiente vía `docker compose --scale`, `ARQ` `concurrency` por worker.
+Local: Workers CPU y GPU escalan independiente vía `docker compose --scale`, `Store` tras `tokio::RwLock<HashMap<JobId,_>>`.
 Prod: `Cloudflare Workers` escala a 0 automático, `Modal` escala GPU `0 -> 100` (`Starter 10 GPU concurrency free`, `Team 50`), `1-2s` cold start, R2/Queues sin gestión. `FreeUV concurrency=1` por GPU para no OOM sigue vigente en Modal.
 Sin storage persistente, no hay cuello de botella de I/O.
-Cache opcional efímera `hash(image) -> UV` en R2 con TTL 60s si se quiere evitar recomputar misma cara en ventana corta, desactivada por defecto por stateless estricto.
+Cache opcional efímera `hash(image) -> UV` en R2 con TTL 60s (`TtlSecs`) si se quiere evitar recomputar misma cara en ventana corta, desactivada por defecto por stateless estricto.

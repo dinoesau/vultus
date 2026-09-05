@@ -23,8 +23,8 @@ cargo run -p vultus-api
 ```
 
 El API queda en `http://localhost:8000`.
-Docs en `http://localhost:8000/docs` (utoipa, Fase 1).
-Sidecar ML local en `:8081` vía `modal_app.sidecar` (stubs hasta Fase 1).
+Sidecar ML local en `:8081` vía `modal_app.sidecar` (stubs `{"todo":...}` hasta Fase 1, `gnm_bake_worker` deprecated a Rust).
+`MlSidecarClient::new(BaseUrl)` tipa `landmarks -> Landmarks`, `flame -> FlawUv`, `freeuv -> CompleteUv`.
 
 ### Full stack con Docker (dev local)
 
@@ -34,7 +34,7 @@ docker compose up --build
 
 Servicios: `api` en 8000, `frontend` Astro en 4321, `redis` en 6379.
 Para workers GPU usa `docker compose --profile gpu up`.
-En local se usa `Redis + ARQ` con `fakeredis` en tests. En producción se usa `Cloudflare Queues + R2 + Modal` vía el mismo contrato `core.queue`.
+En local/test se usa `MemoryQueue` (`r2_keys None`) y `R2PointerQueue` (`Some jobs/{id}/a|b`) tras el mismo trait `Queue`. En producción se usa `Cloudflare Queues + R2 + Modal` vía el mismo contrato.
 
 ### Frontend Astro
 
@@ -70,12 +70,12 @@ vultus/
 ├── DEVELOPMENT.md
 ├── wrangler.toml              # gateway edge fino (prod)
 ├── backend/
-│   ├── Cargo.toml             # workspace Rust
-│   ├── modal_app.py           # sidecar Python ML (MediaPipe/FLAME/FreeUV) + POST /ml/*
+│   ├── Cargo.toml             # workspace Rust + anyhow/nutype/proptest
+│   ├── modal_app.py           # sidecar Python ML (MediaPipe/FLAME/FreeUV) + POST /ml/* (stubs Fase 1)
 │   ├── crates/
-│   │   ├── api/               # Seam 1 Axum
-│   │   ├── core/              # queue trait + MlSidecarClient (deep)
-│   │   └── workers_cpu/       # bake + heatmap + report (deep CPU)
+│   │   ├── api/               # Seam 1 Axum (AppError, Arc<dyn Queue>, tests/seam1.rs 8 tests)
+│   │   ├── core/              # assert + error + job tipado + ml tipado + queue dual (deep)
+│   │   └── workers_cpu/       # bake + heatmap infallibles (deep CPU, sin dep image)
 └── frontend/
     ├── astro.config.mjs       # -> Cloudflare Pages en prod
     └── src/
@@ -93,15 +93,17 @@ En dev local el flujo es idéntico pero con `Redis ARQ` en vez de `Queues + R2` 
 ## Documentación
 
 - `ROADMAP.md` - fases 0 a 5 y plan de entrega.
-- `CONTEXT.md` - vocabulario de dominio y seams TDD.
-- `PIPELINE.md` - flujo completo, secuencia de modelos y contratos.
-- `ARCHITECTURE.md` - módulos, seams y decisiones de diseño.
-- `DEVELOPMENT.md` - guía de desarrollo con `uv` y Docker.
+- `CONTEXT.md` - vocabulario de dominio, tipos opacos y seams TDD.
+- `PIPELINE.md` - flujo completo, secuencia de modelos y contratos tipados.
+- `ARCHITECTURE.md` - módulos, seams y decisiones de diseño (ADR-001 histórico, ADR-005 híbrido, ADR-006 typestate).
+- `DEVELOPMENT.md` - guía de desarrollo con `cargo` y Docker.
 
 ## API
 
-`POST /v1/compare` multipart con `image_a` y `image_b` retorna `202 {job_id}`.
-`WS /v1/jobs/{id}/events` emite `progress` 0.0 a 1.0 por etapa.
+`POST /v1/compare` multipart con `image_a` y `image_b` retorna `202 {job_id, status:"queued"}`.
+`GET /v1/jobs/{id}` retorna `200 {job_id, status: queued|processing|done|failed|expired}`.
+Errores `{"detail":...}`: `400` imagen / faltante / uuid / `R2Key` / `BaseUrl`, `404` job desconocido, `500` queue / ML / invariante.
+`WS /v1/jobs/{id}/events` emite `(Progress 0.0-1.0, Stage queued|landmarks|flame|freeuv|bake|done)`.
 `GET /v1/jobs/{id}/result` retorna zip con `uv_a.png, uv_b.png, heatmap.png, mesh.glb, report.pdf`.
 Ver `ARCHITECTURE.md` para contratos completos.
 
@@ -117,11 +119,13 @@ Ver `PIPELINE.md` sección 5.8 y `ARCHITECTURE.md` ADR-004 para verificación.
 
 ```bash
 cd backend
-uv run pytest -k seam1
-uv run pytest -k seam3
+cargo test
 ```
 
-Tests viven en `backend/tests/api` para Seam 1 y `backend/tests/workers` para Seam 3.
+36 tests en verde (`8 seam1 + 25 core + 3 workers_cpu`).
+Tests Seam 1 en `backend/crates/api/tests/seam1.rs` con `axum-test::TestServer` y paridad `MemoryQueue` / `R2PointerQueue`.
+Dominio en `crates/core` con `proptest` + golden `UV_LEN`.
+CPU en `crates/workers_cpu` con golden heatmap.
 Frontend E2E con `npm run test:e2e` en `frontend/e2e`.
 
 ## Licencia

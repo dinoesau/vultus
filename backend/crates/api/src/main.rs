@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use vultus_api::{router, AppState, Config, QueueDriver};
-use vultus_core::{MemoryQueue, Queue, R2PointerQueue, TtlSecs};
+use vultus_core::{BaseUrl, MemoryQueue, MlSidecarClient, Queue, R2PointerQueue, TtlSecs};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,7 +25,16 @@ async fn main() -> anyhow::Result<()> {
         QueueDriver::R2Pointer => Arc::new(R2PointerQueue::with_ttl(config.ttl)),
     };
     spawn_reaper(queue.clone(), config.ttl);
-    let state = AppState::from_arc(queue, config.ttl);
+    let sidecar = sidecar_from_env();
+    tracing::info!(
+        sidecar = if sidecar.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        "sidecar config"
+    );
+    let state = AppState::from_arc_with_sidecar(queue, config.ttl, sidecar);
 
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr())
@@ -37,6 +46,24 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("server crashed")?;
     Ok(())
+}
+
+/// Lee `ML_SIDECAR_URL` con default `http://ml-sidecar:8081`.
+/// Si el parse falla, loguea y retorna None para no romper Fase0 sin sidecar.
+fn sidecar_from_env() -> Option<MlSidecarClient> {
+    let raw =
+        std::env::var("ML_SIDECAR_URL").unwrap_or_else(|_| "http://ml-sidecar:8081".to_string());
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match BaseUrl::parse(trimmed) {
+        Ok(base) => Some(MlSidecarClient::new(base)),
+        Err(e) => {
+            tracing::warn!(error = %e, "invalid ML_SIDECAR_URL, pipeline disabled");
+            None
+        }
+    }
 }
 
 fn spawn_reaper(queue: Arc<dyn Queue>, ttl: TtlSecs) {

@@ -1,4 +1,4 @@
-name = "facium-api"
+name = "vultus-api"
 # Híbrido ADR-005: el Worker edge es gateway fino (validar + R2 PutObject +
 # enqueue {job_id, r2_keys}). La API pesada vive en Rust Axum
 # (backend/crates/api) y el ML GPU en Python Modal (backend/modal_app.py).
@@ -10,23 +10,23 @@ compatibility_date = "2026-09-03"
 # POST /v1/compare, GET /v1/jobs/:id, WS /v1/jobs/:id/events, GET /health
 
 [[queues.producers]]
-queue = "facium-jobs"
-binding = "FACIUM_QUEUE"
+queue = "vultus-jobs"
+binding = "VULTUS_QUEUE"
 
 [[queues.consumers]]
-queue = "facium-jobs"
+queue = "vultus-jobs"
 max_batch_size = 1
 max_batch_timeout = 5
 # Nota: consumo real GPU vía HTTP Pull Consumer desde Modal (ver backend/modal_app.py)
 # Este consumer es para progress WS via Durable Objects, no para FreeUV
 
 [[r2_buckets]]
-binding = "FACIUM_BUCKET"
-bucket_name = "facium-jobs"
-preview_bucket_name = "facium-jobs-preview"
+binding = "VULTUS_BUCKET"
+bucket_name = "vultus-jobs"
+preview_bucket_name = "vultus-jobs-preview"
 
 [[durable_objects.bindings]]
-name = "FACIUM_PROGRESS"
+name = "VULTUS_PROGRESS"
 class_name = "ProgressDO"
 
 [[migrations]]

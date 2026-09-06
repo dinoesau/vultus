@@ -1,30 +1,30 @@
 # Sidecar ML: contrato HTTP + inferencia GPU real.
-# Torch cu121 (CUDA 12.1) corre en runtime CUDA 12.2. Orden: torch primero
-# desde el índice cu121, resto desde PyPI (ver Dockerfile.gpu).
+# Torch cu126 (CUDA 12.6) corre en runtime CUDA 12.6. Orden: torch primero
+# desde el índice cu126, resto desde PyPI (ver Dockerfile.gpu).
 # Pesos reales en Fase 1: mediapipe, torch, diffusers, DECA, FreeUV.
---extra-index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://download.pytorch.org/whl/cu126
 fastapi==0.115.6
 uvicorn==0.34.0
 httpx==0.28.1
 boto3==1.35.90
-torch==2.4.1
-torchvision==0.19.1
+torch==2.13.0
+torchvision==0.28.0
 numpy==1.26.4
 scipy==1.11.4
 scikit-image==0.22.0
 opencv-python-headless==4.10.0.84
-Pillow==10.4.0
+Pillow==12.3.0
 PyYAML==6.0.2
 yacs==0.1.8
 kornia==0.7.2
 face-alignment==1.4.1
 mediapipe==0.10.14
-diffusers==0.30.0
-transformers==4.44.0
-accelerate==0.33.0
-safetensors==0.4.4
-huggingface-hub==0.24.6
+diffusers==0.38.0
+transformers==5.10.1
+accelerate==1.10.0
+safetensors==0.8.0
+huggingface-hub==1.5.0
 fvcore==0.1.5.post20221221
 iopath==0.1.10
-# pytorch3d: sin wheel en PyPI; se instala en Dockerfile.gpu desde el
-# índice oficial py310_cu121_pyt241 (necesario para DECA renderer).
+# pytorch3d: sin wheel en PyPI; se instala en Dockerfile.gpu desde source
+# (no hay wheel oficial py310_cu126_pyt213, solo hasta pyt241).

@@ -5,7 +5,7 @@
 Instala Rust estable (`rustup`, `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`).
 Instala `Docker` 24+ y `Docker Compose` v2.
 Para GPU instala `nvidia-container-toolkit` y verifica con `nvidia-smi`.
-Node 20+ para frontend Astro.
+Node 22+ para frontend Astro (Astro 7 exige 20.19+ o 22.12+).
 Python 3.12+ solo para sidecar ML (`backend/modal_app.py`, `Dockerfile.gpu`).
 Workspace deps: `anyhow` (errores en `main`), `nutype` (`TtlSecs`), `proptest` (dev).
 
@@ -72,7 +72,7 @@ En prod este stack se reemplaza por `Cloudflare Workers + Queues + R2 + Modal`. 
 docker compose --profile gpu up --build
 ```
 
-Usa `Dockerfile.gpu` con `nvidia/cuda:12.2-runtime`.
+Usa `Dockerfile.gpu` con `nvidia/cuda:12.6-runtime`.
 Verifica `docker exec vultus-worker-gpu nvidia-smi`.
 En prod los workers GPU corren en `Modal` (`modal deploy backend/modal_app.py`) con `T4 16GB`, `cold start 1-2s`, `$30/mes free`.
 
@@ -196,7 +196,7 @@ Abre PR y verifica `docker compose up` + `cargo test` pasan E2E.
 `cargo build` falla: borra `target/` y reintenta `cargo build`.
 `redis connection refused`: doc vieja, ya no aplica. El código usa `MemoryQueue` / `R2PointerQueue` en memoria (`Store`), sin `Redis`. Verifica `stored_lens` y `TtlSecs`.
 `wrangler deploy` falla (prod): verifica `wrangler.toml` bindings de Queues/R2 y `CLOUDFLARE_API_TOKEN`.
-`modal deploy` falla: verifica `modal token` y `modal_app.py` image con `nvidia/cuda:12.2-runtime`.
+`modal deploy` falla: verifica `modal token` y `modal_app.py` image con `nvidia/cuda:12.6-runtime`.
 `CUDA out of memory` (local o Modal): baja `concurrency_limit` a 1 en `freeuv_worker` / `flame_worker` (`modal_app.py`).
 `Ml::Decode` en `landmarks/flame/freeuv`: el sidecar aún retorna stubs `{"todo":...}` (Fase 1 pendiente), verifica `FlamePayload` y `UV_LEN`.
 `WS no conecta`: verifica `VITE_API_URL` en `frontend/.env` y `Durable Objects` binding en `wrangler.toml` (prod).

@@ -68,6 +68,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       import {
         API_PATHS,
         extractResultImages,
+        isRetryableResultStatus,
         isTerminal,
         statusMessage,
         toWsUrl,
@@ -170,8 +171,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         setProgress(100);
       }
 
-      // Tolerante a 404 durante processing: el zip solo existe tras done y
-      // el worker puede tardar en exponerlo; reintento acotado, sin colgar la UI.
+      // Tolerante a 404/409 durante processing: el zip solo existe tras done y
+      // el worker puede tardar en exponerlo; reintento acotado 10x1s, sin colgar la UI.
+      // 409 = not-yet-done (prod vivo), 404 = zip aun no visible o job purgado.
       async function fetchResult(jobId: string, attempt = 0): Promise<void> {
         let res: Response;
         try {
@@ -180,8 +182,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           showError(`job ${jobId}: sin conexión al descargar el resultado.`);
           return;
         }
-        if (res.status === 404 && attempt < 10) {
-          stageEl.textContent = `job ${jobId}: resultado aún no disponible (404), reintentando...`;
+        if (isRetryableResultStatus(res.status) && attempt < 10) {
+          const why = res.status === 409 ? "aún procesando (409)" : "aún no disponible (404)";
+          stageEl.textContent = `job ${jobId}: resultado ${why}, reintentando...`;
           window.setTimeout(() => void fetchResult(jobId, attempt + 1), 1000);
           return;
         }

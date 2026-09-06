@@ -1,10 +1,13 @@
 /**
- * Durable Object de progreso (Fase 0).
+ * Durable Object de progreso (prod vivo).
  * Espejo de `Store` en Rust: TTL logico parametrizado, ventana `Expired`
  * visible hasta 2x TTL y luego purga. Sin persistencia mas alla del TTL.
+ * Progreso vivo: WS emite snapshot inicial y luego ticks cada 500ms hasta
+ * terminal (done/failed/expired) o 60s, en vez de snapshot+close.
  */
 import {
   RESULT_TTL_SECONDS,
+  isTerminalStatus,
   isValidProgress,
   isValidStage,
   parseTtlSecs,
@@ -69,18 +72,37 @@ export class ProgressDO {
       return Response.json({ ok: true, job_id: this.job_id, ttl_secs: this.ttlSecs });
     }
     if (url.pathname === "/progress" && req.method === "POST") {
-      const body = (await req.json()) as { progress?: unknown; stage?: unknown };
+      const body = (await req.json()) as { progress?: unknown; stage?: unknown; status?: unknown };
       if (body.progress !== undefined && !isValidProgress(body.progress)) {
         return Response.json({ detail: "invalid progress" }, { status: 400 });
       }
       if (body.stage !== undefined && !isValidStage(body.stage)) {
         return Response.json({ detail: "invalid stage" }, { status: 400 });
       }
+      if (
+        body.status !== undefined &&
+        body.status !== "processing" &&
+        body.status !== "done" &&
+        body.status !== "failed"
+      ) {
+        return Response.json({ detail: "invalid status" }, { status: 400 });
+      }
       await this.load();
+      // Espejo de Rust `Store`: expirado no acepta mas escrituras (404).
+      // Sin esto un job lento resucitaria expired->done pasada la ventana.
+      if (this.status === "expired") {
+        return Response.json({ detail: "expired" }, { status: 404 });
+      }
       if (typeof body.progress === "number") this.progress = body.progress;
       if (typeof body.stage === "string") {
         this.stage = body.stage;
-        this.status = body.stage === "done" ? "done" : "processing";
+      }
+      if (body.status === "failed") {
+        this.status = "failed";
+      } else if (body.status === "done" || this.stage === "done") {
+        this.status = "done";
+      } else if (typeof body.stage === "string" || typeof body.progress === "number") {
+        if (this.status === "queued") this.status = "processing";
       }
       await this.save();
       return Response.json({ ok: true });
@@ -102,15 +124,47 @@ export class ProgressDO {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
     server.accept();
-    server.send(
+    const snapshot = () =>
       JSON.stringify({
         job_id: this.job_id,
         progress: this.progress,
         stage: this.stage,
         status: this.status,
-      }),
-    );
-    server.close(1000, "fase0 snapshot");
+      });
+    server.send(snapshot());
+    // Progreso vivo: ticks 500ms hasta terminal o 60s, sin snapshot+close.
+    // Cada tick recarga storage para ver updates del pull consumer Modal.
+    const tickMs = 500;
+    const maxTicks = 120;
+    let ticks = 0;
+    const timer = setInterval(async () => {
+      ticks += 1;
+      try {
+        await this.load();
+        try {
+          server.send(snapshot());
+        } catch {
+          clearInterval(timer);
+          return;
+        }
+        if (isTerminalStatus(this.status) || ticks >= maxTicks) {
+          clearInterval(timer);
+          try {
+            server.close(1000, this.status);
+          } catch {
+            // Cierre best-effort: el cliente ya puede haberse ido.
+          }
+        }
+      } catch {
+        clearInterval(timer);
+        try {
+          server.close(1011, "load failed");
+        } catch {
+          // Cierre best-effort.
+        }
+      }
+    }, tickMs);
+    // Si el cliente se va, el runtime limpia el timer con el DO; no hay leaks mas alla del TTL.
     return new Response(null, { status: 101, webSocket: client });
   }
 

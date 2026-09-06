@@ -1,10 +1,16 @@
 # ML sidecar GPU (Python). El binario Rust NO va aquí.
+# Uso LOCAL (compose/docker): esta imagen levanta el sidecar para paridad.
+# Modal USA la receta en backend/modal_app.py (from_registry + mounts), no
+# este Dockerfile: asi los deploys de solo-codigo no reconstruyen la imagen.
+# Mantener en paridad: misma base devel, mismo orden torch-cu126 primero.
 # Rust llama a este contenedor vía ML_SIDECAR_URL (POST /ml/landmarks|flame|freeuv).
-# Paridad con Modal: misma imagen base que modal_app.py.
-FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04
+# Base devel (no runtime): pytorch3d se compila desde source y sin nvcc queda
+# solo-CPU -> `_C.rasterize_meshes` falla "Not compiled with GPU support" en
+# /ml/flame. Con devel el build tarda mas pero el rasterizador CUDA funciona.
+FROM nvidia/cuda:12.6.0-devel-ubuntu22.04
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /work
-RUN apt-get update && apt-get install -y python3 python3-pip curl libgl1 libglib2.0-0 git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y python3 python3-pip curl libgl1 libglib2.0-0 git build-essential python3-dev ninja-build && rm -rf /var/lib/apt/lists/*
 # Modal invoca `python` en sus probes: la imagen CUDA solo trae `python3`.
 RUN ln -sf /usr/bin/python3 /usr/bin/python && python --version
 COPY requirements.txt ./
@@ -25,7 +31,7 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # en local/doubles no se usa (dobles deterministas sin DECA); si la
 # compilacion fallara, el _deca_model falla ruidoso (500 con causa) en
 # real, nunca doble silencioso.
-RUN pip3 install --no-cache-dir fvcore iopath; pip3 install --no-cache-dir git+https://github.com/facebookresearch/pytorch3d.git || echo "pytorch3d opcional omitido: sin wheel torch2.13/cu126 (deuda prod-GPU)"
+RUN pip3 install --no-cache-dir fvcore iopath; pip3 install --no-cache-dir --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git || echo "pytorch3d opcional omitido: sin wheel torch2.13/cu126 (deuda prod-GPU)"
 # Codigo al final: los cambios de codigo no invalidan las capas pesadas de pip.
 COPY modal_app.py ./
 ENV ML_PORT=8081 WEIGHTS_DIR=/weights

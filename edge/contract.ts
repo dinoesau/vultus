@@ -1,5 +1,5 @@
 /**
- * Contrato compartido edge (Fase 0).
+ * Contrato compartido edge (prod vivo).
  * Espejo de `vultus-core::job`: MAX_IMAGE_BYTES, magic JPEG/PNG,
  * TtlSecs 1..=3600 default 60, Stage, JobId uuid.
  * La fuente de verdad del parse pesado sigue en Rust
@@ -24,6 +24,13 @@ export const STAGES = [
   "done",
 ] as const;
 export type StageName = (typeof STAGES)[number];
+
+export const TERMINAL_STATUSES = ["done", "failed", "expired"] as const;
+export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
+
+export function isTerminalStatus(s: unknown): s is TerminalStatus {
+  return typeof s === "string" && (TERMINAL_STATUSES as readonly string[]).includes(s);
+}
 
 export function isUuid(s: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);

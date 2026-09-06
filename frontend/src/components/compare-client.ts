@@ -33,6 +33,12 @@ export function isTerminal(status: string): boolean {
   return TERMINAL.has(status);
 }
 
+// Resultado aun no listo: 409 (not done) en prod vivo, 404 transitorio si el
+// zip tarda en aparecer en R2 tras done. Ambos reintentan acotado, sin colgar la UI.
+export function isRetryableResultStatus(status: number): boolean {
+  return status === 404 || status === 409;
+}
+
 // Deriva la URL WS desde la HTTP cambiando el esquema (http->ws, https->wss).
 export function toWsUrl(apiUrl: string, jobId: string): string {
   const base = apiUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:");

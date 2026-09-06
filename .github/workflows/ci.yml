@@ -75,10 +75,13 @@ jobs:
       - name: edge dry-run
         run: npx --yes wrangler@4 deploy --dry-run
       # Lint de Dockerfiles sin construir ninguna imagen.
+      # Solo errores bloquean: los warnings (ej. pin de versiones apt,
+      # fragil ante snapshots de Debian) quedan como aviso.
       - name: dockerfile lint
         uses: hadolint/hadolint-action@v3.1.0
         with:
           recursive: true
+          failure-threshold: error
 
   docker-cpu:
     runs-on: ubuntu-latest

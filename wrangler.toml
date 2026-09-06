@@ -9,7 +9,8 @@ compatibility_date = "2026-09-03"
 workers_dev = true
 
 # Cloudflare Pages maneja el frontend Astro static; este Worker expone Seam 1
-# POST /v1/compare, GET /v1/jobs/:id, WS /v1/jobs/:id/events, GET /health
+# POST /v1/compare, GET /v1/jobs/:id, POST /v1/jobs/:id/progress (Modal),
+# WS /v1/jobs/:id/events (progreso vivo), GET /health. Sin fallbacks dummy en prod.
 
 [[queues.producers]]
 queue = "vultus-jobs"

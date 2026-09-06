@@ -1,14 +1,13 @@
 # Sidecar ML: contrato HTTP + inferencia GPU real.
-# Torch cu126 (CUDA 12.6) corre en runtime CUDA 12.6. Orden: torch primero
-# desde el índice cu126, resto desde PyPI (ver Dockerfile.gpu).
+# Torch cu126 (CUDA 12.6) se instala ANTES desde el índice cu126 en paso
+# separado (Dockerfile.gpu y receta Modal en modal_app.py). Este archivo solo
+# trae PyPI puro para que `pip_install_from_requirements` de Modal lo consuma
+# sin flags especiales. Orden: torch primero, resto despues.
 # Pesos reales en Fase 1: mediapipe, torch, diffusers, DECA, FreeUV.
---extra-index-url https://download.pytorch.org/whl/cu126
 fastapi==0.115.6
 uvicorn==0.34.0
 httpx==0.28.1
 boto3==1.35.90
-torch==2.13.0
-torchvision==0.28.0
 numpy==1.26.4
 scipy==1.11.4
 scikit-image==0.22.0

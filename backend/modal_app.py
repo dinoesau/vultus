@@ -487,6 +487,10 @@ LANDMARKS_TIMEOUT_SECS = 5
 FLAME_TIMEOUT_SECS = 10
 FREEUV_TIMEOUT_SECS = 30
 TOTAL_TIMEOUT_SECS = 60
+# Visibilidad del mensaje en cola: cubre la cadena fria (~90-120s) para que
+# un job frio no se reentregue y se procese duplicado. Espejo del consumer
+# HTTP pull de la cola (visibility_timeout_ms 180000, batch 2, retries 2).
+QUEUE_VISIBILITY_TIMEOUT_SECS = 180
 # Progreso canonico espejo de pipeline.rs run_pair_inner.
 PROGRESS_LANDMARKS = 0.15
 PROGRESS_FLAME = 0.40
@@ -559,6 +563,31 @@ def _report_failed(job_id: str) -> None:
             pass
     except Exception as e:
         logger.warning("failed report failed job=%s err=%s", job_id, e)
+
+
+class _ExpiredAbort(Exception):
+    """El DO ya no quiere el resultado (expired/failed): abortar sin ruido."""
+
+
+def _job_alive(job_id: str) -> bool:
+    """True si el DO aun quiere el resultado (queued/processing). Tras expired
+    o failed el trabajo GPU es inutil: abortar libera el slot para jobs vivos.
+    Ante error de transporte se asume vivo (un blip no debe matar un job)."""
+    import urllib.request
+
+    url = f"{_api_base()}/v1/jobs/{job_id}"
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (compatible; VultusModal/1.0)"}, method="GET"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            if r.status != 200:
+                return True
+            status = json.loads(r.read().decode()).get("status")
+            return status in ("queued", "processing")
+    except Exception as e:
+        logger.warning("alive check failed job=%s err=%s (se asume vivo)", job_id, e)
+        return True
 
 
 def _fetch_r2_bytes(bucket: str, key: str) -> bytes:
@@ -730,7 +759,7 @@ def _cf_pull_messages(batch_size: int = 1):
         r = httpx.post(
             url,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"visibility_timeout_ms": TOTAL_TIMEOUT_SECS * 1000, "batch_size": batch_size},
+            json={"visibility_timeout_ms": QUEUE_VISIBILITY_TIMEOUT_SECS * 1000, "batch_size": batch_size},
             timeout=10.0,
         )
     except Exception as e:
@@ -800,6 +829,9 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
     t0 = time.perf_counter()
     bucket = _r2_bucket()
     logger.info("job start job=%s a=%s b=%s", job_id, r2_a, r2_b)
+    if not _job_alive(job_id):
+        logger.info("job ya terminal antes de empezar job=%s, se omite", job_id)
+        return
     _report_progress(job_id, PROGRESS_LANDMARKS, "landmarks")
     r2 = _r2_client()
     img_a = r2.get_object(Bucket=bucket, Key=r2_a)["Body"].read()
@@ -826,6 +858,8 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
             lm_b = fut_b.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
     _check_landmarks_json(lm_a)
     _check_landmarks_json(lm_b)
+    if not _job_alive(job_id):
+        raise _ExpiredAbort(f"job expiro durante landmarks job={job_id}")
     _report_progress(job_id, PROGRESS_FLAME, "flame")
 
     if _is_modal_function(flame_worker):
@@ -842,6 +876,8 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
             flaw_b = fut_b.result(timeout=FLAME_TIMEOUT_SECS + 50)
     if len(flaw_a) != UV_LEN or len(flaw_b) != UV_LEN:
         raise ValueError("flaw-uv bad length")
+    if not _job_alive(job_id):
+        raise _ExpiredAbort(f"job expiro durante flame job={job_id}")
     _report_progress(job_id, PROGRESS_FREEUV, "freeuv")
 
     if _is_modal_function(freeuv_worker):
@@ -912,6 +948,8 @@ def queue_pull_consumer():
             with _cf.ThreadPoolExecutor(max_workers=1) as ex:
                 fut = ex.submit(_run_job_from_r2, job_id, r2_a, r2_b)
                 fut.result(timeout=deadline)
+        except _ExpiredAbort as e:
+            logger.info("job abortado por expiracion job=%s (%s)", job_id if "job_id" in locals() else "unknown", e)
         except Exception:
             failed_id = job_id if "job_id" in locals() else "unknown"
             logger.exception("job failed job=%s", failed_id)

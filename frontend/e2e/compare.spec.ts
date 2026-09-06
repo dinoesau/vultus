@@ -1,9 +1,21 @@
 import { test, expect } from "@playwright/test";
-import { statSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { fileURLToPath } from "url";
 
+// Prod vivo: FRONT_URL=https://vultus.esau.com.mx npm run test:e2e
+// Par dorado real fuera de VC: GOLDEN_A/GOLDEN_B con JPEG LFW (ver fixtures/README).
+const FRONT = process.env.FRONT_URL ?? "http://localhost:4321";
+const GOLDEN_A =
+  process.env.GOLDEN_A && existsSync(process.env.GOLDEN_A)
+    ? process.env.GOLDEN_A
+    : fileURLToPath(new URL("./fixtures/a.png", import.meta.url));
+const GOLDEN_B =
+  process.env.GOLDEN_B && existsSync(process.env.GOLDEN_B)
+    ? process.env.GOLDEN_B
+    : fileURLToPath(new URL("./fixtures/b.png", import.meta.url));
+
 test("compare tracer bullet", async ({ page }) => {
-  await page.goto("http://localhost:4321");
+  await page.goto(FRONT);
   await expect(page.getByRole("heading", { name: /Vultus/ })).toBeVisible();
 });
 
@@ -12,7 +24,7 @@ test("compare upload 2 PNG returns queued job", async ({ page }) => {
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     Buffer.alloc(56, 0),
   ]);
-  await page.goto("http://localhost:4321");
+  await page.goto(FRONT);
   await page
     .locator('input[name="image_a"]')
     .setInputFiles({ name: "a.png", mimeType: "image/png", buffer: png });
@@ -31,14 +43,14 @@ test("golden pair reaches done, slider responds and download starts", async ({
   page,
 }) => {
   test.slow();
-  const aPng = fileURLToPath(new URL("./fixtures/a.png", import.meta.url));
-  const bPng = fileURLToPath(new URL("./fixtures/b.png", import.meta.url));
-  await page.goto("http://localhost:4321");
-  await page.locator('input[name="image_a"]').setInputFiles(aPng);
-  await page.locator('input[name="image_b"]').setInputFiles(bPng);
+  // En prod el pipeline warm tarda ~18s; en cold + cola hasta 70s. Timeout amplio sin colgar.
+  const doneTimeout = process.env.FRONT_URL ? 120_000 : 80_000;
+  await page.goto(FRONT);
+  await page.locator('input[name="image_a"]').setInputFiles(GOLDEN_A);
+  await page.locator('input[name="image_b"]').setInputFiles(GOLDEN_B);
   await page.getByRole("button", { name: /Comparar/ }).click();
   await expect(page.locator("#status")).toContainText(/done/, {
-    timeout: 80_000,
+    timeout: doneTimeout,
   });
   for (const id of ["panel-uv-a", "panel-uv-b", "panel-heatmap"] as const) {
     const img = page.getByTestId(id);

@@ -443,11 +443,35 @@ except ImportError:  # local Docker sin modal: solo corre sidecar FastAPI
 if HAVE_MODAL:
     app = modal.App("vultus-workers")
 
-    # Imagen base GPU con torch + diffusers + mediapipe
-    # Reusa Dockerfile.gpu local para paridad (contexto backend como compose).
-    # Sin .pip_install extra: boto3+httpx ya van en requirements.txt y la
-    # imagen CUDA solo expone `python3` (sin `python`).
-    image = modal.Image.from_dockerfile("backend/Dockerfile.gpu", context_dir="backend")
+    # Imagen por receta (no from_dockerfile): cada paso se cachea por hash y
+    # el codigo viaja en el paquete del deploy, asi los deploys de solo-codigo
+    # no reconstruyen nada (<60s). Solo cambian la imagen los cambios a esta
+    # receta o a requirements.txt. Paridad con Dockerfile.gpu (uso local):
+    # misma base devel, mismos paquetes, mismo orden torch primero.
+    # Base devel (no runtime): pytorch3d se compila desde source y sin nvcc
+    # queda solo-CPU -> `_C.rasterize_meshes` falla sin GPU en /ml/flame.
+    # Deploys estrictamente secuenciales: dos builds concurrentes no comparten
+    # cache y ambos pagan el build completo.
+    image = (
+        modal.Image.from_registry("nvidia/cuda:12.6.0-devel-ubuntu22.04", add_python="3.10")
+        .apt_install("build-essential", "python3-dev", "ninja-build", "curl", "libgl1", "libglib2.0-0", "git")
+        .pip_install(
+            "torch==2.13.0",
+            "torchvision==0.28.0",
+            index_url="https://download.pytorch.org/whl/cu126",
+        )
+        .pip_install_from_requirements("backend/requirements.txt")
+        .run_commands(
+            "pip install --no-cache-dir fvcore iopath",
+            # Sin `|| echo`: pytorch3d es requerido en prod (rasterizador DECA).
+            # --no-build-isolation: su setup.py importa torch y el env aislado
+            # PEP 517 no lo trae (ahi moria con ModuleNotFoundError: torch).
+            # CXX=g++: torch elige clang++ por defecto y no existe en la imagen.
+            # FORCE_CUDA=1: el builder no tiene GPU y setup.py decidiria solo-CPU
+            # aunque haya nvcc; T4 es sm_75, una sola arch para compilar rapido.
+            "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST=7.5 CXX=g++ CC=gcc pip install --no-cache-dir --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git",
+        )
+    )
 
     # Volume para cachear pesos FreeUV / FLAME / GNM (evita re-descarga en cold start)
     weights = modal.Volume.from_name("vultus-weights", create_if_missing=True)
@@ -457,22 +481,158 @@ else:
     weights = None  # type: ignore
 
 # Secrets: Cloudflare R2 + Queues creds
-# modal secret create vultus-cloudflare CLOUDFLARE_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
+# modal secret create vultus-cloudflare CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... CLOUDFLARE_QUEUE_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=vultus-jobs VULTUS_API_URL=https://api.vultus.esau.com.mx
+# Timeouts espejo de PipelineConfig Rust (5+10+30+60=TTL). Sin magic numbers sueltos.
+LANDMARKS_TIMEOUT_SECS = 5
+FLAME_TIMEOUT_SECS = 10
+FREEUV_TIMEOUT_SECS = 30
+TOTAL_TIMEOUT_SECS = 60
+# Progreso canonico espejo de pipeline.rs run_pair_inner.
+PROGRESS_LANDMARKS = 0.15
+PROGRESS_FLAME = 0.40
+PROGRESS_FREEUV = 0.75
+PROGRESS_BAKE = 0.95
+PROGRESS_DONE = 1.0
 
 
-def freeuv_worker(job_id: str, r2_keys: dict):
+def _env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+def _r2_client():
+    import boto3
+
+    account = _env("CLOUDFLARE_ACCOUNT_ID")
+    key_id = _env("R2_ACCESS_KEY_ID")
+    secret = _env("R2_SECRET_ACCESS_KEY")
+    if not account or not key_id or not secret:
+        raise RuntimeError("r2 creds missing: CLOUDFLARE_ACCOUNT_ID/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY")
+    return boto3.client(
+        "s3",
+        endpoint_url=f"https://{account}.r2.cloudflarestorage.com",
+        aws_access_key_id=key_id,
+        aws_secret_access_key=secret,
+    )
+
+
+def _r2_bucket() -> str:
+    return _env("R2_BUCKET", "vultus-jobs") or "vultus-jobs"
+
+
+def _api_base() -> str:
+    return _env("VULTUS_API_URL", "https://api.vultus.esau.com.mx").rstrip("/") or "https://api.vultus.esau.com.mx"
+
+
+def _report_progress(job_id: str, progress: float, stage: str) -> None:
+    """Best-effort: actualiza DO via gateway. Nunca tumba el job por fallo de progreso."""
+    import urllib.request
+
+    url = f"{_api_base()}/v1/jobs/{job_id}/progress"
+    body = json.dumps({"progress": progress, "stage": stage}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (compatible; VultusModal/1.0)"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except Exception as e:
+        logger.warning("progress update failed job=%s stage=%s err=%s", job_id, stage, e)
+
+
+def _report_failed(job_id: str) -> None:
+    """Marca DO como failed tras error/timeout. Best-effort con log, nunca lanza."""
+    import urllib.request
+
+    url = f"{_api_base()}/v1/jobs/{job_id}/progress"
+    body = json.dumps({"status": "failed"}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (compatible; VultusModal/1.0)"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except Exception as e:
+        logger.warning("failed report failed job=%s err=%s", job_id, e)
+
+
+def _fetch_r2_bytes(bucket: str, key: str) -> bytes:
+    r2 = _r2_client()
+    obj = r2.get_object(Bucket=bucket, Key=key)
+    data = obj["Body"].read()
+    if not data:
+        raise ValueError(f"empty r2 object {key}")
+    return data
+
+
+def _heatmap_abs_diff(uv_a: bytes, uv_b: bytes) -> bytes:
+    if len(uv_a) != UV_LEN or len(uv_b) != UV_LEN:
+        raise ValueError(f"heatmap needs {UV_LEN} bytes per uv")
+    return bytes(x - y if x >= y else y - x for x, y in zip(uv_a, uv_b))
+
+
+def _png_from_uv_raw(raw: bytes):
+    from PIL import Image
+
+    if len(raw) != UV_LEN:
+        raise ValueError(f"expected {UV_LEN} uv bytes, got {len(raw)}")
+    return Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), raw)
+
+
+def _build_result_zip(uv_a_png: bytes, uv_b_png: bytes, heat_png: bytes) -> bytes:
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as z:
+        z.writestr("uv_a.png", uv_a_png)
+        z.writestr("uv_b.png", uv_b_png)
+        z.writestr("heatmap.png", heat_png)
+    return buf.getvalue()
+
+
+def mediapipe_infer(job_id: str, image: bytes) -> bytes:
+    """Nucleo landmarks real. Falla ruidoso sin pesos/CUDA-paquetizados, nunca doble silencioso."""
+    t0 = time.perf_counter()
+    out = _real_landmarks(image)
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("mediapipe ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
+    return out
+
+
+def flame_infer(job_id: str, image: bytes, landmarks_json: bytes) -> bytes:
+    """Nucleo fitting real: payload u32 BE + landmarks + imagen -> flaw-uv 512."""
+    t0 = time.perf_counter()
+    n = len(landmarks_json)
+    payload = n.to_bytes(4, "big") + landmarks_json + image
+    out = _real_flaw_uv(payload)
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("flame ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
+    return out
+
+
+def freeuv_infer(job_id: str, flaw_uv: bytes) -> bytes:
+    """Nucleo inpainting real: flaw-uv -> complete-uv 512."""
+    t0 = time.perf_counter()
+    out = _real_complete_uv(flaw_uv)
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("freeuv ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
+    return out
+
+
+def freeuv_worker(job_id: str, flaw_uv: bytes):
     """
-    Worker 3 - FreeUV SD1.5 inpainting.
-    En prod consume desde Cloudflare Queues via HTTP Pull Consumer (ver pull_consumer.py).
-    Lee flaw-uv + image desde R2, escribe complete-uv a R2.
-    En local este mismo código corre en Docker sin Modal.
+    Worker 3 - FreeUV SD1.5 inpainting (GPU, estrictamente 1 input por GPU).
+    Entrada: flaw-uv 786432 bytes. Salida: complete-uv 786432 bytes.
+    Pool de 2 contenedores para paralelizar cara A/B del mismo job;
+    cada container procesa 1 input (sin @modal.concurrent = sin OOM).
+    Llama inferencia real, nunca doble silencioso.
     """
-    # TODO: import models.freeuv, descargar pesos a /weights si no existen
-    # r2 = boto3.client("s3", endpoint_url=f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com")
-    # flaw_uv = r2.get_object(Bucket="vultus-jobs", Key=r2_keys["flaw_uv"])["Body"].read()
-    # complete_uv = models.freeuv.inpaint(flaw_uv)
-    # r2.put_object(Bucket="vultus-jobs", Key=f"{job_id}/uv.png", Body=complete_uv)
-    pass
+    return freeuv_infer(job_id, flaw_uv)
 
 
 if HAVE_MODAL:
@@ -483,15 +643,21 @@ if HAVE_MODAL:
         memory=16384,
         volumes={"/weights": weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
-        max_containers=1,  # FreeUV OOM si >1 por GPU (pool de 1 container)
+        max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU (anti-OOM)
         timeout=60,
         min_containers=0,
     )(freeuv_worker)
 
 
-def flame_worker(job_id: str, r2_keys: dict):
-    """Worker 2 - FLAME Fitting 3DDFA_V3/DECA."""
-    pass
+def flame_worker(job_id: str, r2_key: str, landmarks_json: bytes):
+    """Worker 2 - FLAME fitting DECA+Open (GPU, 1 input por GPU). Lee imagen de R2."""
+    t0 = time.perf_counter()
+    bucket = _r2_bucket()
+    image = _fetch_r2_bytes(bucket, r2_key)
+    out = flame_infer(job_id, image, landmarks_json)
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("flame_worker ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
+    return out
 
 
 if HAVE_MODAL:
@@ -502,14 +668,20 @@ if HAVE_MODAL:
         memory=32768,
         volumes={"/weights": weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
-        max_containers=1,
+        max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU
         timeout=60,
     )(flame_worker)
 
 
-def mediapipe_worker(job_id: str, r2_keys: dict):
-    """Worker 1 - MediaPipe 478 landmarks CPU (puede correr también en Cloudflare Workers si se portara a WASM)."""
-    pass
+def mediapipe_worker(job_id: str, r2_key: str):
+    """Worker 1 - MediaPipe 478 landmarks CPU. Lee imagen de R2, retorna JSON 478 finitos."""
+    t0 = time.perf_counter()
+    bucket = _r2_bucket()
+    image = _fetch_r2_bytes(bucket, r2_key)
+    out = mediapipe_infer(job_id, image)
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("mediapipe_worker ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
+    return out
 
 
 if HAVE_MODAL:
@@ -517,6 +689,7 @@ if HAVE_MODAL:
         image=image,
         cpu=2,
         memory=4096,
+        volumes={"/weights": weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
         max_containers=4,
         timeout=30,
@@ -542,17 +715,217 @@ if HAVE_MODAL:
     )(gnm_bake_worker)
 
 
+def _cf_pull_messages(batch_size: int = 1):
+    """Pull de Cloudflare Queues via REST. Retorna lista de dicts con id/lease_id/body."""
+    import httpx
+
+    account = _env("CLOUDFLARE_ACCOUNT_ID")
+    token = _env("CLOUDFLARE_API_TOKEN") or _env("CLOUDFLARE_API_KEY")
+    queue_id = _env("CLOUDFLARE_QUEUE_ID") or _env("QUEUE_ID") or "vultus-jobs"
+    if not account or not token:
+        logger.info("queues creds missing, skip pull")
+        return []
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account}/queues/{queue_id}/messages/pull"
+    try:
+        r = httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"visibility_timeout_ms": TOTAL_TIMEOUT_SECS * 1000, "batch_size": batch_size},
+            timeout=10.0,
+        )
+    except Exception as e:
+        logger.warning("queues pull transport failed err=%s", e)
+        return []
+    if r.status_code != 200:
+        # Diagnostico sin exponer el secreto: longitudes y queue_id no sensible.
+        logger.warning(
+            "queues pull status=%d body=%.200s (token_len=%d queue_id=%s)",
+            r.status_code,
+            r.text,
+            len(token),
+            _env("CLOUDFLARE_QUEUE_ID") or _env("QUEUE_ID") or "vultus-jobs",
+        )
+        return []
+    try:
+        data = r.json()
+    except Exception as e:
+        logger.warning("queues pull bad json err=%s", e)
+        return []
+    msgs = ((data.get("result") or {}).get("messages")) or data.get("messages") or []
+    return msgs if isinstance(msgs, list) else []
+
+
+def _cf_ack_messages(acks: list) -> None:
+    import httpx
+
+    if not acks:
+        return
+    account = _env("CLOUDFLARE_ACCOUNT_ID")
+    token = _env("CLOUDFLARE_API_TOKEN") or _env("CLOUDFLARE_API_KEY")
+    queue_id = _env("CLOUDFLARE_QUEUE_ID") or _env("QUEUE_ID") or "vultus-jobs"
+    if not account or not token:
+        return
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account}/queues/{queue_id}/messages/ack"
+    try:
+        httpx.post(url, headers={"Authorization": f"Bearer {token}"}, json={"acks": acks}, timeout=10.0)
+    except Exception as e:
+        logger.warning("queues ack failed err=%s", e)
+
+
+def _parse_queue_body(msg: dict) -> tuple:
+    """Extrae (job_id, r2_a, r2_b) del body. La cola solo lleva IDs+punteros, nunca bytes."""
+    body = msg.get("body") or msg.get("message") or {}
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except Exception as e:
+            raise ValueError(f"queue body not json: {e}") from e
+    if not isinstance(body, dict):
+        raise ValueError("queue body not object")
+    job_id = str(body.get("job_id") or body.get("jobId") or "")
+    r2_keys = body.get("r2_keys") or body.get("r2Keys") or {}
+    r2_a = str(r2_keys.get("image_a") or r2_keys.get("a") or "")
+    r2_b = str(r2_keys.get("image_b") or r2_keys.get("b") or "")
+    if not job_id or not r2_a or not r2_b:
+        raise ValueError("queue body missing job_id/r2_keys")
+    if ".." in r2_a or ".." in r2_b:
+        raise ValueError("invalid r2 key")
+    return job_id, r2_a, r2_b
+
+
+def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
+    """Orquestador produccion: fetch R2, cadenas A/B en paralelo, join, zip a R2, progreso vivo."""
+    import concurrent.futures
+
+    t0 = time.perf_counter()
+    bucket = _r2_bucket()
+    logger.info("job start job=%s a=%s b=%s", job_id, r2_a, r2_b)
+    _report_progress(job_id, PROGRESS_LANDMARKS, "landmarks")
+    r2 = _r2_client()
+    img_a = r2.get_object(Bucket=bucket, Key=r2_a)["Body"].read()
+    img_b = r2.get_object(Bucket=bucket, Key=r2_b)["Body"].read()
+    if not img_a or not img_b:
+        raise ValueError("empty image from r2")
+
+    def _is_modal_function(fn) -> bool:
+        return HAVE_MODAL and hasattr(fn, "remote")
+
+    # Landmarks A/B en paralelo. En Modal via workers remotos (CPU pool x4);
+    # en local/Docker via inferencia directa (mismo nucleo real).
+    if _is_modal_function(mediapipe_worker):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(mediapipe_worker.remote, job_id, r2_a)
+            fut_b = ex.submit(mediapipe_worker.remote, job_id, r2_b)
+            lm_a = fut_a.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
+            lm_b = fut_b.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(mediapipe_infer, job_id, img_a)
+            fut_b = ex.submit(mediapipe_infer, job_id, img_b)
+            lm_a = fut_a.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
+            lm_b = fut_b.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
+    _check_landmarks_json(lm_a)
+    _check_landmarks_json(lm_b)
+    _report_progress(job_id, PROGRESS_FLAME, "flame")
+
+    if _is_modal_function(flame_worker):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(flame_worker.remote, job_id, r2_a, lm_a)
+            fut_b = ex.submit(flame_worker.remote, job_id, r2_b, lm_b)
+            flaw_a = fut_a.result(timeout=FLAME_TIMEOUT_SECS + 50)
+            flaw_b = fut_b.result(timeout=FLAME_TIMEOUT_SECS + 50)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(flame_infer, job_id, img_a, lm_a)
+            fut_b = ex.submit(flame_infer, job_id, img_b, lm_b)
+            flaw_a = fut_a.result(timeout=FLAME_TIMEOUT_SECS + 50)
+            flaw_b = fut_b.result(timeout=FLAME_TIMEOUT_SECS + 50)
+    if len(flaw_a) != UV_LEN or len(flaw_b) != UV_LEN:
+        raise ValueError("flaw-uv bad length")
+    _report_progress(job_id, PROGRESS_FREEUV, "freeuv")
+
+    if _is_modal_function(freeuv_worker):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(freeuv_worker.remote, job_id, flaw_a)
+            fut_b = ex.submit(freeuv_worker.remote, job_id, flaw_b)
+            uv_a = fut_a.result(timeout=FREEUV_TIMEOUT_SECS + 30)
+            uv_b = fut_b.result(timeout=FREEUV_TIMEOUT_SECS + 30)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(freeuv_infer, job_id, flaw_a)
+            fut_b = ex.submit(freeuv_infer, job_id, flaw_b)
+            uv_a = fut_a.result(timeout=FREEUV_TIMEOUT_SECS + 30)
+            uv_b = fut_b.result(timeout=FREEUV_TIMEOUT_SECS + 30)
+    if len(uv_a) != UV_LEN or len(uv_b) != UV_LEN:
+        raise ValueError("complete-uv bad length")
+    _report_progress(job_id, PROGRESS_BAKE, "bake")
+
+    heat = _heatmap_abs_diff(bytes(uv_a), bytes(uv_b))
+    # PNG + zip en memoria, sin disco. Nombres exactos del contrato.
+    import io as _io
+
+    from PIL import Image
+
+    def _to_png(raw: bytes) -> bytes:
+        img = Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(raw))
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    zip_bytes = _build_result_zip(_to_png(uv_a), _to_png(uv_b), _to_png(heat))
+    r2.put_object(Bucket=bucket, Key=f"jobs/{job_id}/result.zip", Body=zip_bytes, ContentType="application/zip")
+    _report_progress(job_id, PROGRESS_DONE, "done")
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("job done job=%s zip_len=%d duration_ms=%d", job_id, len(zip_bytes), dt)
+
+
 def queue_pull_consumer():
     """
-    HTTP Pull Consumer para Cloudflare Queues.
-    Polls Queues REST API, despacha a workers Modal via .spawn().
-    Alternativa a Queues consumer binding (que solo funciona dentro de Workers).
+    HTTP Pull Consumer para Cloudflare Queues (orquestador produccion).
+    Polls Queues REST API cada 5s, despacha cadenas por cara en paralelo,
+    join ambas ramas, escribe result.zip a R2 y actualiza progreso vivo.
     Ver https://developers.cloudflare.com/queues/configuration/pull-consumers/
     """
-    # TODO: implementar con httpx + Cloudflare Queues REST API
-    # messages = httpx.get(f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/queues/{QUEUE_ID}/messages/pull")
-    # for msg in messages: freeuv_worker.spawn(msg["job_id"], msg["r2_keys"])
-    pass
+    t0 = time.perf_counter()
+    try:
+        msgs = _cf_pull_messages(batch_size=1)
+    except Exception as e:
+        logger.warning("pull failed err=%s", e)
+        return
+    if not msgs:
+        return
+    for msg in msgs:
+        msg_id = str(msg.get("id") or msg.get("message_id") or "")
+        lease = msg.get("lease_id") or msg.get("leaseId")
+        try:
+            job_id, r2_a, r2_b = _parse_queue_body(msg)
+        except Exception as e:
+            logger.warning("bad queue message skipped err=%s", e)
+            if msg_id:
+                _cf_ack_messages([{"id": msg_id, **({"lease_id": lease} if lease else {})}])
+            continue
+        try:
+            # Deadline total = TTL: la primera llamada paga cold+carga, el resto warm.
+            deadline = TOTAL_TIMEOUT_SECS
+            import concurrent.futures as _cf
+
+            with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(_run_job_from_r2, job_id, r2_a, r2_b)
+                fut.result(timeout=deadline)
+        except Exception:
+            failed_id = job_id if "job_id" in locals() else "unknown"
+            logger.exception("job failed job=%s", failed_id)
+            # _report_failed es best-effort con log interno, nunca lanza.
+            if failed_id != "unknown":
+                _report_failed(failed_id)
+        finally:
+            if msg_id:
+                ack = {"id": msg_id}
+                if lease:
+                    ack["lease_id"] = lease
+                _cf_ack_messages([ack])
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("pull tick done msgs=%d duration_ms=%d", len(msgs), dt)
 
 
 if HAVE_MODAL:
@@ -560,7 +933,10 @@ if HAVE_MODAL:
         image=image,
         cpu=1,
         memory=1024,
-        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        secrets=[
+            modal.Secret.from_name("vultus-cloudflare"),
+            modal.Secret.from_name("vultus-queues-token"),
+        ],
         schedule=modal.Period(seconds=5),
     )(queue_pull_consumer)
 

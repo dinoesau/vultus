@@ -350,8 +350,10 @@ def _freeuv_pipe():
             unet = UNet.from_pretrained(sdv, subfolder="unet").to("cuda")
             aligner = ControlNetModel.from_unet(unet)
             encoder = detail_encoder(unet, enc + "/", "cuda", dtype=torch.float32)
-            aligner.load_state_dict(torch.load(ali, map_location="cpu"), strict=False)
-            encoder.load_state_dict(torch.load(det, map_location="cpu"), strict=False)
+            # torch>=2.6 usa weights_only=True por defecto: estos .bin son
+            # checkpoints propios (no solo tensores), forzar False como en 2.4.
+            aligner.load_state_dict(torch.load(ali, map_location="cpu", weights_only=False), strict=False)
+            encoder.load_state_dict(torch.load(det, map_location="cpu", weights_only=False), strict=False)
             aligner.to("cuda")
             encoder.to("cuda")
             pipe = StableDiffusionControlNetPipeline.from_pretrained(

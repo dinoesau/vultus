@@ -1,10 +1,10 @@
 # ML sidecar GPU (Python). El binario Rust NO va aquí.
 # Rust llama a este contenedor vía ML_SIDECAR_URL (POST /ml/landmarks|flame|freeuv).
 # Paridad con Modal: misma imagen base que modal_app.py.
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /work
-RUN apt-get update && apt-get install -y python3 python3-pip curl libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y python3 python3-pip curl libgl1 libglib2.0-0 git && rm -rf /var/lib/apt/lists/*
 # Modal invoca `python` en sus probes: la imagen CUDA solo trae `python3`.
 RUN ln -sf /usr/bin/python3 /usr/bin/python && python --version
 COPY requirements.txt ./
@@ -16,11 +16,16 @@ COPY requirements.txt ./
 #   mediapipe (face_landmarker.task), freeuv-resources (uv.jpg),
 #   deca-code (decalib+data), freeuv-code (detail_encoder+pipeline_sd15).
 # Fase deploy-real-models: torch/diffusers reales pineados arriba; el build
-# instala primero torch cu121 y luego el resto desde PyPI.
-RUN pip3 install --no-cache-dir torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu121
+# instala primero torch cu126 y luego el resto desde PyPI.
+RUN pip3 install --no-cache-dir torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu126
 RUN pip3 install --no-cache-dir -r requirements.txt
-# pytorch3d para DECA renderer (wheel oficial py310 cu121 torch 2.4).
-RUN pip3 install --no-cache-dir fvcore iopath && pip3 install --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt241/download.html
+# pytorch3d para DECA renderer: sin wheel oficial para cu126/torch 2.13
+# (solo hasta pyt241), se compila desde source contra el torch instalado
+# (verificado: pytorch3d 0.7.9 compila ok en ~9min). Fallback tolerante:
+# en local/doubles no se usa (dobles deterministas sin DECA); si la
+# compilacion fallara, el _deca_model falla ruidoso (500 con causa) en
+# real, nunca doble silencioso.
+RUN pip3 install --no-cache-dir fvcore iopath; pip3 install --no-cache-dir git+https://github.com/facebookresearch/pytorch3d.git || echo "pytorch3d opcional omitido: sin wheel torch2.13/cu126 (deuda prod-GPU)"
 # Codigo al final: los cambios de codigo no invalidan las capas pesadas de pip.
 COPY modal_app.py ./
 ENV ML_PORT=8081 WEIGHTS_DIR=/weights

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ML sidecar GPU (Python). El binario Rust NO va aquí.
 # Uso LOCAL (compose/docker): esta imagen levanta el sidecar para paridad.
 # Modal USA la receta en backend/modal_app.py (from_registry + mounts), no
@@ -8,9 +9,11 @@
 # solo-CPU -> `_C.rasterize_meshes` falla "Not compiled with GPU support" en
 # /ml/flame. Con devel el build tarda mas pero el rasterizador CUDA funciona.
 FROM nvidia/cuda:12.6.0-devel-ubuntu22.04
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+# Sin PIP_NO_CACHE_DIR: los RUN de pip usan mount de cache BuildKit (no queda
+# en la imagen final) para no re-descargar torch en cada build.
+ENV PYTHONUNBUFFERED=1
 WORKDIR /work
-RUN apt-get update && apt-get install -y python3 python3-pip curl libgl1 libglib2.0-0 git build-essential python3-dev ninja-build && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip curl libgl1 libglib2.0-0 git build-essential python3-dev ninja-build && rm -rf /var/lib/apt/lists/*
 # Modal invoca `python` en sus probes: la imagen CUDA solo trae `python3`.
 RUN ln -sf /usr/bin/python3 /usr/bin/python && python --version
 COPY requirements.txt ./
@@ -23,15 +26,23 @@ COPY requirements.txt ./
 #   deca-code (decalib+data), freeuv-code (detail_encoder+pipeline_sd15).
 # Fase deploy-real-models: torch/diffusers reales pineados arriba; el build
 # instala primero torch cu126 y luego el resto desde PyPI.
-RUN pip3 install --no-cache-dir torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu126
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Cache mount BuildKit en vez de --no-cache-dir (no queda en la imagen).
+# RUNs separados a proposito para granularidad de capas: torch cambia poco,
+# requirements mas a menudo.
+# hadolint ignore=DL3042,DL3059
+RUN --mount=type=cache,target=/root/.cache/pip pip3 install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu126
+# hadolint ignore=DL3042,DL3059
+RUN --mount=type=cache,target=/root/.cache/pip pip3 install -r requirements.txt
 # pytorch3d para DECA renderer: sin wheel oficial para cu126/torch 2.13
 # (solo hasta pyt241), se compila desde source contra el torch instalado
 # (verificado: pytorch3d 0.7.9 compila ok en ~9min). Fallback tolerante:
 # en local/doubles no se usa (dobles deterministas sin DECA); si la
 # compilacion fallara, el _deca_model falla ruidoso (500 con causa) en
 # real, nunca doble silencioso.
-RUN pip3 install --no-cache-dir fvcore iopath; pip3 install --no-cache-dir --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git || echo "pytorch3d opcional omitido: sin wheel torch2.13/cu126 (deuda prod-GPU)"
+# Cache mount en vez de --no-cache-dir; fvcore/iopath sin pin es
+# pre-existente (solo warning, no falla el CI).
+# hadolint ignore=DL3042,DL3013
+RUN --mount=type=cache,target=/root/.cache/pip pip3 install fvcore iopath; pip3 install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git || echo "pytorch3d opcional omitido: sin wheel torch2.13/cu126 (deuda prod-GPU)"
 # Codigo al final: los cambios de codigo no invalidan las capas pesadas de pip.
 COPY modal_app.py ./
 ENV ML_PORT=8081 WEIGHTS_DIR=/weights

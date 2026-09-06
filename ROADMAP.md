@@ -28,12 +28,12 @@ graph TB
     FE -- POST multipart 2 jpgs --> CF[Cloudflare Worker - API Gateway]
     CF -- PutObject R2 + enqueue pointer --> Q[Cloudflare Queues 10k ops/día free]
     CF -- upload R2 presigned --> R2[R2 Bucket TTL 60s lifecycle]
-    Q -- HTTP Pull Consumer --> MO[Modal GPU Workers<br/>MediaPipe 478 + FLAME + FreeUV + GNM<br/>$30/mes free, 1-2s cold start]
+    Q -- HTTP Pull Consumer --> MO[Modal GPU Workers<br/>MediaPipe 478 + FLAME + FreeUV (GNM en Fase 2)<br/>$30/mes free, 1-2s cold start]
     MO -- result bytes --> R2
     MO -- progress --> DO[Durable Objects WS]
     R2 -- StreamingResponse zip --> CF
     CF -- WS progress 0.0-1.0 --> FE
-    FE --> DL[Descarga directa UV_A UV_B heatmap mesh PDF]
+    FE --> DL[Descarga directa UV_A UV_B heatmap (mesh y PDF en Fases 2-3)]
     R2 -. lifecycle 60s + tmpfs wipe .-> X[Olvido total]
     Q -. 24h retención free .-> X
 ```
@@ -54,7 +54,8 @@ Esto simplifica infra, reduce coste y es GDPR friendly.
 El cliente sube 2 imágenes vía `POST /v1/compare` en `Cloudflare Pages -> Worker`.
 El Worker valida, hace `R2 PutObject` con las 2 imágenes y encola solo `{job_id, r2_keys}` en `Cloudflare Queues` (Queues limita a 128KB por mensaje, no caben bytes). Retorna `202 + job_id` inmediato.
 El frontend se suscribe a `WS /v1/jobs/{id}/events` vía `Durable Objects`.
-Los workers en `Modal` consumen vía `HTTP Pull Consumer`, procesan `MediaPipe -> FLAME -> FreeUV -> GNM` y retornan bytes a `R2` con `lifecycle 60s`.
+Los workers en `Modal` consumen vía `HTTP Pull Consumer`, procesan `MediaPipe -> FLAME -> FreeUV` y retornan bytes a `R2` con `lifecycle 60s`.
+El bake GNM es identidad hasta Fase 2, por eso el zip vivo trae solo `uv_a.png, uv_b.png, heatmap.png`.
 El Worker hace `await R2 GetObject(job_id/result.zip)` y responde con `StreamingResponse` zip en memoria.
 `R2 lifecycle` hace `EXPIRE 60s` y el worker Modal hace `unlink` de `/tmp`.
 En dev local el flujo es idéntico pero `MemoryQueue` / `R2PointerQueue` en memoria sustituye a `Queues + R2` vía el mismo `core.queue` adapter (sin `Redis ARQ`; ver ADR-005).
@@ -69,14 +70,14 @@ Framework `Axum + tokio + serde + utoipa` para Seam 1 (`AppError 400/404/500`, `
 Queue con trait `Queue` en `vultus-core` (`MemoryQueue` local/test con `stored_lens`, `R2PointerQueue` prod con `Some(R2Keys)`, `Store` compartido, `EnqueueCommand`, `Stage` enum, `progress` / `set_progress`).
 Validación en bordes con `ImageBytes::parse` + `ImageBytesRef` zero-cost, `JobId::parse(trim)`, `Progress::parse` + `zero`, `R2Key` / `R2Keys` privados, `TtlSecs` nutype `1..=3600` default 60, `Job<State>` typestate, `assert_ok` para invariantes (500).
 CPU: `vultus-workers-cpu` infallible (`compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap`, `bake_bfm_to_gnm(&FlawUv) -> CompleteUv`, sin dep `image`, `UV_LEN = 786432`).
-ML GPU: sidecar Python en `backend/modal_app.py` (`MediaPipe Tasks Vision`, `3DDFA_V3 o DECA para FLAME`, `FreeUV`, `GNM Head`, stubs `{"todo":...}` hasta Fase 1, `gnm_bake_worker` deprecated) tras `POST /ml/landmarks|flame|freeuv`, consumido por `MlSidecarClient::new(BaseUrl)` tipado (`-> Landmarks 478 JSON`, `-> FlawUv`, `-> CompleteUv` vía `FlamePayload u32 BE`). Rust nunca importa `torch`.
+ML GPU: sidecar Python en `backend/modal_app.py` con inferencia real (`MediaPipe Tasks Vision`, `DECA para FLAME`, `FreeUV` con `SD1.5 + CLIP`), N workers por modelo más `HTTP Pull Consumer` desde `Cloudflare Queues` con patrón `R2 pointer`, `gnm_bake_worker` deprecated (bake real en Fase 2) tras `POST /ml/landmarks|flame|freeuv`, consumido por `MlSidecarClient::new(BaseUrl)` tipado (`-> Landmarks 478 JSON`, `-> FlawUv`, `-> CompleteUv` vía `FlamePayload u32 BE`). Rust nunca importa `torch`.
 
 ### 4.2 Frontend
 
-Astro 4 con React Islands.
-Three.js para visor 3D y visor UV plano.
-Tailwind para estilos.
-Comunicación `REST + WebSocket` contra FastAPI.
+Astro static con islas mínimas y visor UV plano.
+El visor 3D con Three.js llega en Fase 2.
+Estilos CSS propios del proyecto.
+Comunicación `REST + WebSocket` contra el gateway edge en TypeScript.
 
 ### 4.3 Infra
 
@@ -89,8 +90,8 @@ Comunicación `REST + WebSocket` contra FastAPI.
 - **Cloudflare Turnstile + WAF** para rate limiting y DDoS free.
 - **Modal** para workers GPU (`FreeUV SD1.5 12GB`, `FLAME`) - `T4 $0.59/h`, `Starter $30/mes free` (~9.300 compares/mes gratis), cold start 1-2s, `HTTP Pull Consumer` desde Queues, `tmpfs` en container.
 - **Docker Compose** solo para dev local: `api`, `ml-sidecar`, `frontend` con paridad de contratos (`MemoryQueue` local / `R2PointerQueue` paridad prod, sin `redis`).
-- `Dockerfile` multi-stage para backend con `uv`.
-- `Dockerfile.gpu` basado en `nvidia/cuda:12.2-runtime` para workers GPU locales.
+- `Dockerfile` multi-stage Rust para el binario `vultus-api`.
+- `Dockerfile.gpu` basado en `nvidia/cuda:12.6-runtime` para workers GPU locales.
 - `modal_app.py` para deploy GPU en Modal, `wrangler.toml` para deploy edge en Cloudflare.
 - Sin `postgres` ni `minio` persistente por stateless.
 - CI con `GitHub Actions + buildx + GHCR` + `wrangler deploy` + `modal deploy`.
@@ -106,7 +107,7 @@ vultus/
 ├── backend/
 │   ├── Cargo.toml             # workspace Rust + anyhow/nutype/proptest
 │   ├── Cargo.lock
-│   ├── modal_app.py           # Modal GPU workers: MediaPipe/FLAME/FreeUV (prod, stubs Fase 1, gnm deprecated) + sidecar /ml/*
+│   ├── modal_app.py           # Modal GPU workers: MediaPipe/FLAME/FreeUV reales + pull consumer de Queues + sidecar /ml/* (bake GNM en Fase 2)
 │   ├── Dockerfile
 │   ├── Dockerfile.gpu
 │   ├── crates/
@@ -127,11 +128,14 @@ Objetivo: `cargo + Docker + Async` corriendo end-to-end con job dummy stateless 
 Tasks: crear `Cargo.toml` workspace con `anyhow/nutype/proptest`, `Dockerfile` multi-stage, `docker-compose.yml` con `api/ml-sidecar/frontend` para dev local (sin `redis`; `MemoryQueue` en memoria), configurar trait `Queue` (`MemoryQueue` local/test + `R2PointerQueue` prod) con `POST /v1/compare` (`202 {job_id, status queued}`) y `GET /v1/jobs/{id}` (`200 {job_id, status}`) y `WS /v1/jobs/{id}/events` vía Durable Objects, implementar `wrangler.toml` y healthchecks.
 Done: `cargo test` pasa (56 tests: 16 api con 2 config + 11 seam1 + 3 ws, 37 core con 32 unit + 5 edge_parity, 3 workers_cpu), `docker compose up` levanta todo en local, `wrangler dev` levanta edge, un job fake se encola (`MemoryQueue` local o `R2PointerQueue` en prod con `Some(R2Keys)`), es consumido, retorna longitudes vía `stored_lens` y expira a los 60s (`TtlSecs`) sin dejar archivos en `/tmp`.
 
-### Fase 1 - MVP UV canónico (3 semanas)
+### Fase 1 - MVP UV canónico (3 semanas) - HECHA (PR #17, 2026-09-06)
 
 Objetivo: comparación en UV canónico sin GNM.
-Tasks: Worker MediaPipe 478 en CPU, Worker FLAME fitting con `3DDFA_V3` o `DECA`, Worker FreeUV con `SD1.5 + CLIP`, orquestación `landmarks -> FLAME -> unwrap incompleto -> FreeUV -> UV completo 512x512`, API `POST /v1/compare` con 2 imágenes, frontend visor `UV_A | UV_B | heatmap diff` con slider de opacidad y normalización de pose.
-Done: 10 pares con variación de pose 0-30 grados comparables sin distorsión, tiempo menor a 20s por par en GPU T4, heatmap `|UV_A - UV_B|` visible por región.
+Tasks: Worker MediaPipe 478 en CPU, Worker FLAME fitting con `DECA`, Worker FreeUV con `SD1.5 + CLIP`, orquestación `landmarks -> FLAME -> unwrap incompleto -> FreeUV -> UV completo 512x512`, API `POST /v1/compare` con 2 imágenes, frontend visor `UV_A | UV_B | heatmap diff` con slider de opacidad y normalización de pose.
+El bake GNM quedó como identidad y el zip vivo trae `uv_a.png, uv_b.png, heatmap.png`.
+Done: desplegado vivo en `https://vultus.pages.dev/` con gateway edge más `HTTP Pull Consumer` en Modal y patrón `R2 pointer`.
+Evals en verde: sidecar con 478 puntos finitos y UV de 786432 bytes reales, smoke prod ~16.7s, e2e prod 3/3, `cargo test` más `clippy` más `fmt` verdes.
+Pendiente de Fase 1 original: validación de 10 pares con pose 0-30 grados, solo se congeló el par dorado frontal.
 
 ### Fase 2 - GNM Render 3D (2 semanas)
 
@@ -151,11 +155,13 @@ Objetivo: calidad y seguridad.
 Tasks: rate limiting, validación de tipos de imagen y tamaño, borrado seguro verificado, tests E2E con Playwright, CI lint y typecheck, manejo de errores con `Result`.
 Done: `docker compose -f docker-compose.prod.yml up` pasa E2E completo, ningún archivo persiste tras 65s, logs no contienen imágenes.
 
-### Fase 5 - Produccion (1.5 semanas)
+### Fase 5 - Produccion (1.5 semanas) - PARCIAL (path vivo en PR #17, falta hardening y observabilidad)
 
 Objetivo: deploy reproducible y observable en Cloudflare + Modal.
-Tasks: `Dockerfile.gpu` final, `tmpfs` para `/tmp` local y en Modal container, CI `buildx + GHCR` para local, `wrangler deploy` para `Cloudflare Pages (Astro) + Workers API + Queues + R2 + Durable Objects`, `modal deploy` para `Workers GPU` (`MediaPipe/FLAME/FreeUV/GNM`) con `HTTP Pull Consumer` desde `Cloudflare Queues`, `R2 lifecycle 60s` + `Queues retención 24h` + `alarm 60s`, observabilidad `Cloudflare Analytics + OpenTelemetry + Grafana + Sentry` para queue lag y VRAM, guardrails de borrado a 24h si se usa TTL extendido, smoke tests contra URL prod.
-Done: `https://vultus.com/compare` (Pages + Workers) corre vuelta completa menor a 20s, autoescala GPU en Modal por uso, coste estimado **$5/mes (Cloudflare Workers Paid) + $0 GPU hasta 9.300 compares/mes (Modal $30 free)** y luego `$0.0032` por compare T4.
+Hecho en PR #17: `wrangler deploy` para `Cloudflare Pages (Astro) + Workers API + Queues + R2 + Durable Objects`, `modal deploy` para `Workers GPU` (`MediaPipe/FLAME/FreeUV`) con `HTTP Pull Consumer` desde `Cloudflare Queues`, `R2 lifecycle` más `TTL lógico 60s` vía `alarm`, `tmpfs` para `/tmp`, smoke tests contra URL prod.
+Vivo hoy: frontend en `https://vultus.pages.dev/`, API en `api.vultus.esau.com.mx`, vuelta completa menor a 20s en warm.
+Pendiente: `wrangler deploy` y `modal deploy` en CI (`buildx + GHCR` es solo local), observabilidad `Cloudflare Analytics + OpenTelemetry + Grafana + Sentry` para queue lag y VRAM, guardrails de borrado a 24h si se usa TTL extendido, `Turnstile + WAF` activos, dominio final `https://vultus.com/compare`.
+Coste estimado **$5/mes (Cloudflare Workers Paid) + $0 GPU hasta 9.300 compares/mes (Modal $30 free)** y luego `$0.0032` por compare T4.
 
 ## 7. Deployment - Opciones evaluadas
 
@@ -223,7 +229,8 @@ Mitigación: frontend guarda zip en memoria y ofrece re-descarga local sin llama
 
 ## 10. Proximos pasos
 
-Confirmar ROADMAP y CONTEXT.
-Scaffold Fase 0 con `uv` y `docker-compose`.
-Implementar tracer bullet `Seam 1` con job dummy.
-Iterar Fase 1 con golden images verificadas manualmente.
+Fase 0 y Fase 1 hechas, con deploy vivo parcial en PR #17.
+Siguiente: Fase 2 GNM con bake real `BFM -> GNM`, `mesh.glb` en el zip y visor 3D.
+Después: Fase 3 con métricas y `report.pdf`.
+Después: Fase 4 con hardening (`Turnstile + WAF`, rate limiting, borrado verificado).
+Cierre: resto de Fase 5 con observabilidad completa y dominio final.

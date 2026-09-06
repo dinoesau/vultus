@@ -1,7 +1,7 @@
-FROM node:20-slim
+FROM node:22-slim
 WORKDIR /app
-COPY package.json package.json
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 COPY astro.config.mjs astro.config.mjs
 COPY src src
 ENV VITE_API_URL=http://localhost:8000

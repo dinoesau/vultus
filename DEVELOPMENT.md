@@ -5,7 +5,7 @@
 Instala Rust estable (`rustup`, `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt`).
 Instala `Docker` 24+ y `Docker Compose` v2.
 Para GPU instala `nvidia-container-toolkit` y verifica con `nvidia-smi`.
-Node 20+ para frontend Astro.
+Node 22+ para frontend Astro (Astro 7 exige 20.19+ o 22.12+).
 Python 3.12+ solo para sidecar ML (`backend/modal_app.py`, `Dockerfile.gpu`).
 Workspace deps: `anyhow` (errores en `main`), `nutype` (`TtlSecs`), `proptest` (dev).
 

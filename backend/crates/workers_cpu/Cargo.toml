@@ -1,9 +1,0 @@
-[package]
-name = "vultus-workers-cpu"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-vultus-core = { path = "../core" }
-serde = { workspace = true }
-thiserror = { workspace = true }

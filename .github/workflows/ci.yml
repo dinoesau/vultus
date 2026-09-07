@@ -1,6 +1,7 @@
 name: ci
 
-# Fast-path automatico <30s (cache caliente) + slow-path manual via boton.
+# Fast-path automatico + slow-path manual via boton.
+# Sin toolchain Rust: Python + TS + build + dry-run edge.
 # El build GPU pesado nunca corre en automatico: solo con
 # workflow_dispatch run_gpu=true (+ Approve si configuras el environment).
 
@@ -41,23 +42,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: backend
-          shared-key: vultus-fast
-      # Falla en ~2s sin compilar si el formato esta roto.
-      - name: fmt
-        working-directory: backend
-        run: cargo fmt --check
-      - name: clippy
-        working-directory: backend
-        run: cargo clippy --locked -- -D warnings
-      - name: test
-        working-directory: backend
-        run: cargo test --locked
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements-api.txt
+      - name: python deps
+        run: pip install -r backend/requirements-api.txt
+      - name: python typecheck
+        run: mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/store.py backend/gnm.py backend/pipeline_local.py backend/app.py
+      - name: python lint
+        run: ruff check backend/
+      - name: python tests
+        run: pytest backend/tests -q
+      - name: asset checks
+        run: python3 scripts/compute_bfm_to_gnm.py --check
 
       - uses: actions/setup-node@v4
         with:
@@ -65,6 +64,11 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: edge contract tests
+        working-directory: frontend
+        run: |
+          npm ci --prefer-offline --no-audit --no-fund
+          npx vitest run ../edge/contract.test.ts --root ..
       - name: frontend build
         working-directory: frontend
         run: |
@@ -93,8 +97,8 @@ jobs:
       matrix:
         include:
           - name: api
-            context: ./backend
-            dockerfile: ./backend/Dockerfile
+            context: .
+            dockerfile: ./backend/Dockerfile.api
           - name: frontend
             context: ./frontend
             dockerfile: ./frontend/Dockerfile

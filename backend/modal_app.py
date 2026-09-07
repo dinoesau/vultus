@@ -1207,6 +1207,7 @@ if HAVE_MODAL:
         image=image,
         cpu=1,
         memory=1024,
+        volumes={"/weights": weights},
         secrets=[
             modal.Secret.from_name("vultus-cloudflare"),
             modal.Secret.from_name("vultus-queues-token"),

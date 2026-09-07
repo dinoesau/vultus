@@ -67,6 +67,14 @@ test("golden pair reaches done, slider responds and download starts", async ({
   });
   await expect(page.locator("#heatmap-opacity-value")).toContainText("20%");
   await expect(page.getByTestId("panel-heatmap")).toHaveCSS("opacity", "0.2");
+  const viewer = page.getByTestId("viewer-3d");
+  await expect(viewer).toBeVisible();
+  await expect(page.locator("#viewer-3d-status")).toContainText(/meshes listos|mesh A cargado/);
+  for (const id of ["download-mesh-a", "download-mesh-b"] as const) {
+    const link = page.locator(`#${id}`);
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute("href", /^blob:/);
+  }
   const downloadLink = page.locator("#download-zip");
   await expect(downloadLink).toBeVisible();
   await expect(downloadLink).toHaveAttribute("href", /^blob:/);

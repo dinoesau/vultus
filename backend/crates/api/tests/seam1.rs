@@ -171,13 +171,14 @@ async fn test_job_expires_to_expired_status() {
     );
 }
 
-// Fase1-UV-canonico (aditivo): zip canonico + 404s, sin tocar los 11 anteriores.
+// Fase2-GNM (aditivo): zip de 5 archivos + meshes, sin tocar los 11 anteriores.
 #[tokio::test]
 async fn test_result_serves_canonical_zip_with_golden_pngs() {
     use std::io::Read;
     use std::sync::Arc;
     use vultus_core::{
-        CompareResult, CompleteUv, EnqueueCommand, Heatmap, ImageBytes, Queue, TtlSecs, UV_LEN,
+        build_gnm_glb, CompareResult, CompleteUv, EnqueueCommand, Heatmap, ImageBytes, Queue,
+        TtlSecs, UV_LEN,
     };
     fn golden(head: [u8; 2]) -> Vec<u8> {
         let mut v = vec![0u8; UV_LEN];
@@ -200,8 +201,13 @@ async fn test_result_serves_canonical_zip_with_golden_pngs() {
     let uv_a = CompleteUv::parse(golden([10, 200])).expect("uv_a");
     let uv_b = CompleteUv::parse(golden([4, 210])).expect("uv_b");
     let heat = Heatmap::parse(golden([6, 10])).expect("heat");
+    let mesh_a = build_gnm_glb(&uv_a);
+    let mesh_b = build_gnm_glb(&uv_b);
     queue
-        .complete_with_result(&job_id, CompareResult::new(uv_a, uv_b, heat))
+        .complete_with_result(
+            &job_id,
+            CompareResult::new(uv_a, uv_b, heat, mesh_a, mesh_b),
+        )
         .await
         .expect("complete");
 
@@ -228,39 +234,62 @@ async fn test_result_serves_canonical_zip_with_golden_pngs() {
 
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor).expect("unzip");
-    assert_eq!(archive.len(), 3);
+    assert_eq!(archive.len(), 5);
     let mut names = Vec::new();
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).expect("entry");
         names.push(file.name().to_string());
         let mut data = Vec::new();
-        file.read_to_end(&mut data).expect("read png");
-        // Magic PNG literal, nunca recomputado.
-        assert!(
-            data.len() > 8 && data[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
-            "magic png en {}",
-            file.name()
-        );
-        let img = image::load_from_memory(&data).expect("decode png");
-        assert_eq!(img.width(), 512, "ancho {}", file.name());
-        assert_eq!(img.height(), 512, "alto {}", file.name());
-        let raw = img.to_rgb8().into_raw();
-        assert_eq!(raw.len(), UV_LEN, "len {}", file.name());
-        let expected_head: [u8; 2] = match file.name() {
-            "uv_a.png" => [10, 200],
-            "uv_b.png" => [4, 210],
-            "heatmap.png" => [6, 10],
-            other => panic!("nombre inesperado {other}"),
-        };
-        assert_eq!(&raw[..2], &expected_head, "head {}", file.name());
-        assert!(
-            raw[2..].iter().all(|&x| x == 0),
-            "resto cero en {}",
-            file.name()
-        );
+        file.read_to_end(&mut data).expect("read");
+        if file.name().ends_with(".png") {
+            // Magic PNG literal, nunca recomputado.
+            assert!(
+                data.len() > 8 && data[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                "magic png en {}",
+                file.name()
+            );
+            let img = image::load_from_memory(&data).expect("decode png");
+            assert_eq!(img.width(), 512, "ancho {}", file.name());
+            assert_eq!(img.height(), 512, "alto {}", file.name());
+            let raw = img.to_rgb8().into_raw();
+            assert_eq!(raw.len(), UV_LEN, "len {}", file.name());
+            let expected_head: [u8; 2] = match file.name() {
+                "uv_a.png" => [10, 200],
+                "uv_b.png" => [4, 210],
+                "heatmap.png" => [6, 10],
+                other => panic!("nombre png inesperado {other}"),
+            };
+            assert_eq!(&raw[..2], &expected_head, "head {}", file.name());
+            assert!(
+                raw[2..].iter().all(|&x| x == 0),
+                "resto cero en {}",
+                file.name()
+            );
+        } else if file.name().ends_with(".glb") {
+            // Magic glTF literal mas longitud coherente.
+            assert!(
+                data.len() > 12 && data[..4] == [0x67, 0x6C, 0x54, 0x46],
+                "magic glTF en {}",
+                file.name()
+            );
+            let total = u32::from_le_bytes(data[8..12].try_into().expect("header")) as usize;
+            assert_eq!(total, data.len(), "len glb {}", file.name());
+            assert!(data.len() > UV_LEN, "glb con textura {}", file.name());
+        } else {
+            panic!("nombre inesperado {}", file.name());
+        }
     }
     names.sort();
-    assert_eq!(names, vec!["heatmap.png", "uv_a.png", "uv_b.png"]);
+    assert_eq!(
+        names,
+        vec![
+            "heatmap.png",
+            "mesh_a.glb",
+            "mesh_b.glb",
+            "uv_a.png",
+            "uv_b.png"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -285,8 +314,8 @@ async fn test_result_bad_uuid_returns_400() {
 async fn test_result_expired_returns_404() {
     use std::sync::Arc;
     use vultus_core::{
-        CompareResult, CompleteUv, EnqueueCommand, Heatmap, ImageBytes, ManualClock, Queue,
-        TtlSecs, UV_LEN,
+        build_gnm_glb, CompareResult, CompleteUv, EnqueueCommand, Heatmap, ImageBytes, ManualClock,
+        Queue, TtlSecs, UV_LEN,
     };
     fn golden(head: [u8; 2]) -> Vec<u8> {
         let mut v = vec![0u8; UV_LEN];
@@ -315,6 +344,8 @@ async fn test_result_expired_returns_404() {
                 CompleteUv::parse(golden([10, 200])).expect("uv_a"),
                 CompleteUv::parse(golden([4, 210])).expect("uv_b"),
                 Heatmap::parse(golden([6, 10])).expect("heat"),
+                build_gnm_glb(&CompleteUv::parse(golden([10, 200])).expect("mesh_a")),
+                build_gnm_glb(&CompleteUv::parse(golden([4, 210])).expect("mesh_b")),
             ),
         )
         .await

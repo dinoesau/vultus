@@ -94,6 +94,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       let pollTimer: number | null = null;
       let ws: WebSocket | null = null;
       let settled = false;
+      // Reintento en caliente: último envío + bandera de un solo reintento.
+      let lastFd: FormData | null = null;
+      let autoRetried = false;
 
       function setProgress(pct: number): void {
         progressEl.value = pct;
@@ -213,6 +216,18 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
       function onEvent(jobId: string, status: string, progress: number, stage: string): void {
         if (settled) return;
+        // Cadena fría supera el TTL 60s: un solo reintento en caliente,
+        // cuando los modelos ya quedaron cargados. Sin loops.
+        if (status === "expired" && !autoRetried && lastFd) {
+          autoRetried = true;
+          stopLive();
+          settled = false;
+          clearResult();
+          statusEl.textContent = `job ${jobId}: expiró en frío (TTL 60s). Reintentando en caliente...`;
+          stageEl.textContent = `job ${jobId}: expiró en frío (TTL 60s). Reintentando en caliente...`;
+          void startJob(lastFd);
+          return;
+        }
         showStage(jobId, status, stage, progress);
         if (!isTerminal(status)) return;
         stopLive();
@@ -293,10 +308,15 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
+        lastFd = new FormData(form);
+        autoRetried = false;
+        await startJob(lastFd);
+      });
+
+      async function startJob(fd: FormData): Promise<void> {
         stopLive();
         settled = false;
         clearResult();
-        const fd = new FormData(form);
         statusEl.textContent = "enviando...";
         stageEl.textContent = "enviando...";
         setProgress(0);
@@ -312,7 +332,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         statusEl.textContent = `job ${jobId} queued...`;
         stageEl.textContent = `job ${jobId}: en cola...`;
         subscribe(jobId);
-      });
+      }
     </script>
   </body>
 </html>

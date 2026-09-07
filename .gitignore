@@ -1,6 +1,3 @@
-# Rust
-target/
-# NOTA: backend/Cargo.lock SÍ se versiona (builds reproducibles del binario).
 # Python
 __pycache__/
 *.py[cod]

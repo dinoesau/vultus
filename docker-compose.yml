@@ -1,15 +1,14 @@
 services:
   api:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile.api
     ports:
       - "8000:8000"
     environment:
       PORT: "8000"
       QUEUE_DRIVER: "memory"
       R2_TTL_SECONDS: "60"
-      RUST_LOG: "info"
       ML_SIDECAR_URL: "http://ml-sidecar:8081"
     depends_on:
       ml-sidecar:
@@ -24,11 +23,11 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Orquestador Fase 1: corre INLINE en api (tokio::spawn + sidecar
-  # concurrency 1, no negociable por GPU). No hay worker separado para no
-  # duplicar el pipeline. En prod Modal escala 0->10 con el mismo patron
-  # (modal_app.py). GPU local: descomenta el bloque `deploy` de ml-sidecar
-  # y corre `docker compose up --build -d` con un solo comando.
+  # Orquestador local: corre INLINE en api (asyncio task + sidecar).
+  # No hay worker separado para no duplicar el pipeline. En prod Modal
+  # escala 0->10 con el mismo patron (modal_app.py). GPU local: descomenta
+  # el bloque `deploy` de ml-sidecar y corre `docker compose up --build -d`
+  # con un solo comando.
   ml-sidecar:
     build:
       context: ./backend

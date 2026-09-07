@@ -1,4 +1,3 @@
-target/
 .git/
 .wrangler/
 frontend/node_modules/

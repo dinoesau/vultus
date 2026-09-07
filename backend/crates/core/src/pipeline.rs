@@ -398,10 +398,10 @@ mod tests {
         assert_eq!(out.heatmap().len(), UV_LEN);
         assert_eq!(&out.heatmap().as_bytes()[..2], &[6, 10]);
         assert!(out.heatmap().as_bytes()[2..].iter().all(|&b| b == 0));
-        // Bake Fase 2 real: meshes GLB validos con magic, construidos del horneado.
+        // Bake real: meshes GLB validos con magic, construidos del horneado.
         for mesh in [out.mesh_a(), out.mesh_b()] {
             assert_eq!(&mesh.as_bytes()[0..4], &[0x67, 0x6C, 0x54, 0x46]);
-            assert!(mesh.len() > UV_LEN);
+            assert!(mesh.len() > 100_000);
             assert!(mesh.len() < 2_000_000);
         }
         // El bake LUT es determinista: misma entrada da mismo mesh.

@@ -266,7 +266,7 @@ async fn test_result_serves_canonical_zip_with_golden_pngs() {
                 file.name()
             );
         } else if file.name().ends_with(".glb") {
-            // Magic glTF literal mas longitud coherente.
+            // Magic glTF literal mas longitud coherente mas cara real.
             assert!(
                 data.len() > 12 && data[..4] == [0x67, 0x6C, 0x54, 0x46],
                 "magic glTF en {}",
@@ -274,7 +274,36 @@ async fn test_result_serves_canonical_zip_with_golden_pngs() {
             );
             let total = u32::from_le_bytes(data[8..12].try_into().expect("header")) as usize;
             assert_eq!(total, data.len(), "len glb {}", file.name());
-            assert!(data.len() > UV_LEN, "glb con textura {}", file.name());
+            assert!(data.len() > 100_000, "glb con geometria {}", file.name());
+            assert!(data.len() < 2_000_000, "glb acotado {}", file.name());
+            let json_len = u32::from_le_bytes(data[12..16].try_into().expect("json")) as usize;
+            let text = String::from_utf8_lossy(&data[20..20 + json_len]);
+            assert!(
+                text.contains("TEXCOORD_0"),
+                "sin TEXCOORD_0 en {}",
+                file.name()
+            );
+            assert!(
+                text.contains("baseColorTexture"),
+                "sin textura ligada en {}",
+                file.name()
+            );
+            assert!(
+                text.contains("\"count\":4225"),
+                "sin 4225 en {}",
+                file.name()
+            );
+            assert!(
+                text.contains("\"count\":24576"),
+                "sin 24576 en {}",
+                file.name()
+            );
+            let png_magic = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+            assert!(
+                data.windows(8).any(|w| w == png_magic),
+                "sin PNG en {}",
+                file.name()
+            );
         } else {
             panic!("nombre inesperado {}", file.name());
         }

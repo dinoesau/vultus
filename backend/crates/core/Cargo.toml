@@ -13,6 +13,7 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 nutype = { workspace = true }
 tracing = { workspace = true }
+image = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

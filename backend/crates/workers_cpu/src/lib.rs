@@ -61,13 +61,14 @@ mod tests {
 
     #[test]
     fn test_bake_is_not_identity_with_golden() {
-        // LUT v1: (i*5+17)%256. LUT[10]=67, LUT[200]=249, LUT[7]=52.
+        // LUT v2 baricentrica: mismos literales a mano que el nucleo.
         let input = uv_with_head(&[10u8, 200], 7);
         let baked = bake_bfm_to_gnm(&input);
         assert_eq!(baked.len(), UV_LEN);
         assert_ne!(baked.as_bytes(), input.as_bytes());
-        assert_eq!(&baked.as_bytes()[..2], &[67, 249]);
-        assert!(baked.as_bytes()[2..].iter().all(|&b| b == 52));
+        assert_eq!(&baked.as_bytes()[..3], &[10, 176, 7]);
+        assert_eq!(&baked.as_bytes()[21..24], &[7, 7, 7]);
+        assert_eq!(&baked.as_bytes()[6156..6159], &[7, 7, 7]);
     }
 
     #[test]
@@ -75,8 +76,13 @@ mod tests {
         let baked = uv_with_head(&[10u8, 200], 0);
         let mesh = build_gnm_glb(&baked);
         assert_eq!(&mesh.as_bytes()[0..4], &[0x67, 0x6C, 0x54, 0x46]);
-        assert!(mesh.len() > UV_LEN);
+        assert!(mesh.len() > 100_000);
         assert!(mesh.len() < 2_000_000);
+        let json_len =
+            u32::from_le_bytes(mesh.as_bytes()[12..16].try_into().expect("json")) as usize;
+        let text = String::from_utf8_lossy(&mesh.as_bytes()[20..20 + json_len]);
+        assert!(text.contains("TEXCOORD_0"));
+        assert!(text.contains("baseColorTexture"));
     }
 
     #[test]

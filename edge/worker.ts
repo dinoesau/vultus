@@ -1,8 +1,9 @@
 /**
  * Gateway fino Cloudflare (prod vivo).
- * La API pesada vive en Rust Axum para paridad local; en prod el trafico
+ * La API local vive en Python FastAPI para paridad dev; en prod el trafico
  * va edge -> Queues+R2 -> Modal workers -> R2 -> edge.
- * Pre-validacion espejo de `ImageBytes::parse` (size + magic) vía `contract.ts`.
+ * Pre-validacion del contrato (`edge/contract.ts`, fuente de verdad)
+ * via `contract.ts` para no encolar basura a Queues+R2 y no diverger en mensajes 400.
  * En prod exige bindings reales (R2 + Queue + DO); sin fallbacks dummy.
  */
 import {
@@ -24,7 +25,8 @@ interface Env {
 
 export { ProgressDO } from "./progress-do";
 
-// CORS permisivo como el `CorsLayer::permissive` de la API Rust local:
+// CORS permisivo como la API local Python:
+// el sitio estatico (Pages) y la API (Worker) viven en origenes distintos.
 // el sitio estatico (Pages) y la API (Worker) viven en origenes distintos.
 // Sin estos headers el navegador bloquea el 202 aunque el job se encole.
 const CORS_HEADERS: Record<string, string> = {
@@ -76,7 +78,7 @@ export default {
       if (a.size === 0 || b.size === 0 || a.size > MAX_IMAGE_BYTES || b.size > MAX_IMAGE_BYTES) {
         return json({ detail: "invalid image: size out of range" }, 400);
       }
-      // Paridad con Rust `is_jpeg` / `is_png`: leer una vez y reusar para R2.
+      // Paridad con `is_jpeg` / `is_png` en `contract.ts`: leer una vez y reusar para R2.
       const aBuf = await a.arrayBuffer();
       const bBuf = await b.arrayBuffer();
       if (!hasSupportedMagic(new Uint8Array(aBuf)) || !hasSupportedMagic(new Uint8Array(bBuf))) {

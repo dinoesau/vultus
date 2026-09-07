@@ -1,6 +1,6 @@
 /**
  * Durable Object de progreso (prod vivo).
- * Espejo de `Store` en Rust: TTL logico parametrizado, ventana `Expired`
+ * Espejo de `Store` en Python: TTL logico parametrizado, ventana `Expired`
  * visible hasta 2x TTL y luego purga. Sin persistencia mas alla del TTL.
  * Progreso vivo: WS emite snapshot inicial y luego ticks cada 500ms hasta
  * terminal (done/failed/expired) o 60s, en vez de snapshot+close.
@@ -88,7 +88,7 @@ export class ProgressDO {
         return Response.json({ detail: "invalid status" }, { status: 400 });
       }
       await this.load();
-      // Espejo de Rust `Store`: expirado no acepta mas escrituras (404).
+      // Espejo de Python `Store`: expirado no acepta mas escrituras (404).
       // Sin esto un job lento resucitaria expired->done pasada la ventana.
       if (this.status === "expired") {
         return Response.json({ detail: "expired" }, { status: 404 });
@@ -177,7 +177,7 @@ export class ProgressDO {
       await this.state.storage.setAlarm(Date.now() + this.ttlSecs * 1000);
       return;
     }
-    // Segunda alarma (2x TTL): purga total, como `Store::purge_expired`.
+    // Segunda alarma (2x TTL): purga total, como `Store::purge_expired` en Python.
     await this.state.storage.deleteAll();
     this.job_id = "unknown";
     this.progress = 0;

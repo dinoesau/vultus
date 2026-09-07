@@ -1,7 +1,7 @@
 name = "vultus-api"
-# Híbrido ADR-005: el Worker edge es gateway fino (validar + R2 PutObject +
-# enqueue {job_id, r2_keys}). La API pesada vive en Rust Axum
-# (backend/crates/api) y el ML GPU en Python Modal (backend/modal_app.py).
+# Hibrido: el Worker edge es gateway fino (validar + R2 PutObject +
+# enqueue {job_id, r2_keys}). La API local vive en Python FastAPI
+# (backend/app.py) y el ML GPU en Python Modal (backend/modal_app.py).
 # main apunta al entry TS; se eliminó `python_workers`.
 main = "edge/worker.ts"
 compatibility_date = "2026-09-03"
@@ -24,7 +24,7 @@ binding = "VULTUS_QUEUE"
 binding = "VULTUS_BUCKET"
 bucket_name = "vultus-jobs"
 preview_bucket_name = "vultus-jobs-preview"
-# Prod real: olvido logico 60s en ProgressDO/Rust; R2 lifecycle `vultus-jobs-1d`
+# Prod real: olvido logico 60s en ProgressDO/Python; R2 lifecycle `vultus-jobs-1d`
 # (jobs/ expire 1 dia, minimo R2) es solo red de seguridad via CLI.
 
 [[durable_objects.bindings]]

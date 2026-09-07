@@ -1,13 +1,10 @@
 /**
- * Contrato compartido edge (prod vivo).
- * Espejo de `vultus-core::job`: MAX_IMAGE_BYTES, magic JPEG/PNG,
+ * Contrato compartido edge (prod vivo). Fuente de verdad del contrato HTTP.
+ * Python la importa como espejo, nunca al reves.
+ * Constantes canonicas: MAX_IMAGE_BYTES, magic JPEG/PNG,
  * TtlSecs 1..=3600 default 60, Stage, JobId uuid.
- * La fuente de verdad del parse pesado sigue en Rust
- * (`ImageBytes::parse`); aqui solo pre-validacion fina del gateway
- * para no encolar basura a Queues+R2 y no diverger en mensajes 400.
- * Fuente de verdad: Rust. Paridad probada en
- * `backend/crates/core/tests/edge_parity.rs` (`cargo test --test edge_parity`).
- * Si cambias una constante aqui, cambia el Rust a la par.
+ * Pre-validacion fina del gateway para no encolar basura a Queues+R2
+ * y no diverger en mensajes 400.
  */
 
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -28,12 +25,40 @@ export type StageName = (typeof STAGES)[number];
 export const TERMINAL_STATUSES = ["done", "failed", "expired"] as const;
 export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
 
+export type Result<T, E> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: E };
+
+declare const JobIdBrand: unique symbol;
+export type JobId = string & { readonly [JobIdBrand]: "JobId" };
+export type JobIdError = { readonly kind: "InvalidJobId" };
+
+declare const TtlSecsBrand: unique symbol;
+export type TtlSecs = number & { readonly [TtlSecsBrand]: "TtlSecs" };
+
+declare const ProgressBrand: unique symbol;
+export type Progress = number & { readonly [ProgressBrand]: "Progress" };
+export type ProgressError = { readonly kind: "InvalidProgress" };
+
+export type StageError = { readonly kind: "InvalidStage" };
+
 export function isTerminalStatus(s: unknown): s is TerminalStatus {
   return typeof s === "string" && (TERMINAL_STATUSES as readonly string[]).includes(s);
 }
 
 export function isUuid(s: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+}
+
+export function parseJobId(raw: unknown): Result<JobId, JobIdError> {
+  if (typeof raw !== "string") return { ok: false, error: { kind: "InvalidJobId" } };
+  const trimmed = raw.trim();
+  if (!isUuid(trimmed)) return { ok: false, error: { kind: "InvalidJobId" } };
+  return { ok: true, value: trimmed as JobId };
+}
+
+export function jobIdToString(id: JobId): string {
+  return id;
 }
 
 export function isJpeg(bytes: Uint8Array): boolean {
@@ -69,10 +94,34 @@ export function parseTtlSecs(raw: string | null | undefined): number {
   return floored;
 }
 
+export function parseTtlSecsBranded(raw: unknown): TtlSecs {
+  const asString = typeof raw === "string" ? raw : raw == null ? null : String(raw);
+  const clamped = parseTtlSecs(asString);
+  return clamped as TtlSecs;
+}
+
+export function ttlToNumber(ttl: TtlSecs): number {
+  return ttl;
+}
+
 export function isValidProgress(n: unknown): n is number {
   return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
 }
 
+export function parseProgress(raw: unknown): Result<Progress, ProgressError> {
+  if (!isValidProgress(raw)) return { ok: false, error: { kind: "InvalidProgress" } };
+  return { ok: true, value: raw as Progress };
+}
+
+export function progressToNumber(p: Progress): number {
+  return p;
+}
+
 export function isValidStage(s: unknown): s is StageName {
   return typeof s === "string" && (STAGES as readonly string[]).includes(s);
+}
+
+export function parseStage(raw: unknown): Result<StageName, StageError> {
+  if (!isValidStage(raw)) return { ok: false, error: { kind: "InvalidStage" } };
+  return { ok: true, value: raw };
 }

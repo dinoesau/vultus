@@ -558,54 +558,325 @@ impl GnmMesh {
     }
 }
 
-/// LUT BFM->GNM embebida (generada offline por scripts/compute_bfm_to_gnm.py).
-/// 256 B versionada por contenido; el runtime solo hace lookup por texel.
-static BFM_TO_GNM_LUT: [u8; 256] = *include_bytes!("../../../assets/bfm_to_gnm.bin");
+/// Template facial GNM real (grid UV 64x64 con volumen, expresion neutra fija).
+/// Congelado offline por scripts/extract_face_template.py porque el pkl de
+/// FLAME no trae UVs destino utilizables (Paso 0 redefinido).
+pub const TEMPLATE_GRID: usize = 64;
+pub const TEMPLATE_VERTS: usize = 4225;
+pub const TEMPLATE_TRIS: usize = 8192;
+pub const TEMPLATE_TEXELS: usize = 512 * 512;
+pub const LUT_V2_ENTRY_BYTES: usize = 16;
 
-/// Bake baricentrico BFM->GNM v1: lookup por texel via LUT precomputada.
-/// Puro e infallible: `CompleteUv` ya prueba `UV_LEN`, la tabla preserva longitud.
-pub fn bake_bfm_to_gnm(uv_bfm: &CompleteUv) -> CompleteUv {
-    let bytes: Vec<u8> = uv_bfm
-        .as_bytes()
-        .iter()
-        .map(|b| BFM_TO_GNM_LUT[*b as usize])
-        .collect();
-    CompleteUv::parse(bytes).expect("bake preserva UV_LEN: entrada ya prueba UV_LEN")
+/// LUT v2 baricentrica (generada offline por scripts/compute_bfm_to_gnm.py).
+/// Por texel destino: u32 tri + 3x f32 pesos. El runtime solo hace lookup.
+static BFM_TO_GNM_LUT_V2: &[u8] = include_bytes!("../../../assets/bfm_to_gnm_v2.bin");
+
+/// Template embebido en el binario (unica fuente Rust; Python lo lee del Volume).
+static GNM_TEMPLATE_BYTES: &[u8] = include_bytes!("../../../assets/gnm_template.bin");
+
+/// Plantilla facial probada: posiciones + UVs + indices con invariantes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceTemplate {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<[u32; 3]>,
 }
 
-/// Builder GLB minimo puro: triangulo neutro + textura horneada en BIN.
-/// Expresion neutra fija (Fase 2 sin editor arbitrario). Infallible: el GLB
-/// construido siempre trae magic y longitud coherente.
+impl FaceTemplate {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < 8 {
+            return Err(CoreError::Ml(crate::error::MlError::Decode {
+                details: "template truncado".to_string(),
+            }));
+        }
+        let verts = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let tris = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        if verts != TEMPLATE_VERTS || tris != TEMPLATE_TRIS {
+            return Err(CoreError::Ml(crate::error::MlError::Decode {
+                details: format!(
+                    "template counts {verts}/{tris} != {TEMPLATE_VERTS}/{TEMPLATE_TRIS}"
+                ),
+            }));
+        }
+        let expect = 8 + verts * 12 + verts * 8 + tris * 12;
+        if bytes.len() != expect {
+            return Err(CoreError::Ml(crate::error::MlError::Decode {
+                details: format!("template len {} != {expect}", bytes.len()),
+            }));
+        }
+        let mut off = 8;
+        let mut positions = Vec::with_capacity(verts);
+        for _ in 0..verts {
+            let x =
+                f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+            let y = f32::from_le_bytes([
+                bytes[off + 4],
+                bytes[off + 5],
+                bytes[off + 6],
+                bytes[off + 7],
+            ]);
+            let z = f32::from_le_bytes([
+                bytes[off + 8],
+                bytes[off + 9],
+                bytes[off + 10],
+                bytes[off + 11],
+            ]);
+            off += 12;
+            if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+                return Err(CoreError::Ml(crate::error::MlError::Decode {
+                    details: "posicion no finita".to_string(),
+                }));
+            }
+            positions.push([x, y, z]);
+        }
+        let mut uvs = Vec::with_capacity(verts);
+        for _ in 0..verts {
+            let u =
+                f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+            let v = f32::from_le_bytes([
+                bytes[off + 4],
+                bytes[off + 5],
+                bytes[off + 6],
+                bytes[off + 7],
+            ]);
+            off += 8;
+            if !u.is_finite() || !v.is_finite() {
+                return Err(CoreError::Ml(crate::error::MlError::Decode {
+                    details: "uv no finita".to_string(),
+                }));
+            }
+            uvs.push([u, v]);
+        }
+        let mut indices = Vec::with_capacity(tris);
+        for _ in 0..tris {
+            let a =
+                u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+            let b = u32::from_le_bytes([
+                bytes[off + 4],
+                bytes[off + 5],
+                bytes[off + 6],
+                bytes[off + 7],
+            ]);
+            let c = u32::from_le_bytes([
+                bytes[off + 8],
+                bytes[off + 9],
+                bytes[off + 10],
+                bytes[off + 11],
+            ]);
+            off += 12;
+            if a as usize >= verts || b as usize >= verts || c as usize >= verts {
+                return Err(CoreError::Ml(crate::error::MlError::Decode {
+                    details: "indice fuera de rango".to_string(),
+                }));
+            }
+            indices.push([a, b, c]);
+        }
+        Ok(Self {
+            positions,
+            uvs,
+            indices,
+        })
+    }
+
+    pub fn verts(&self) -> usize {
+        self.positions.len()
+    }
+
+    pub fn tris(&self) -> usize {
+        self.indices.len()
+    }
+
+    pub fn positions(&self) -> &[[f32; 3]] {
+        &self.positions
+    }
+
+    pub fn uvs(&self) -> &[[f32; 2]] {
+        &self.uvs
+    }
+
+    pub fn indices(&self) -> &[[u32; 3]] {
+        &self.indices
+    }
+}
+
+fn face_template() -> &'static FaceTemplate {
+    static ONCE: std::sync::OnceLock<FaceTemplate> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| FaceTemplate::parse(GNM_TEMPLATE_BYTES).expect("template embebido valido"))
+}
+
+/// LUT v2 validada una vez: longitud exacta, tri en rango y pesos finitos.
+/// Falla ruidoso al primer bake con asset corrupto en vez de panico por
+/// indexacion en caliente (job atascado hasta TTL).
+fn lut_v2() -> &'static [u8] {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        assert_eq!(
+            BFM_TO_GNM_LUT_V2.len(),
+            TEMPLATE_TEXELS * LUT_V2_ENTRY_BYTES,
+            "lut v2 len"
+        );
+        for t in 0..TEMPLATE_TEXELS {
+            let off = t * LUT_V2_ENTRY_BYTES;
+            let b = BFM_TO_GNM_LUT_V2;
+            let tri = u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]) as usize;
+            assert!(
+                tri < TEMPLATE_TRIS,
+                "lut v2 tri fuera de rango en texel {t}"
+            );
+            for k in 0..3 {
+                let w = f32::from_le_bytes([
+                    b[off + 4 + k * 4],
+                    b[off + 5 + k * 4],
+                    b[off + 6 + k * 4],
+                    b[off + 7 + k * 4],
+                ]);
+                assert!(w.is_finite(), "lut v2 peso no finito en texel {t}");
+            }
+        }
+    });
+    BFM_TO_GNM_LUT_V2
+}
+
+fn lut_entry(texel: usize) -> (usize, f32, f32, f32) {
+    let off = texel * LUT_V2_ENTRY_BYTES;
+    let b = lut_v2();
+    let tri = u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]) as usize;
+    let w0 = f32::from_le_bytes([b[off + 4], b[off + 5], b[off + 6], b[off + 7]]);
+    let w1 = f32::from_le_bytes([b[off + 8], b[off + 9], b[off + 10], b[off + 11]]);
+    let w2 = f32::from_le_bytes([b[off + 12], b[off + 13], b[off + 14], b[off + 15]]);
+    (tri, w0, w1, w2)
+}
+
+fn sample_offset(u: f32, v: f32) -> usize {
+    let sx = ((u * 512.0) as usize).min(511);
+    let sy = ((v * 512.0) as usize).min(511);
+    (sy * 512 + sx) * 3
+}
+
+/// Bake baricentrico BFM->GNM v2: por texel destino, lookup (tri + pesos) y
+/// sampleo en los 3 vertices del template sobre la imagen BFM.
+/// Puro e infallible: `CompleteUv` ya prueba `UV_LEN`, la tabla preserva longitud.
+pub fn bake_bfm_to_gnm(uv_bfm: &CompleteUv) -> CompleteUv {
+    let src = uv_bfm.as_bytes();
+    let tpl = face_template();
+    let mut out = vec![0u8; UV_LEN];
+    for t in 0..TEMPLATE_TEXELS {
+        let (tri, w0, w1, w2) = lut_entry(t);
+        let [a, b, c] = tpl.indices[tri];
+        let [ua, va] = tpl.uvs[a as usize];
+        let [ub, vb] = tpl.uvs[b as usize];
+        let [uc, vc] = tpl.uvs[c as usize];
+        let oa = sample_offset(ua, va);
+        let ob = sample_offset(ub, vb);
+        let oc = sample_offset(uc, vc);
+        for k in 0..3 {
+            let val = w0 * src[oa + k] as f32 + w1 * src[ob + k] as f32 + w2 * src[oc + k] as f32;
+            out[t * 3 + k] = (val + 0.5).floor().clamp(0.0, 255.0) as u8;
+        }
+    }
+    CompleteUv::parse(out).expect("bake preserva UV_LEN: entrada ya prueba UV_LEN")
+}
+
+fn encode_baked_png(raw: &[u8]) -> Vec<u8> {
+    use image::{ImageBuffer, Rgb};
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(UV_WIDTH as u32, UV_HEIGHT as u32, raw.to_vec()).expect("uv dims");
+    let mut out = Vec::new();
+    {
+        let mut cursor = std::io::Cursor::new(&mut out);
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .expect("png encode");
+    }
+    out
+}
+
+/// Builder GLB real puro: geometria del template + `TEXCOORD_0` + textura PNG
+/// horneada embebida y ligada al material (`baseColorTexture`).
+/// Expresion neutra fija. Infallible: el GLB construido siempre trae magic y
+/// longitud coherente.
 pub fn build_gnm_glb(baked: &CompleteUv) -> GnmMesh {
-    let mut bin: Vec<u8> = Vec::with_capacity(44 + UV_LEN);
-    for v in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
-        bin.extend_from_slice(&v.to_le_bytes());
+    let tpl = face_template();
+    let png = encode_baked_png(baked.as_bytes());
+    let mut pos_bytes: Vec<u8> = Vec::with_capacity(tpl.positions.len() * 12);
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for p in tpl.positions.iter() {
+        for k in 0..3 {
+            pos_bytes.extend_from_slice(&p[k].to_le_bytes());
+            if p[k] < min[k] {
+                min[k] = p[k];
+            }
+            if p[k] > max[k] {
+                max[k] = p[k];
+            }
+        }
     }
-    for i in [0u16, 1, 2] {
-        bin.extend_from_slice(&i.to_le_bytes());
+    let mut uv_bytes: Vec<u8> = Vec::with_capacity(tpl.uvs.len() * 8);
+    for t in tpl.uvs.iter() {
+        uv_bytes.extend_from_slice(&t[0].to_le_bytes());
+        uv_bytes.extend_from_slice(&t[1].to_le_bytes());
     }
-    bin.extend_from_slice(&[0u8; 2]);
-    bin.extend_from_slice(baked.as_bytes());
-    debug_assert_eq!(bin.len() % 4, 0);
+    let mut idx_bytes: Vec<u8> = Vec::with_capacity(tpl.indices.len() * 6);
+    for tri in tpl.indices.iter() {
+        for v in tri {
+            idx_bytes.extend_from_slice(&(*v as u16).to_le_bytes());
+        }
+    }
+    let pos_len = pos_bytes.len();
+    let uv_len_b = uv_bytes.len();
+    let idx_len = idx_bytes.len();
+    let uv_off = pos_len;
+    let idx_off = pos_len + uv_len_b;
+    let png_off = idx_off + idx_len;
+    let mut bin: Vec<u8> = Vec::with_capacity(png_off + png.len() + 3);
+    bin.extend_from_slice(&pos_bytes);
+    bin.extend_from_slice(&uv_bytes);
+    bin.extend_from_slice(&idx_bytes);
+    bin.extend_from_slice(&png);
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    let idx_count = tpl.indices.len() * 3;
     let json = format!(
         concat!(
-            r#"{{"asset":{{"version":"2.0","generator":"vultus-fase2"}},"scene":0,"#,
+            r#"{{"asset":{{"version":"2.0","generator":"vultus-gnm-real"}},"scene":0,"#,
             r#""scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0,"name":"VultusFaceNeutral"}}],"#,
-            r#""meshes":[{{"name":"FaceNeutral","primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"material":0}}]}}],"#,
-            r#""materials":[{{"name":"BakedSkin","pbrMetallicRoughness":{{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.9}}}}],"#,
+            r#""meshes":[{{"name":"FaceNeutral","primitives":[{{"attributes":{{"POSITION":0,"TEXCOORD_0":1}},"indices":2,"material":0}}]}}],"#,
+            r#""materials":[{{"name":"BakedSkin","pbrMetallicRoughness":{{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.9,"baseColorTexture":{{"index":0}}}}}}],"#,
+            r#""textures":[{{"source":0,"sampler":0}}],"samplers":[{{"magFilter":9729,"minFilter":9729}}],"#,
+            r#""images":[{{"bufferView":3,"mimeType":"image/png"}}],"#,
             r#""buffers":[{{"byteLength":{bin_len}}}],"#,
-            r#""bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962}},"#,
-            r#"{{"buffer":0,"byteOffset":36,"byteLength":6,"target":34963}},"#,
-            r#"{{"buffer":0,"byteOffset":44,"byteLength":{uv_len},"name":"BakedUV"}}],"#,
-            r#""accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","max":[1,1,0],"min":[0,0,0]}},"#,
-            r#"{{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}}],"#,
-            r#""extras":{{"expression":"neutral","bakedLen":{uv_len}}}}}"#
+            r#""bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{pos_len},"target":34962}},"#,
+            r#"{{"buffer":0,"byteOffset":{uv_off},"byteLength":{uvb_len},"target":34962}},"#,
+            r#"{{"buffer":0,"byteOffset":{idx_off},"byteLength":{idx_len},"target":34963}},"#,
+            r#"{{"buffer":0,"byteOffset":{png_off},"byteLength":{png_len}}}],"#,
+            r#""accessors":[{{"bufferView":0,"componentType":5126,"count":{verts},"type":"VEC3","max":[{max0},{max1},{max2}],"min":[{min0},{min1},{min2}]}},"#,
+            r#"{{"bufferView":1,"componentType":5126,"count":{verts},"type":"VEC2"}},"#,
+            r#"{{"bufferView":2,"componentType":5123,"count":{idx_count},"type":"SCALAR"}}],"#,
+            r#""extras":{{"expression":"neutral","bakedLen":{uv_len},"verts":{verts},"tris":{tris}}}}}"#
         ),
         bin_len = bin.len(),
+        pos_len = pos_len,
+        uv_off = uv_off,
+        uvb_len = uv_len_b,
+        idx_off = idx_off,
+        idx_len = idx_len,
+        png_off = png_off,
+        png_len = png.len(),
+        verts = TEMPLATE_VERTS,
+        idx_count = idx_count,
+        max0 = max[0],
+        max1 = max[1],
+        max2 = max[2],
+        min0 = min[0],
+        min1 = min[1],
+        min2 = min[2],
         uv_len = UV_LEN,
+        tris = TEMPLATE_TRIS,
     );
     let mut json_bytes = json.into_bytes();
-    while json_bytes.len() % 4 != 0 {
+    while !json_bytes.len().is_multiple_of(4) {
         json_bytes.push(0x20);
     }
     let total_len = 12 + 8 + json_bytes.len() + 8 + bin.len();
@@ -799,7 +1070,9 @@ mod tests {
     fn test_gnm_mesh_accepts_valid_and_rejects_bad() {
         let baked = golden_uv([10, 200], 7);
         let mesh = build_gnm_glb(&baked);
-        assert!(mesh.len() > UV_LEN);
+        // PNG embebido comprime los goldens planos: cota geometria+PNG, no raw.
+        assert!(mesh.len() > 100_000);
+        assert!(mesh.len() < 2_000_000);
         assert_eq!(&mesh.as_bytes()[0..4], &GLB_MAGIC);
         assert!(GnmMesh::parse(mesh.clone().into_bytes()).is_ok());
         assert!(GnmMesh::parse(vec![]).is_err());
@@ -817,14 +1090,19 @@ mod tests {
 
     #[test]
     fn test_bake_differs_from_identity_with_golden() {
-        // LUT v1: (i*5+17)%256. Literales a mano, nunca recomputados.
-        // LUT[10]=67, LUT[200]=249, LUT[7]=52.
+        // LUT v2 baricentrica: texel (0,0) mezcla vertice (0,0)=(10,200,7)
+        // con dos vecinos (7,7,7) via pesos (0.875,0.0625,0.0625):
+        // R=0.875*10+0.125*7=9.625->10, G=0.875*200+0.125*7=175.875->176, B=7.
+        // Literales a mano, nunca recomputados.
         let input = golden_uv([10, 200], 7);
         let baked = bake_bfm_to_gnm(&input);
         assert_eq!(baked.len(), UV_LEN);
         assert_ne!(baked.as_bytes(), input.as_bytes());
-        assert_eq!(&baked.as_bytes()[..2], &[67, 249]);
-        assert!(baked.as_bytes()[2..].iter().all(|&b| b == 52));
+        assert_eq!(&baked.as_bytes()[..3], &[10, 176, 7]);
+        // Texel (7,0): peso del vertice singular 0 -> (7,7,7).
+        assert_eq!(&baked.as_bytes()[21..24], &[7, 7, 7]);
+        // Texel (4,4): triangulo 1 sin vertice singular -> (7,7,7).
+        assert_eq!(&baked.as_bytes()[6156..6159], &[7, 7, 7]);
     }
 
     #[test]
@@ -832,10 +1110,56 @@ mod tests {
         let baked = golden_uv([10, 200], 0);
         let mesh = build_gnm_glb(&baked);
         assert_eq!(&mesh.as_bytes()[0..4], &[0x67, 0x6C, 0x54, 0x46]);
-        assert!(mesh.len() > UV_LEN);
+        assert!(mesh.len() > 100_000);
         assert!(mesh.len() < 2_000_000);
         let total = u32::from_le_bytes(mesh.as_bytes()[8..12].try_into().expect("header")) as usize;
         assert_eq!(total, mesh.len());
+        let json_len =
+            u32::from_le_bytes(mesh.as_bytes()[12..16].try_into().expect("json len")) as usize;
+        let json = &mesh.as_bytes()[20..20 + json_len];
+        let text = String::from_utf8_lossy(json);
+        assert!(text.contains("TEXCOORD_0"), "sin TEXCOORD_0");
+        assert!(text.contains("baseColorTexture"), "sin textura ligada");
+        assert!(text.contains("image/png"), "sin imagen PNG");
+        assert!(text.contains("\"count\":4225"), "sin conteo 4225");
+        assert!(text.contains("\"count\":24576"), "sin conteo 24576");
+        let v: serde_json::Value = serde_json::from_slice(json).expect("json glb valido");
+        assert_eq!(
+            v["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"],
+            1
+        );
+        let png_magic = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        assert!(
+            mesh.as_bytes().windows(8).any(|w| w == png_magic),
+            "sin PNG embebido"
+        );
+    }
+
+    #[test]
+    fn test_face_template_has_golden_counts() {
+        let bytes = include_bytes!("../../../assets/gnm_template.bin");
+        let tpl = FaceTemplate::parse(bytes).expect("template dorado");
+        assert_eq!(tpl.verts(), 4225);
+        assert_eq!(tpl.tris(), 8192);
+        assert_eq!(tpl.positions().len(), 4225);
+        assert_eq!(tpl.uvs().len(), 4225);
+        assert_eq!(tpl.indices().len(), 8192);
+    }
+
+    #[test]
+    fn test_face_template_rejects_oob_index() {
+        let mut bytes = include_bytes!("../../../assets/gnm_template.bin").to_vec();
+        let last = bytes.len() - 4;
+        bytes[last..].copy_from_slice(&99999u32.to_le_bytes());
+        assert!(FaceTemplate::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_face_template_rejects_nonfinite_uv() {
+        let mut bytes = include_bytes!("../../../assets/gnm_template.bin").to_vec();
+        let uv_start = 8 + 4225 * 12;
+        bytes[uv_start..uv_start + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(FaceTemplate::parse(&bytes).is_err());
     }
 
     #[test]

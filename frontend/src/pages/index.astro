@@ -97,6 +97,10 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       // Reintento en caliente: último envío + bandera de un solo reintento.
       let lastFd: FormData | null = null;
       let autoRetried = false;
+      // Generación del job vivo: cada startJob la incrementa y cada callback
+      // asíncrono (WS, polling, fetch) se ignora si ya no es la vigente.
+      // Sin esto, el socket/poller del intento anterior pisa la UI del nuevo.
+      let gen = 0;
 
       function setProgress(pct: number): void {
         progressEl.value = pct;
@@ -162,19 +166,22 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         img.closest("figure")?.querySelector(".placeholder")?.setAttribute("hidden", "");
       }
 
-      async function renderResult(zipBlob: Blob, jobId: string): Promise<void> {
+      async function renderResult(zipBlob: Blob, jobId: string, myGen: number): Promise<void> {
+        if (myGen !== gen) return;
         zipUrl = URL.createObjectURL(zipBlob);
         downloadEl.href = zipUrl;
         downloadEl.download = `result-${jobId}.zip`;
         downloadEl.textContent = `Descargar zip (result-${jobId}.zip)`;
         downloadEl.hidden = false;
         const { uvA, uvB, heat } = await extractResultImages(zipBlob);
+        if (myGen !== gen) return;
         setImage('[data-testid="panel-uv-a"]', uvA);
         setImage('[data-testid="panel-uv-b"]', uvB);
         setImage('[data-testid="panel-heatmap"]', heat);
         setImage("#fusion-base", uvA);
         try {
           const { meshA, meshB } = await extractResultMeshes(zipBlob);
+          if (myGen !== gen) return;
           window.dispatchEvent(
             new CustomEvent("vultus:meshes", { detail: { meshA, meshB } }),
           );
@@ -189,7 +196,8 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       // Tolerante a 404/409 durante processing: el zip solo existe tras done y
       // el worker puede tardar en exponerlo; reintento acotado 10x1s, sin colgar la UI.
       // 409 = not-yet-done (prod vivo), 404 = zip aun no visible o job purgado.
-      async function fetchResult(jobId: string, attempt = 0): Promise<void> {
+      async function fetchResult(jobId: string, myGen: number, attempt = 0): Promise<void> {
+        if (myGen !== gen) return;
         let res: Response;
         try {
           res = await fetch(`${api}${API_PATHS.result(jobId)}`);
@@ -200,7 +208,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         if (isRetryableResultStatus(res.status) && attempt < 10) {
           const why = res.status === 409 ? "aún procesando (409)" : "aún no disponible (404)";
           stageEl.textContent = `job ${jobId}: resultado ${why}, reintentando...`;
-          window.setTimeout(() => void fetchResult(jobId, attempt + 1), 1000);
+          window.setTimeout(() => void fetchResult(jobId, myGen, attempt + 1), 1000);
           return;
         }
         if (!res.ok) {
@@ -208,14 +216,20 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           return;
         }
         try {
-          await renderResult(await res.blob(), jobId);
+          await renderResult(await res.blob(), jobId, myGen);
         } catch (err) {
           showError(`job ${jobId}: zip inválido (${(err as Error).message}).`);
         }
       }
 
-      function onEvent(jobId: string, status: string, progress: number, stage: string): void {
-        if (settled) return;
+      function onEvent(
+        jobId: string,
+        status: string,
+        progress: number,
+        stage: string,
+        myGen: number,
+      ): void {
+        if (settled || myGen !== gen) return;
         // Cadena fría supera el TTL 60s: un solo reintento en caliente,
         // cuando los modelos ya quedaron cargados. Sin loops.
         if (status === "expired" && !autoRetried && lastFd) {
@@ -231,14 +245,21 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         showStage(jobId, status, stage, progress);
         if (!isTerminal(status)) return;
         stopLive();
-        if (status === "done") void fetchResult(jobId);
+        if (status === "done") void fetchResult(jobId, myGen);
       }
 
       // Fallback a polling 1s si el WS falla o cierra antes de un estado
       // terminal. GET status solo da {job_id, status}: sin etapa/progreso.
-      function startPolling(jobId: string): void {
+      function startPolling(jobId: string, myGen: number): void {
         if (pollTimer !== null || settled) return;
         const tick = async () => {
+          if (myGen !== gen) {
+            if (pollTimer !== null) {
+              window.clearInterval(pollTimer);
+              pollTimer = null;
+            }
+            return;
+          }
           let res: Response;
           try {
             res = await fetch(`${api}${API_PATHS.job(jobId)}`);
@@ -257,9 +278,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
             stageEl.textContent = `job ${jobId}: listo. Descargando resultado...`;
             statusEl.textContent = `job ${jobId}: done`;
             setProgress(100);
-            void fetchResult(jobId);
+            void fetchResult(jobId, myGen);
           } else if (isTerminal(body.status)) {
-            onEvent(jobId, body.status, body.status === "failed" ? 0 : 1, "?");
+            onEvent(jobId, body.status, body.status === "failed" ? 0 : 1, "?", myGen);
           } else {
             statusEl.textContent = `job ${jobId}: ${body.status} (polling, sin WS)...`;
             stageEl.textContent = `job ${jobId}: ${body.status} (polling, sin WS)...`;
@@ -269,12 +290,12 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         void tick();
       }
 
-      function subscribe(jobId: string): void {
+      function subscribe(jobId: string, myGen: number): void {
         let socket: WebSocket;
         try {
           socket = new WebSocket(toWsUrl(api, jobId));
         } catch {
-          startPolling(jobId);
+          startPolling(jobId, myGen);
           return;
         }
         ws = socket;
@@ -286,13 +307,13 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
               progress: number;
               stage: string;
             };
-            onEvent(jobId, msg.status, msg.progress, msg.stage);
+            onEvent(jobId, msg.status, msg.progress, msg.stage, myGen);
           } catch {
             // Evento WS malformado: se ignora, el siguiente tick lo corrige.
           }
         });
         const onDrop = () => {
-          if (!settled) startPolling(jobId);
+          if (!settled && myGen === gen) startPolling(jobId, myGen);
         };
         socket.addEventListener("error", onDrop);
         socket.addEventListener("close", onDrop);
@@ -316,6 +337,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       async function startJob(fd: FormData): Promise<void> {
         stopLive();
         settled = false;
+        const myGen = ++gen;
         clearResult();
         statusEl.textContent = "enviando...";
         stageEl.textContent = "enviando...";
@@ -331,7 +353,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         const jobId = body.job_id;
         statusEl.textContent = `job ${jobId} queued...`;
         stageEl.textContent = `job ${jobId}: en cola...`;
-        subscribe(jobId);
+        subscribe(jobId, myGen);
       }
     </script>
   </body>

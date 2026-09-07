@@ -37,6 +37,18 @@
       "skillPath": "skills/git-commit/SKILL.md",
       "computedHash": "f4a6708fdbfe16e79de298355a99c90fc69c762333538549d11214c59db130ec"
     },
+    "good-python": {
+      "source": "dinoesau/skills",
+      "sourceType": "github",
+      "skillPath": "skills/good-python/SKILL.md",
+      "computedHash": "dce100abf774772d7e229da3c18fdcad0f4f5c6003013ab5ef13e27dc77a70d7"
+    },
+    "good-typescript": {
+      "source": "dinoesau/skills",
+      "sourceType": "github",
+      "skillPath": "skills/good-typescript/SKILL.md",
+      "computedHash": "fb7cddd0a74e8d61e2bb65415f33deca2121385cd26beb4cd629901949f87d5d"
+    },
     "grill-with-docs": {
       "source": "mattpocock/skills",
       "sourceType": "github",
@@ -54,12 +66,6 @@
       "sourceType": "github",
       "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
       "computedHash": "2449db6ab1ded9581f69fcc56c1f64818112d05e271fd4c5da23c6523f9d3d9d"
-    },
-    "rusty": {
-      "source": "dinoesau/skills",
-      "sourceType": "github",
-      "skillPath": "skills/rusty/SKILL.md",
-      "computedHash": "891b27e49bc5584a5fd8e7921153946c60482da015703b7da00e26468c682df2"
     },
     "setup-matt-pocock-skills": {
       "source": "mattpocock/skills",

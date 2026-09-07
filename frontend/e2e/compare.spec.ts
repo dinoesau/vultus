@@ -69,7 +69,13 @@ test("golden pair reaches done, slider responds and download starts", async ({
   await expect(page.getByTestId("panel-heatmap")).toHaveCSS("opacity", "0.2");
   const viewer = page.getByTestId("viewer-3d");
   await expect(viewer).toBeVisible();
-  await expect(page.locator("#viewer-3d-status")).toContainText(/meshes listos|mesh A cargado/);
+  await expect(page.locator("#viewer-3d-status")).toContainText(
+    /cara real|GLB parseado|meshes listos|mesh A cargado/,
+  );
+  // El loader debe parsear el GLB real: el canvas deja de ser fondo.
+  await expect(page.locator("#viewer-3d-status")).toContainText(/GLB parseado|mesh A cargado/);
+  const shot = await viewer.screenshot();
+  expect(shot.length).toBeGreaterThan(5000);
   for (const id of ["download-mesh-a", "download-mesh-b"] as const) {
     const link = page.locator(`#${id}`);
     await expect(link).toBeVisible();

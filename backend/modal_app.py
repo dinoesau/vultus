@@ -54,7 +54,8 @@ FLAME_UV_SIZE = 256
 # Env con defaults seguros, nada hardcodeado.
 ML_PORT = int(os.environ.get("ML_PORT", "8081"))
 WEIGHTS_DIR = os.environ.get("WEIGHTS_DIR", "/weights")
-# Ruta de assets GNM (solo config nueva de Fase 2): LUT bfm_to_gnm.bin en Volume.
+# Ruta de assets GNM (solo config nueva): LUT v2 + template en Volume.
+# Espejo de Rust include_bytes! (repo) para paridad local.
 GNM_ASSETS_DIR = os.environ.get("GNM_ASSETS_DIR", os.path.join(WEIGHTS_DIR, "gnm"))
 # VULTUS_REAL_ML: 1 fuerza real, 0 fuerza dobles, auto decide por pesos+deps.
 REAL_MODE = os.environ.get("VULTUS_REAL_ML", "auto").lower()
@@ -615,37 +616,175 @@ def _heatmap_abs_diff(uv_a: bytes, uv_b: bytes) -> bytes:
     return bytes(x - y if x >= y else y - x for x, y in zip(uv_a, uv_b))
 
 
-def _bfm_to_gnm_lut() -> bytes:
-    """LUT BFM->GNM v1: archivo versionado o fallback a formula congelada.
+def _repo_assets_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
-    Formula: LUT[i] = (i * 5 + 17) % 256 (espejo de Rust include_bytes!).
-    El archivo vive en GNM_ASSETS_DIR/bfm_to_gnm.bin (Volume en prod).
-    """
-    path = os.path.join(GNM_ASSETS_DIR, "bfm_to_gnm.bin")
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-        if len(data) == 256:
-            return data
-        logger.warning("gnm lut bad length path=%s len=%d, uso formula", path, len(data))
-    except OSError:
-        pass
-    return bytes((i * 5 + 17) % 256 for i in range(256))
+
+def _resolve_asset(name: str) -> str:
+    """GNM_ASSETS_DIR (Volume) primero, repo despues. Ruidoso si falta, nunca silencioso."""
+    primary = os.path.join(GNM_ASSETS_DIR, name)
+    if os.path.exists(primary):
+        return primary
+    fallback = os.path.join(_repo_assets_dir(), name)
+    if os.path.exists(fallback):
+        return fallback
+    raise RuntimeError(f"gnm asset missing: {name} (buscado en {primary} y {fallback})")
+
+
+_TEMPLATE_VERTS = 4225
+_TEMPLATE_TRIS = 8192
+_LUT_V2_LEN = 512 * 512 * 16
+_TEMPLATE_CACHE = None
+_LUT_V2_CACHE = None
+_BAKE_CACHE = None
+
+
+def _load_template():
+    """Template probado: conteos literales, indices en rango, UVs finitas."""
+    global _TEMPLATE_CACHE
+    if _TEMPLATE_CACHE is not None:
+        return _TEMPLATE_CACHE
+    import struct as _st
+
+    path = _resolve_asset("gnm_template.bin")
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 8:
+        raise RuntimeError(f"gnm template truncado: {path}")
+    verts, tris = _st.unpack_from("<II", data, 0)
+    if verts != _TEMPLATE_VERTS or tris != _TEMPLATE_TRIS:
+        raise RuntimeError(f"gnm template counts {verts}/{tris} != {_TEMPLATE_VERTS}/{_TEMPLATE_TRIS}")
+    expect = 8 + verts * 12 + verts * 8 + tris * 12
+    if len(data) != expect:
+        raise RuntimeError(f"gnm template len {len(data)} != {expect}")
+    off = 8
+    positions = []
+    for _ in range(verts):
+        x, y, z = _st.unpack_from("<3f", data, off)
+        off += 12
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+            raise RuntimeError("gnm template posicion no finita")
+        positions.append((x, y, z))
+    uvs = []
+    for _ in range(verts):
+        u, v = _st.unpack_from("<2f", data, off)
+        off += 8
+        if not (math.isfinite(u) and math.isfinite(v)):
+            raise RuntimeError("gnm template uv no finita")
+        uvs.append((u, v))
+    indices = []
+    for _ in range(tris):
+        a, b, c = _st.unpack_from("<III", data, off)
+        off += 12
+        if a >= verts or b >= verts or c >= verts:
+            raise RuntimeError("gnm template indice fuera de rango")
+        indices.append((a, b, c))
+    _TEMPLATE_CACHE = (positions, uvs, indices)
+    return _TEMPLATE_CACHE
+
+
+def _load_lut_v2() -> bytes:
+    global _LUT_V2_CACHE
+    if _LUT_V2_CACHE is not None:
+        return _LUT_V2_CACHE
+    path = _resolve_asset("bfm_to_gnm_v2.bin")
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) != _LUT_V2_LEN:
+        raise RuntimeError(f"gnm lut v2 len {len(data)} != {_LUT_V2_LEN}: {path}")
+    # Validacion una vez: tri en rango y pesos finitos. Un asset corrupto
+    # debe fallar ruidoso aqui, nunca con IndexError en caliente.
+    import struct as _st2
+
+    for t in range(0, _LUT_V2_LEN, 16):
+        tri, w0, w1, w2 = _st2.unpack_from("<I3f", data, t)
+        if tri >= _TEMPLATE_TRIS:
+            raise RuntimeError(f"gnm lut v2 tri fuera de rango en offset {t}")
+        if not (math.isfinite(w0) and math.isfinite(w1) and math.isfinite(w2)):
+            raise RuntimeError(f"gnm lut v2 peso no finito en offset {t}")
+    _LUT_V2_CACHE = data
+    return data
+
+
+def _bake_tables():
+    """Tablas vectorizadas (src0/1/2, w0/1/2) cacheadas para bake numpy rapido."""
+    global _BAKE_CACHE
+    if _BAKE_CACHE is not None:
+        return _BAKE_CACHE
+    import struct as _st
+
+    _, uvs, indices = _load_template()
+    lut = _load_lut_v2()
+    n = 512 * 512
+    import array as _arr
+
+    src0 = _arr.array("I", [0]) * n
+    src1 = _arr.array("I", [0]) * n
+    src2 = _arr.array("I", [0]) * n
+    w0a = _arr.array("f", [0.0]) * n
+    w1a = _arr.array("f", [0.0]) * n
+    w2a = _arr.array("f", [0.0]) * n
+    for t in range(n):
+        tri, w0, w1, w2 = _st.unpack_from("<I3f", lut, t * 16)
+        a, b, c = indices[tri]
+        for arr, vi in ((src0, a), (src1, b), (src2, c)):
+            u, v = uvs[vi]
+            sx = int(u * 512.0)
+            if sx > 511:
+                sx = 511
+            sy = int(v * 512.0)
+            if sy > 511:
+                sy = 511
+            arr[t] = sy * 512 + sx
+        w0a[t], w1a[t], w2a[t] = w0, w1, w2
+    _BAKE_CACHE = (src0, src1, src2, w0a, w1a, w2a)
+    return _BAKE_CACHE
 
 
 def _bake_bfm_to_gnm(uv_bfm: bytes) -> bytes:
-    """Espejo puro de Rust bake_bfm_to_gnm: lookup por texel via LUT.
+    """Espejo puro de Rust bake v2: baricentrico por texel via LUT.
 
-    Mismo golden: [10,200]+fill7 -> [67,249]+fill52.
+    Mismo golden: [10,200]+fill7 -> texel0 [10,176,7], resto (7,7,7).
     """
     if len(uv_bfm) != UV_LEN:
         raise ValueError(f"bake needs {UV_LEN} bytes, got {len(uv_bfm)}")
-    lut = _bfm_to_gnm_lut()
-    return bytes(lut[b] for b in uv_bfm)
+    try:
+        import numpy as _np
+
+        src0, src1, src2, w0a, w1a, w2a = _bake_tables()
+        src = _np.frombuffer(bytes(uv_bfm), dtype=_np.uint8).reshape(-1, 3).astype(_np.float32)
+        w0 = _np.asarray(w0a, dtype=_np.float32)[:, None]
+        w1 = _np.asarray(w1a, dtype=_np.float32)[:, None]
+        w2 = _np.asarray(w2a, dtype=_np.float32)[:, None]
+        i0 = _np.asarray(src0, dtype=_np.int64)
+        i1 = _np.asarray(src1, dtype=_np.int64)
+        i2 = _np.asarray(src2, dtype=_np.int64)
+        val = w0 * src[i0] + w1 * src[i1] + w2 * src[i2]
+        return _np.floor(val + 0.5).clip(0, 255).astype(_np.uint8).tobytes()
+    except ImportError:
+        pass
+    import struct as _st
+
+    _, uvs, indices = _load_template()
+    lut = _load_lut_v2()
+    out = bytearray(UV_LEN)
+    for t in range(512 * 512):
+        tri, w0, w1, w2 = _st.unpack_from("<I3f", lut, t * 16)
+        a, b, c = indices[tri]
+        offs = []
+        for vi in (a, b, c):
+            u, v = uvs[vi]
+            sx = min(511, int(u * 512.0))
+            sy = min(511, int(v * 512.0))
+            offs.append((sy * 512 + sx) * 3)
+        for k in range(3):
+            val = w0 * uv_bfm[offs[0] + k] + w1 * uv_bfm[offs[1] + k] + w2 * uv_bfm[offs[2] + k]
+            out[t * 3 + k] = min(255, max(0, int(val + 0.5)))
+    return bytes(out)
 
 
 def _build_gnm_glb(baked: bytes) -> bytes:
-    """Espejo puro de Rust build_gnm_glb: triangulo neutro + textura horneada.
+    """Espejo puro de Rust build_gnm_glb real: template + TEXCOORD_0 + PNG ligada.
 
     Expresion neutra fija. Contenedor GLB con magic glTF y longitud coherente.
     """
@@ -653,22 +792,46 @@ def _build_gnm_glb(baked: bytes) -> bytes:
 
     if len(baked) != UV_LEN:
         raise ValueError(f"glb needs {UV_LEN} baked bytes, got {len(baked)}")
-    verts = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
-    bin_buf = struct.pack("<9f", *verts) + struct.pack("<3H", 0, 1, 2) + b"\x00\x00"
-    bin_buf += bytes(baked)
-    assert len(bin_buf) % 4 == 0
+    positions, uvs, indices = _load_template()
+    from PIL import Image as _Image
+
+    img = _Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(baked))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    png = buf.getvalue()
+    pos_buf = struct.pack(f"<{len(positions) * 3}f", *[c for p in positions for c in p])
+    uv_buf = struct.pack(f"<{len(uvs) * 2}f", *[c for t in uvs for c in t])
+    flat_idx = [v for tri in indices for v in tri]
+    idx_buf = struct.pack(f"<{len(flat_idx)}H", *flat_idx)
+    pos_len, uvb_len, idx_len = len(pos_buf), len(uv_buf), len(idx_buf)
+    uv_off = pos_len
+    idx_off = pos_len + uvb_len
+    png_off = idx_off + idx_len
+    bin_buf = pos_buf + uv_buf + idx_buf + png
+    while len(bin_buf) % 4 != 0:
+        bin_buf += b"\x00"
+    xs = [p[0] for p in positions]
+    ys = [p[1] for p in positions]
+    zs = [p[2] for p in positions]
+    idx_count = len(indices) * 3
     json_str = (
-        '{"asset":{"version":"2.0","generator":"vultus-fase2"},"scene":0,'
+        '{"asset":{"version":"2.0","generator":"vultus-gnm-real"},"scene":0,'
         '"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0,"name":"VultusFaceNeutral"}],'
-        '"meshes":[{"name":"FaceNeutral","primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]}],'
-        '"materials":[{"name":"BakedSkin","pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.9}}],'
+        '"meshes":[{"name":"FaceNeutral","primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":2,"material":0}]}],'
+        '"materials":[{"name":"BakedSkin","pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.9,"baseColorTexture":{"index":0}}}],'
+        '"textures":[{"source":0,"sampler":0}],"samplers":[{"magFilter":9729,"minFilter":9729}],'
+        '"images":[{"bufferView":3,"mimeType":"image/png"}],'
         f'"buffers":[{{"byteLength":{len(bin_buf)}}}],'
-        '"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},'
-        '{"buffer":0,"byteOffset":36,"byteLength":6,"target":34963},'
-        f'{{"buffer":0,"byteOffset":44,"byteLength":{UV_LEN},"name":"BakedUV"}}],'
-        '"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","max":[1,1,0],"min":[0,0,0]},'
-        '{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],'
-        f'"extras":{{"expression":"neutral","bakedLen":{UV_LEN}}}}}'
+        '"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":%d,"target":34962},'
+        '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34962},'
+        '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34963},'
+        '{"buffer":0,"byteOffset":%d,"byteLength":%d}]'
+        % (pos_len, uv_off, uvb_len, idx_off, idx_len, png_off, len(png))
+        + ',"accessors":[{"bufferView":0,"componentType":5126,"count":4225,"type":"VEC3",'
+        f'"max":[{max(xs)},{max(ys)},{max(zs)}],"min":[{min(xs)},{min(ys)},{min(zs)}]}},'
+        '{"bufferView":1,"componentType":5126,"count":4225,"type":"VEC2"},'
+        f'{{"bufferView":2,"componentType":5123,"count":{idx_count},"type":"SCALAR"}}],'
+        f'"extras":{{"expression":"neutral","bakedLen":{UV_LEN},"verts":4225,"tris":8192}}}}'
     )
     json_bytes = json_str.encode("utf-8")
     while len(json_bytes) % 4 != 0:
@@ -1044,6 +1207,7 @@ if HAVE_MODAL:
         image=image,
         cpu=1,
         memory=1024,
+        volumes={"/weights": weights},
         secrets=[
             modal.Secret.from_name("vultus-cloudflare"),
             modal.Secret.from_name("vultus-queues-token"),

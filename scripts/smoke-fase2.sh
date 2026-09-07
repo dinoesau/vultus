@@ -193,7 +193,14 @@ with zipfile.ZipFile("/tmp/result.zip") as z:
         assert blob[:4] == GLB_MAGIC, f"{n} sin magic glTF"
         total = int.from_bytes(blob[8:12], "little")
         assert total == len(blob), f"{n} longitud incoherente {total} != {len(blob)}"
-        assert len(blob) > 786432, f"{n} sin textura horneada ({len(blob)})"
+        assert 100_000 < len(blob) < 2_000_000, f"{n} fuera de cota ({len(blob)})"
+        json_len = int.from_bytes(blob[12:16], "little")
+        js = blob[20:20 + json_len]
+        assert b"TEXCOORD_0" in js, f"{n} sin TEXCOORD_0"
+        assert b"baseColorTexture" in js, f"{n} sin textura ligada"
+        assert b'"count":4225' in js, f"{n} sin 4225"
+        assert b'"count":24576' in js, f"{n} sin 24576"
+        assert PNG_MAGIC in blob, f"{n} sin PNG embebido"
         blobs[n] = blob
     # Heatmap no trivial: difiere de UVs y no es PNG solido (par A/B distinto).
     assert blobs["heatmap.png"] != blobs["uv_a.png"], "heatmap identico a uv_a (trivial)"

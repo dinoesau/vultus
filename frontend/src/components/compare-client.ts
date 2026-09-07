@@ -13,11 +13,13 @@ export const API_PATHS = {
   result: (id: string) => `/v1/jobs/${id}/result`,
 } as const;
 
-// Nombres exactos del bundle (contrato con el worker, Fase 1 UV canónico).
+// Nombres exactos del bundle (contrato con el worker, Fase 2 GNM: 3 PNG + 2 GLB).
 export const RESULT_FILES = {
   uvA: "uv_a.png",
   uvB: "uv_b.png",
   heat: "heatmap.png",
+  meshA: "mesh_a.glb",
+  meshB: "mesh_b.glb",
 } as const;
 
 export interface JobEvent {
@@ -74,7 +76,12 @@ export interface ResultImages {
   heat: Blob;
 }
 
-// Desempaqueta el zip en memoria; falla con mensaje claro si falta un PNG.
+export interface ResultMeshes {
+  meshA: Blob;
+  meshB: Blob;
+}
+
+// Desempaqueta el zip en memoria; falla con mensaje claro si falta un PNG o GLB.
 export async function extractResultImages(zipBlob: Blob): Promise<ResultImages> {
   const zip = await JSZip.loadAsync(zipBlob);
   async function pick(name: string): Promise<Blob> {
@@ -88,4 +95,19 @@ export async function extractResultImages(zipBlob: Blob): Promise<ResultImages> 
     pick(RESULT_FILES.heat),
   ]);
   return { uvA, uvB, heat };
+}
+
+// Desempaqueta los meshes GLB en memoria; falla si falta un GLB.
+export async function extractResultMeshes(zipBlob: Blob): Promise<ResultMeshes> {
+  const zip = await JSZip.loadAsync(zipBlob);
+  async function pick(name: string): Promise<Blob> {
+    const entry = zip.file(name);
+    if (!entry) throw new Error(`el zip no contiene ${name}`);
+    return entry.async("blob");
+  }
+  const [meshA, meshB] = await Promise.all([
+    pick(RESULT_FILES.meshA),
+    pick(RESULT_FILES.meshB),
+  ]);
+  return { meshA, meshB };
 }

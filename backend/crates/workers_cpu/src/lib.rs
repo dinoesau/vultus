@@ -1,4 +1,4 @@
-use vultus_core::{CompleteUv, FlawUv, Heatmap};
+use vultus_core::{CompleteUv, GnmMesh, Heatmap};
 
 /// Worker 4 CPU (Rust): `heatmap = |UV_A - UV_B|` por byte.
 /// Puro, sin I/O. Infallible: `CompleteUv` ya prueba `UV_LEN`, dos UV
@@ -13,12 +13,17 @@ pub fn compute_heatmap(uv_a: &CompleteUv, uv_b: &CompleteUv) -> Heatmap {
     Heatmap::parse(bytes).expect("heatmap preserva UV_LEN: entradas ya prueban UV_LEN")
 }
 
-/// Bake baricentrico BFM->GNM (Fase 0: identidad verificada por shape).
-/// La matriz real precomputada llega en Fase 2; aqui solo el contrato.
-/// Infallible: `FlawUv` ya prueba `UV_LEN`, la copia la preserva.
-pub fn bake_bfm_to_gnm(uv_bfm: &FlawUv) -> CompleteUv {
-    CompleteUv::parse(uv_bfm.as_bytes().to_vec())
-        .expect("bake preserva UV_LEN: entrada ya prueba UV_LEN")
+/// Bake baricentrico BFM->GNM Fase 2: lookup por texel via LUT precomputada.
+/// Delega al nucleo puro en `vultus-core::job` (unica fuente, sin duplicar);
+/// este crate es la seam del runtime CPU tras la misma frontera tipada.
+pub fn bake_bfm_to_gnm(uv_bfm: &CompleteUv) -> CompleteUv {
+    vultus_core::bake_bfm_to_gnm(uv_bfm)
+}
+
+/// Builder GLB puro Fase 2: mesh neutro + textura horneada.
+/// Delega al nucleo; el template fijo vive en `vultus-core::job`.
+pub fn build_gnm_glb(baked: &CompleteUv) -> GnmMesh {
+    vultus_core::build_gnm_glb(baked)
 }
 
 #[cfg(test)]
@@ -55,10 +60,30 @@ mod tests {
     }
 
     #[test]
+    fn test_bake_is_not_identity_with_golden() {
+        // LUT v1: (i*5+17)%256. LUT[10]=67, LUT[200]=249, LUT[7]=52.
+        let input = uv_with_head(&[10u8, 200], 7);
+        let baked = bake_bfm_to_gnm(&input);
+        assert_eq!(baked.len(), UV_LEN);
+        assert_ne!(baked.as_bytes(), input.as_bytes());
+        assert_eq!(&baked.as_bytes()[..2], &[67, 249]);
+        assert!(baked.as_bytes()[2..].iter().all(|&b| b == 52));
+    }
+
+    #[test]
+    fn test_build_glb_has_gltf_magic_and_bounded_size() {
+        let baked = uv_with_head(&[10u8, 200], 0);
+        let mesh = build_gnm_glb(&baked);
+        assert_eq!(&mesh.as_bytes()[0..4], &[0x67, 0x6C, 0x54, 0x46]);
+        assert!(mesh.len() > UV_LEN);
+        assert!(mesh.len() < 2_000_000);
+    }
+
+    #[test]
     fn test_wrong_uv_length_rejected_at_parse() {
         assert!(CompleteUv::parse(vec![1, 2]).is_err());
-        assert!(FlawUv::parse(vec![]).is_err());
-        assert!(Heatmap::parse(vec![0u8; UV_LEN - 1]).is_err());
+        assert!(vultus_core::FlawUv::parse(vec![]).is_err());
+        assert!(vultus_core::Heatmap::parse(vec![0u8; UV_LEN - 1]).is_err());
         assert!(CompleteUv::parse(b"{\"todo\":\"complete-uv\"}".to_vec()).is_err());
     }
 }

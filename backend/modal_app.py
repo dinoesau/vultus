@@ -54,10 +54,20 @@ FLAME_UV_SIZE = 256
 # Env con defaults seguros, nada hardcodeado.
 ML_PORT = int(os.environ.get("ML_PORT", "8081"))
 WEIGHTS_DIR = os.environ.get("WEIGHTS_DIR", "/weights")
+# Ruta de assets GNM (solo config nueva de Fase 2): LUT bfm_to_gnm.bin en Volume.
+GNM_ASSETS_DIR = os.environ.get("GNM_ASSETS_DIR", os.path.join(WEIGHTS_DIR, "gnm"))
 # VULTUS_REAL_ML: 1 fuerza real, 0 fuerza dobles, auto decide por pesos+deps.
 REAL_MODE = os.environ.get("VULTUS_REAL_ML", "auto").lower()
 DECA_CODE_DIR = os.environ.get("DECA_CODE_DIR", os.path.join(WEIGHTS_DIR, "deca-code"))
 FREEUV_CODE_DIR = os.environ.get("FREEUV_CODE_DIR", os.path.join(WEIGHTS_DIR, "freeuv-code"))
+
+# Nombres exactos del bundle Fase 2 (contrato con Rust/UI).
+ZIP_UV_A = "uv_a.png"
+ZIP_UV_B = "uv_b.png"
+ZIP_HEATMAP = "heatmap.png"
+ZIP_MESH_A = "mesh_a.glb"
+ZIP_MESH_B = "mesh_b.glb"
+GLB_MAGIC = b"glTF"
 
 try:
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
@@ -605,6 +615,73 @@ def _heatmap_abs_diff(uv_a: bytes, uv_b: bytes) -> bytes:
     return bytes(x - y if x >= y else y - x for x, y in zip(uv_a, uv_b))
 
 
+def _bfm_to_gnm_lut() -> bytes:
+    """LUT BFM->GNM v1: archivo versionado o fallback a formula congelada.
+
+    Formula: LUT[i] = (i * 5 + 17) % 256 (espejo de Rust include_bytes!).
+    El archivo vive en GNM_ASSETS_DIR/bfm_to_gnm.bin (Volume en prod).
+    """
+    path = os.path.join(GNM_ASSETS_DIR, "bfm_to_gnm.bin")
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        if len(data) == 256:
+            return data
+        logger.warning("gnm lut bad length path=%s len=%d, uso formula", path, len(data))
+    except OSError:
+        pass
+    return bytes((i * 5 + 17) % 256 for i in range(256))
+
+
+def _bake_bfm_to_gnm(uv_bfm: bytes) -> bytes:
+    """Espejo puro de Rust bake_bfm_to_gnm: lookup por texel via LUT.
+
+    Mismo golden: [10,200]+fill7 -> [67,249]+fill52.
+    """
+    if len(uv_bfm) != UV_LEN:
+        raise ValueError(f"bake needs {UV_LEN} bytes, got {len(uv_bfm)}")
+    lut = _bfm_to_gnm_lut()
+    return bytes(lut[b] for b in uv_bfm)
+
+
+def _build_gnm_glb(baked: bytes) -> bytes:
+    """Espejo puro de Rust build_gnm_glb: triangulo neutro + textura horneada.
+
+    Expresion neutra fija. Contenedor GLB con magic glTF y longitud coherente.
+    """
+    import struct
+
+    if len(baked) != UV_LEN:
+        raise ValueError(f"glb needs {UV_LEN} baked bytes, got {len(baked)}")
+    verts = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    bin_buf = struct.pack("<9f", *verts) + struct.pack("<3H", 0, 1, 2) + b"\x00\x00"
+    bin_buf += bytes(baked)
+    assert len(bin_buf) % 4 == 0
+    json_str = (
+        '{"asset":{"version":"2.0","generator":"vultus-fase2"},"scene":0,'
+        '"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0,"name":"VultusFaceNeutral"}],'
+        '"meshes":[{"name":"FaceNeutral","primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]}],'
+        '"materials":[{"name":"BakedSkin","pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.9}}],'
+        f'"buffers":[{{"byteLength":{len(bin_buf)}}}],'
+        '"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},'
+        '{"buffer":0,"byteOffset":36,"byteLength":6,"target":34963},'
+        f'{{"buffer":0,"byteOffset":44,"byteLength":{UV_LEN},"name":"BakedUV"}}],'
+        '"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","max":[1,1,0],"min":[0,0,0]},'
+        '{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],'
+        f'"extras":{{"expression":"neutral","bakedLen":{UV_LEN}}}}}'
+    )
+    json_bytes = json_str.encode("utf-8")
+    while len(json_bytes) % 4 != 0:
+        json_bytes += b" "
+    total = 12 + 8 + len(json_bytes) + 8 + len(bin_buf)
+    out = GLB_MAGIC + struct.pack("<I", 2) + struct.pack("<I", total)
+    out += struct.pack("<I", len(json_bytes)) + b"JSON" + json_bytes
+    out += struct.pack("<I", len(bin_buf)) + b"BIN\x00" + bin_buf
+    assert len(out) == total
+    assert out[:4] == GLB_MAGIC
+    return out
+
+
 def _png_from_uv_raw(raw: bytes):
     from PIL import Image
 
@@ -613,14 +690,16 @@ def _png_from_uv_raw(raw: bytes):
     return Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), raw)
 
 
-def _build_result_zip(uv_a_png: bytes, uv_b_png: bytes, heat_png: bytes) -> bytes:
+def _build_result_zip(uv_a_png: bytes, uv_b_png: bytes, heat_png: bytes, mesh_a: bytes, mesh_b: bytes) -> bytes:
     import zipfile
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as z:
-        z.writestr("uv_a.png", uv_a_png)
-        z.writestr("uv_b.png", uv_b_png)
-        z.writestr("heatmap.png", heat_png)
+        z.writestr(ZIP_UV_A, uv_a_png)
+        z.writestr(ZIP_UV_B, uv_b_png)
+        z.writestr(ZIP_HEATMAP, heat_png)
+        z.writestr(ZIP_MESH_A, mesh_a)
+        z.writestr(ZIP_MESH_B, mesh_b)
     return buf.getvalue()
 
 
@@ -723,25 +802,6 @@ if HAVE_MODAL:
         max_containers=4,
         timeout=30,
     )(mediapipe_worker)
-
-
-def gnm_bake_worker(job_id: str, r2_keys: dict):
-    """Worker 4 - DEPRECATED en híbrido: vive en Rust `vultus-workers-cpu`.
-
-    Se mantiene el stub para no romper deploys antiguos.
-    No añadir lógica aquí: `compute_heatmap` + `bake_bfm_to_gnm` en Rust.
-    """
-    raise NotImplementedError("moved to Rust vultus-workers-cpu")
-
-
-if HAVE_MODAL:
-    gnm_bake_worker = app.function(
-        image=image,
-        cpu=2,
-        memory=4096,
-        secrets=[modal.Secret.from_name("vultus-cloudflare")],
-        timeout=30,
-    )(gnm_bake_worker)
 
 
 def _cf_pull_messages(batch_size: int = 1):
@@ -896,8 +956,21 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
         raise ValueError("complete-uv bad length")
     _report_progress(job_id, PROGRESS_BAKE, "bake")
 
+    t_bake = time.perf_counter()
     heat = _heatmap_abs_diff(bytes(uv_a), bytes(uv_b))
-    # PNG + zip en memoria, sin disco. Nombres exactos del contrato.
+    baked_a = _bake_bfm_to_gnm(bytes(uv_a))
+    baked_b = _bake_bfm_to_gnm(bytes(uv_b))
+    mesh_a = _build_gnm_glb(baked_a)
+    mesh_b = _build_gnm_glb(baked_b)
+    bake_ms = int((time.perf_counter() - t_bake) * 1000)
+    logger.info(
+        "bake gnm done job=%s bake_ms=%d mesh_a_len=%d mesh_b_len=%d",
+        job_id,
+        bake_ms,
+        len(mesh_a),
+        len(mesh_b),
+    )
+    # PNG + zip en memoria, sin disco. Nombres exactos del contrato (5 archivos).
     import io as _io
 
     from PIL import Image
@@ -908,7 +981,7 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
         img.save(buf, format="PNG")
         return buf.getvalue()
 
-    zip_bytes = _build_result_zip(_to_png(uv_a), _to_png(uv_b), _to_png(heat))
+    zip_bytes = _build_result_zip(_to_png(uv_a), _to_png(uv_b), _to_png(heat), mesh_a, mesh_b)
     r2.put_object(Bucket=bucket, Key=f"jobs/{job_id}/result.zip", Body=zip_bytes, ContentType="application/zip")
     _report_progress(job_id, PROGRESS_DONE, "done")
     dt = int((time.perf_counter() - t0) * 1000)

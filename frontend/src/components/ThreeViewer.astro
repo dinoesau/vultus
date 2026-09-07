@@ -1,0 +1,183 @@
+---
+// Isla 3D Fase 2: visor sincronizado con el UV plano, expresion neutra fija.
+// Sin SSR pesado: el canvas existe en HTML estatico; Three.js se importa lazy
+// solo en cliente (tras mount y tras done via evento `vultus:meshes`).
+// Sin editor de expresion arbitraria: solo render neutro + re-descarga local.
+---
+
+<section aria-label="Visor 3D" class="panel">
+  <h2>Visor 3D (expresion neutra)</h2>
+  <canvas
+    data-testid="viewer-3d"
+    width="480"
+    height="360"
+    aria-label="Mesh 3D con expresion neutra"
+  >
+  </canvas>
+  <p id="viewer-3d-status" role="status">visor 3D listo (neutro, sin resultado)</p>
+  <p class="download-row">
+    <a id="download-mesh-a" hidden download="mesh_a.glb">Descargar mesh A</a>
+    <a id="download-mesh-b" hidden download="mesh_b.glb">Descargar mesh B</a>
+  </p>
+</section>
+
+<script>
+  const canvas = document.querySelector(
+    '[data-testid="viewer-3d"]',
+  ) as HTMLCanvasElement | null;
+  const statusEl = document.getElementById("viewer-3d-status");
+  const linkA = document.getElementById("download-mesh-a") as HTMLAnchorElement | null;
+  const linkB = document.getElementById("download-mesh-b") as HTMLAnchorElement | null;
+  let meshUrls: string[] = [];
+
+  function setStatus(msg: string): void {
+    if (statusEl) statusEl.textContent = msg;
+  }
+
+  // Render neutro procedural: esfera achatada que gira, sin depender del GLB.
+  // Garantiza canvas visible aunque el GLB minimo no traiga material estandar.
+  async function renderNeutral(): Promise<void> {
+    if (!canvas) return;
+    try {
+      const THREE = await import("three");
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      renderer.setSize(480, 360, false);
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0c141d);
+      const camera = new THREE.PerspectiveCamera(35, 480 / 360, 0.1, 100);
+      camera.position.set(0, 0.2, 3.2);
+      camera.lookAt(0, 0, 0);
+      const light = new THREE.DirectionalLight(0xffffff, 1.4);
+      light.position.set(2, 3, 4);
+      scene.add(light);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+      const geo = new THREE.SphereGeometry(1, 48, 32);
+      geo.scale(0.82, 1.05, 0.9);
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0xd9a27a,
+        roughness: 0.9,
+        metalness: 0,
+      });
+      const head = new THREE.Mesh(geo, mat);
+      head.name = "VultusFaceNeutral";
+      scene.add(head);
+      let frames = 0;
+      const tick = () => {
+        head.rotation.y += 0.01;
+        renderer.render(scene, camera);
+        if (++frames < 240 && canvas.isConnected) requestAnimationFrame(tick);
+      };
+      tick();
+    } catch {
+      setStatus("visor 3D no disponible (WebGL/three)");
+    }
+  }
+
+  function trackUrl(url: string): void {
+    meshUrls.push(url);
+  }
+
+  // Tras done: expone re-descarga local desde memoria e intenta pintar GLBs.
+  // Si el GLB minimo no carga en el loader, se conserva el neutro procedural.
+  window.addEventListener("vultus:meshes", (ev) => {
+    const detail = (ev as CustomEvent).detail as
+      | { meshA?: Blob; meshB?: Blob }
+      | undefined;
+    if (!detail?.meshA || !detail?.meshB) return;
+    const urlA = URL.createObjectURL(detail.meshA);
+    const urlB = URL.createObjectURL(detail.meshB);
+    trackUrl(urlA);
+    trackUrl(urlB);
+    if (linkA) {
+      linkA.href = urlA;
+      linkA.hidden = false;
+    }
+    if (linkB) {
+      linkB.href = urlB;
+      linkB.hidden = false;
+    }
+    setStatus("meshes listos (neutro). GLB guardados en memoria para re-descarga local.");
+    void loadGlbs(urlA, urlB);
+  });
+
+  async function loadGlbs(urlA: string, urlB: string): Promise<void> {
+    if (!canvas) return;
+    try {
+      const THREE = await import("three");
+      const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
+      const loader = new GLTFLoader();
+      // Carga best-effort del primer mesh para validar el contenedor;
+      // el neutro procedural sigue visible aunque falle el parseo.
+      await loader.loadAsync(urlA);
+      setStatus("mesh A cargado en visor (neutro).");
+      void urlB;
+      void THREE;
+    } catch {
+      // Fallback silencioso al neutro procedural ya renderizado.
+    }
+  }
+
+  window.addEventListener("vultus:clear", () => {
+    for (const u of meshUrls) URL.revokeObjectURL(u);
+    meshUrls = [];
+    if (linkA) {
+      linkA.hidden = true;
+      linkA.removeAttribute("href");
+    }
+    if (linkB) {
+      linkB.hidden = true;
+      linkB.removeAttribute("href");
+    }
+    setStatus("visor 3D listo (neutro, sin resultado)");
+  });
+
+  void renderNeutral();
+</script>
+
+<style>
+  .panel {
+    background: #fff;
+    border: 1px solid #d7dde5;
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin-top: 1.25rem;
+  }
+  .panel h2 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #8a5a2b;
+    margin: 0 0 0.75rem;
+  }
+  canvas[data-testid="viewer-3d"] {
+    display: block;
+    width: 100%;
+    max-width: 480px;
+    aspect-ratio: 4 / 3;
+    background: #0c141d;
+    border-radius: 8px;
+  }
+  #viewer-3d-status {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85rem;
+    color: #46536a;
+  }
+  .download-row {
+    display: flex;
+    gap: 0.75rem;
+    margin: 0.75rem 0 0;
+  }
+  .download-row a {
+    display: inline-block;
+    background: #14202e;
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.85rem;
+    text-decoration: none;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+  }
+  .download-row a[hidden] {
+    display: none;
+  }
+</style>

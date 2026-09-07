@@ -292,10 +292,10 @@ async fn job_status(
     Ok((StatusCode::OK, Json(body)))
 }
 
-/// GET /v1/jobs/:id/result: zip canonico en memoria con 3 PNG RGB 512x512.
+/// GET /v1/jobs/:id/result: zip Fase 2 en memoria con 3 PNG RGB 512x512 + 2 GLB.
 /// `fetch_result` da NotFound si expiro/purgo o aun no hay resultado: 404
 /// para no esperar en vano (`/status` sigue mostrando `expired`).
-/// Sin mesh.glb ni report.pdf (Fase2/3). Log solo lens + duration, nunca bytes.
+/// Sin report.pdf (Fase 3). Log solo lens + duration, nunca bytes.
 async fn job_result(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -303,15 +303,18 @@ async fn job_result(
     let start = std::time::Instant::now();
     let job_id = JobId::parse(&id).map_err(AppError::Domain)?;
     let result = state.queue.fetch_result(&job_id).await?;
-    let (uv_a, uv_b, heatmap) = result.into_parts();
+    let (uv_a, uv_b, heatmap, mesh_a, mesh_b) = result.into_parts();
     let a_png = encode_uv_png(uv_a.as_bytes()).map_err(AppError::Domain)?;
     let b_png = encode_uv_png(uv_b.as_bytes()).map_err(AppError::Domain)?;
     let h_png = encode_uv_png(heatmap.as_bytes()).map_err(AppError::Domain)?;
-    let zip_bytes = build_result_zip(&a_png, &b_png, &h_png).map_err(AppError::Domain)?;
+    let zip_bytes = build_result_zip(&a_png, &b_png, &h_png, mesh_a.as_bytes(), mesh_b.as_bytes())
+        .map_err(AppError::Domain)?;
     let zip_len = zip_bytes.len();
     tracing::info!(
         job_id = %job_id,
         zip_len = zip_len,
+        mesh_a_len = mesh_a.len(),
+        mesh_b_len = mesh_b.len(),
         duration_ms = start.elapsed().as_millis(),
         "result zip served"
     );
@@ -345,25 +348,32 @@ fn encode_uv_png(raw: &[u8]) -> Result<Vec<u8>, CoreError> {
     Ok(out)
 }
 
-/// Empaqueta los 3 PNG con nombres exactos, compresion Stored (determinista).
-fn build_result_zip(a_png: &[u8], b_png: &[u8], h_png: &[u8]) -> Result<Vec<u8>, CoreError> {
+/// Empaqueta 3 PNG + 2 GLB con nombres exactos, compresion Stored (determinista).
+/// Nombres desde `vultus-core::job` para no diverger con Modal/UI.
+fn build_result_zip(
+    a_png: &[u8],
+    b_png: &[u8],
+    h_png: &[u8],
+    mesh_a: &[u8],
+    mesh_b: &[u8],
+) -> Result<Vec<u8>, CoreError> {
     use std::io::Write;
     use zip::{write::SimpleFileOptions, CompressionMethod};
     let cursor = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(cursor);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    zip.start_file("uv_a.png", options)
-        .map_err(|_| CoreError::Invariant("zip encode failed"))?;
-    zip.write_all(a_png)
-        .map_err(|_| CoreError::Invariant("zip encode failed"))?;
-    zip.start_file("uv_b.png", options)
-        .map_err(|_| CoreError::Invariant("zip encode failed"))?;
-    zip.write_all(b_png)
-        .map_err(|_| CoreError::Invariant("zip encode failed"))?;
-    zip.start_file("heatmap.png", options)
-        .map_err(|_| CoreError::Invariant("zip encode failed"))?;
-    zip.write_all(h_png)
-        .map_err(|_| CoreError::Invariant("zip encode failed"))?;
+    for (name, data) in [
+        (vultus_core::ZIP_UV_A, a_png),
+        (vultus_core::ZIP_UV_B, b_png),
+        (vultus_core::ZIP_HEATMAP, h_png),
+        (vultus_core::ZIP_MESH_A, mesh_a),
+        (vultus_core::ZIP_MESH_B, mesh_b),
+    ] {
+        zip.start_file(name, options)
+            .map_err(|_| CoreError::Invariant("zip encode failed"))?;
+        zip.write_all(data)
+            .map_err(|_| CoreError::Invariant("zip encode failed"))?;
+    }
     let cursor = zip
         .finish()
         .map_err(|_| CoreError::Invariant("zip encode failed"))?;

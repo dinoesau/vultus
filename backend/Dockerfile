@@ -22,6 +22,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY Cargo.toml Cargo.toml
 COPY Cargo.lock Cargo.lock
 COPY crates crates
+COPY assets assets
 # El binario vive en el mount de target: copiarlo fuera para la etapa runtime.
 RUN --mount=type=cache,target=/work/target \
     cargo build --release --locked -p vultus-api && cp /work/target/release/vultus-api /tmp/vultus-api

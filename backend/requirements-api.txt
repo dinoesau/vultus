@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+httpx
+pydantic
+pytest
+mypy
+ruff
+Pillow
+python-multipart
+numpy
+websockets
+anyio

@@ -1,5 +1,12 @@
 # ARCHITECTURE - Vultus
 
+> Estado objetivo sin Rust (plan-remove-rust-stack): dos duenos.
+> TypeScript es fuente de verdad del contrato HTTP en el borde (`edge/contract.ts`).
+> Python es dueno de API local (`backend/app.py`), cola en memoria (`backend/store.py`),
+> orquestador local (`backend/pipeline_local.py`) y bake CPU (`backend/gnm.py`).
+> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `mypy --strict backend/domain.py`,
+> `pytest backend/tests -q`, `npx vitest run edge/contract.test.ts`.
+
 ## 1. Objetivo
 
 Este documento describe la forma del sistema, no el flujo.
@@ -22,14 +29,14 @@ Seam es la frontera pública donde se testean comportamientos sin mirar internos
 
 `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events`, `GET /health`.
 Es la única entrada para el cliente Astro.
-Testeable con `axum-test::TestServer` real sin mocks (11 tests: 202 + `status queued`, `GET` queued, paridad `R2PointerQueue`, 400 imagen / faltante / uuid / events uuid, 404 desconocido, `health`, expiración `expired`) más 2 tests `config` y WS real con cliente websocket.
+Testeable con `TestClient` real sin mocks (6 tests API: 202 + `status queued`, `GET` queued, 400 imagen / faltante / uuid, 404 desconocido, 409 pre-done, `health`, expiración `expired`) mas WS real con cliente websocket.
 Respuestas tipadas `CompareResponse` / `JobResponse` y errores `AppError -> {400,404,500}` con cuerpo `{"detail":...}`.
-Contrato en `backend/crates/api`.
+Contrato en `backend/app.py` (dueno Python) con fuente de verdad HTTP en `edge/contract.ts`.
 
 ### Seam 2 - Queue Contract
 
 `enqueue(EnqueueCommand) -> EnqueuedJob`, `status`, `progress -> (Progress, Stage)`, `set_progress(Progress, Stage)`, `stored_lens -> (usize, usize)`.
-Contrato abstracto; implementación dual vía `vultus-core::Queue` con `Store` compartido (`HashMap<JobId, MemoryEntry>`):
+Contrato con un solo `Store` compartido en `backend/store.py` tras dos adapters (`MemoryQueue` / `R2PointerQueue`):
 - **Local/dev/test:** `MemoryQueue` (guarda longitudes para probar que los bytes fluyen, `r2_keys None`).
 - **Prod:** `R2PointerQueue` que simula `Cloudflare Queues + R2` (Queues limita a 128KB/mensaje, se encola solo `{job_id, r2_keys jobs/{id}/a|b}` y los bytes viven en R2; consumo vía `HTTP Pull Consumer` desde Modal).
 Testeable con `MemoryQueue` o `R2PointerQueue` sin tocar Cloudflare (`test_r2_pointer_queue_serves_same_seam` prueba paridad).
@@ -50,7 +57,7 @@ Se cubren indirectamente vía Seam 3.
 ```mermaid
 graph TD
     FE[frontend - Astro islands<br/>shallow, orquesta UI<br/>Cloudflare Pages prod]
-    API[api - Axum / Cloudflare Worker<br/>shallow, valida y encola]
+    API[api - FastAPI / Cloudflare Worker<br/>shallow, valida y encola]
     CORE[core - queue + tmpfs<br/>deep, gestiona ciclo de vida<br/>adapter MemoryQueue / Queues+R2]
     CFQ[Cloudflare Queues + R2<br/>prod edge]
     LOCAL[Store en memoria<br/>local dev y test]
@@ -75,23 +82,23 @@ graph TD
 
 ### 4.1 api
 
-Módulo shallow en Rust (`Axum`).
+Módulo shallow en Python (`FastAPI`).
 Valida `multipart`, magic bytes y tamaño vía `ImageBytes::parse` y construye `EnqueueCommand::new(a, b)`.
 `AppState(Arc<dyn Queue>)` genérico vía `AppState::new(impl Queue)` para paridad `MemoryQueue` / `R2PointerQueue`.
 Errores `AppError::{BadRequest, Domain(CoreError)}` mapean a `400` (validación + `Empty`), `404` (`NotFound`), `500` (`Queue | Ml | Invariant` con `detail internal error`).
-`main` retorna `anyhow::Result` con `context` en `bind :8000` y `serve`.
+`app.py` expone `create_app()` con lifespan (reaper) y sirve `:8000` vía `uvicorn`.
 Expone `CompareResponse{job_id, status:"queued"}` (`202`), `JobResponse{job_id, status: JobStatus::as_str}` (`200`) y `WS`.
 No contiene lógica de visión.
 
 ### 4.2 core
 
 Módulo deep.
-Gestiona `Store` compartido, `TTL 60` (`TtlSecs` nutype `1..=3600`), ciclo tipado `Job<Queued|Processing|Done|Failed|Expired>`, `tmpfs` lifecycle y `progress` events.
+Gestiona `Store` compartido, `TTL 60` (`TtlSecs` `1..=3600`), ciclo `Queued->Processing->Done|Failed|Expired`, `tmpfs` lifecycle y `progress` events.
 Esconde detalles de `MemoryQueue` (local) y `R2PointerQueue` (prod `Queues+R2`) tras el mismo trait `Queue`.
 Tipos `ImageBytes` + `ImageBytesRef` zero-cost, `R2Key` / `R2Keys` privados, `EnqueuedJob` con `is_r2_pointer()`, `Stage` enum (prohibido `&str`), `Progress::zero()`, `Landmarks` 478 JSON, `FlawUv` / `CompleteUv` / `Heatmap` con `UV_LEN`, `BaseUrl`, `FlamePayload`, `CoreError` taxonómico (`Image | JobId | Progress | R2Key | BaseUrl | Empty | Queue | Ml | NotFound | Invariant`).
 Patrón `R2 pointer`: en prod sube bytes a `R2` y encola solo `r2_keys` (Queues <128KB).
 Provee `Queue::{enqueue, status, progress, set_progress, stored_lens}` agnósticos a la infra.
-Deps nuevas del workspace: `anyhow`, `nutype`, `proptest` (dev).
+Deps API local: `fastapi/uvicorn/httpx/pytest/mypy/ruff/Pillow` (ver `backend/requirements-api.txt`).
 
 ### 4.3 workers
 
@@ -173,7 +180,7 @@ Se pierde cache y re-descarga desde servidor, pero se gana privacidad y simplici
 
 ### ADR-005 Híbrido Rust + Python sidecar ML (supera a ADR-001 en API)
 
-**Decisión:** `Seam 1 API + Seam 2 queue + Worker 4 CPU` en Rust (`Axum + tokio`, `backend/crates/`). `Worker 1/2/3 ML GPU` se quedan en Python (`backend/modal_app.py`) tras contrato HTTP `POST /ml/landmarks|flame|freeuv` consumido por `MlSidecarClient` en `vultus-core`.
+**Decisión (histórico Rust, superado):** antes `Seam 1 API + Seam 2 queue + Worker 4 CPU` en Rust (`Axum + tokio`, `backend/crates/`, borrado). Hoy Python es dueno (`backend/app.py`, `backend/store.py`, `backend/gnm.py`) y `Worker 1/2/3 ML GPU` siguen en Python (`backend/modal_app.py`) tras `POST /ml/landmarks|flame|freeuv`.
 
 **Contexto:** ADR-001 elegía `ARQ` por ser asyncio nativo. Al mover la API a Rust, `ARQ` (Python-only) y `Modal SDK` (Python-only) no son portables. Reescribir `MediaPipe/FLAME/FreeUV` a `ort/candle/burn` costaría meses y rompería fidelidad forense (golden `sha256(uv)`).
 
@@ -183,11 +190,11 @@ Se pierde cache y re-descarga desde servidor, pero se gana privacidad y simplici
 - `wrangler.toml` sin `python_workers`; edge es gateway fino, API pesada en Rust.
 - `Dockerfile` compila binario Rust; `Dockerfile.gpu` solo sidecar Python.
 
-### ADR-006 Parse-don-t-validate con typestate + proptest
+### ADR-006 Parse-don-t-validate con tipos probados + goldens
 
-**Decisión:** Dominio con tipos opacos que prueban en `parse` (`ImageBytes` + `ImageBytesRef` zero-cost, `JobId` trim, `R2Key`, `Landmarks` 478 JSON, `FlawUv` / `CompleteUv` / `Heatmap` con `UV_LEN`, `BaseUrl`, `TtlSecs` nutype) y ciclo `Job<State>` con moves.
+**Decisión:** Dominio con tipos probados que prueban en `parse` (`ImageBytes`, `JobId` trim, `R2Key`, `Landmarks` 478 JSON, `FlawUv` / `CompleteUv` / `Heatmap` con `UV_LEN`, `BaseUrl`, `TtlSecs`) y ciclo con estados separados.
 Errores taxonómicos `CoreError` (+ `ImageError`, `BaseUrlError`, `MlError`, `QueueError`) con mapeo fijo `AppError -> 400|404|500`.
-Propiedades con `proptest` (`parse_never_panics`, rangos, `R2Key`), golden literales para heatmap.
+Goldens literales a mano (`Progress`, `TtlSecs`, `R2Key`, heatmap `[6,10]`, bake `[10,176,7]`), relojes manuales sin sleeps.
 
 **Contexto:** El diff mostraba `Vec<u8>` y `&str` sueltos cruzando seams (`enqueue(a,b)`, `stage: &str`, `job.status String`, `base_url String`).
 Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
@@ -213,7 +220,7 @@ Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
 
 Imagen entra como `bytes` y nunca toca disco persistente más allá de `tmpfs`/`R2 60s`.
 Prod: `Browser -> R2 PutObject (via Worker presigned) -> Queues {job_id, r2_keys} -> Modal workers leen R2 -> /tmp tmpfs -> R2 result.zip -> Worker StreamingResponse`.
-Local Fase 0: `Browser -> Axum -> MemoryQueue (stored_lens) -> /tmp tmpfs -> GET status / WS events`. Sin `Redis`.
+Local: `Browser -> FastAPI -> MemoryQueue (stored_lens) -> /tmp tmpfs -> GET status / WS events`. Sin `Redis`.
 El bundle final viajará `worker -> R2 bytes -> API/Worker -> StreamingResponse` en prod (Fase 1+); en Fase 0 local solo hay `stored_lens` en memoria.
 Ningún artefacto se guarda en S3/Postgres persistente. `R2 lifecycle 60s` garantiza olvido.
 
@@ -235,10 +242,10 @@ Métricas expuestas para `OpenTelemetry`.
 
 ## 10. Testing
 
-Seam 1 con `axum-test::TestServer` real (11 tests) + 2 config.
+Seam 1 con `TestClient` real (6 tests API) + WS real.
 Seam 2 con `MemoryQueue` y `R2PointerQueue` (`stored_lens`, `progress`, `unknown is NotFound`).
 Seam 3 con golden `UV_LEN` (`black_heatmap`, `known_diff [6,10]`, `wrong_uv_length_rejected_at_parse`) y `Landmarks` 478.
-`proptest` para `parse_never_panics` y rangos.
+Goldens literales y relojes manuales para rangos.
 Nada de unit tests a `fit_flame` interno.
 56 tests en verde (`16 api: 2 config + 11 seam1 + 3 ws, 37 core: 32 unit + 5 edge_parity, 3 workers_cpu`).
 Ver `CONTEXT.md` y `PIPELINE.md` para contratos.

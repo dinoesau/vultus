@@ -1,5 +1,10 @@
 # CONTEXT - Vultus Vocabulario de Dominio
 
+> Estado objetivo sin Rust: vocabulario Python+TS.
+> Python: value objects frozen en `backend/domain.py` con `Result`, errores estratificados.
+> TS: branded types en `edge/contract.ts` como unica fuente del contrato HTTP.
+> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `pytest backend/tests/test_domain.py -q`.
+
 Este documento define el lenguaje ubicuo del proyecto.
 Todo código, tests y ADRs deben usar estos términos.
 Evita sinónimos para el mismo concepto.
@@ -14,7 +19,7 @@ Es apoyo visual.
 Tiene `job_id` branded (`JobId::new` / `JobId::parse` con `trim`, error `InvalidJobId`) y estados `queued`, `processing`, `done`, `failed`, `expired` (`JobStatus::as_str` / `Display`).
 El ciclo de vida tipado es `Job<Queued> -> Job<Processing> -> Job<Done|Failed|Expired>` (`start`, `set_progress`, `complete` / `fail` / `expire`).
 Transiciones ilegales no compilan.
-TTL es `TtlSecs` (`nutype` `1..=3600`, default `60`).
+TTL es `TtlSecs` (`1..=3600`, default `60`).
 
 - **image**: foto de entrada en `bytes` JPEG o PNG.
 Debe contener una sola cara frontal o semi-frontal.
@@ -107,16 +112,16 @@ Mapeo HTTP: dominio `InvalidImage | InvalidJobId | InvalidProgress | InvalidR2Ke
 - `CoreError` es taxonomía `Clone + PartialEq + Eq`: `InvalidImage(ImageError)`, `InvalidJobId`, `InvalidProgress`, `InvalidR2Key`, `InvalidBaseUrl(BaseUrlError)`, `Empty`, `Queue(QueueError::Backend)`, `Ml(MlError::{Transport, BadStatus, Decode, Empty})`, `NotFound(String)`, `Invariant(&'static str)`.
 Helpers `not_found`, `queue_backend`, `ml_transport`.
 `ImageError::{SizeOutOfRange, UnsupportedFormat}`, `BaseUrlError::{BadScheme, Empty}`.
-`main` usa `anyhow::Context` en `bind :8000` y `serve`.
+`app.py` usa lifespan con reaper y sirve `:8000` vía `uvicorn`.
 Nunca `unwrap` en request path; multipart inválido es `AppError::BadRequest`.
 
 ## Boundaries
 
-- **Seam 1 API**: `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events` (Axum local / Cloudflare Workers + Durable Objects prod).
+- **Seam 1 API**: `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events` (FastAPI local / Cloudflare Workers + Durable Objects prod).
 `AppState(Arc<dyn Queue>)` genérico vía `AppState::new(impl Queue)`, respuestas tipadas `CompareResponse{job_id, status:"queued"}` (`202`) y `JobResponse{job_id, status: JobStatus::as_str}` (`200`).
 `GET` con uuid inválido es `400`, job desconocido es `404`.
 
-- **Seam 2 Queue**: contrato `enqueue(EnqueueCommand)`, `status`, `progress`, `set_progress(Progress, Stage)`, `stored_lens` agnóstico a infra vía `vultus-core::Queue`.
+- **Seam 2 Queue**: contrato `enqueue(EnqueueCommand)`, `status`, `progress`, `set_progress(Progress, Stage)`, `stored_lens` agnóstico a infra vía `backend/store.py`.
 Local: `MemoryQueue` (bytes directos, `r2_keys None`).
 Prod: `R2PointerQueue` (patrón `R2 pointer` por límite 128KB, `r2_keys Some(jobs/{id}/a|b)`) + `HTTP Pull Consumer` en Modal.
 Estado compartido `Store { HashMap<JobId, MemoryEntry> }` tras ambos adapters.
@@ -135,5 +140,5 @@ Ejemplo bueno: `test_frontal_face_produces_512_uv`.
 Ejemplo malo: `test_worker_calls_freeuv`.
 Valor esperado viene de literal golden verificado manualmente, no de recomputar con misma función.
 Golden UV es `vec![fill; UV_LEN]` con cabeza literal (`[10, 200]` vs `[4, 210]` -> `[6, 10]`).
-`proptest` para `parse_never_panics`, rangos `Progress` / `TtlSecs`, `R2Key` trim / `..`, JPEG/PNG con filler.
-Seam 1 tiene 11 tests `axum-test::TestServer` + 2 config + 3 WS (`tests/ws_events.rs` con `tokio-tungstenite`: snapshot `queued`, `processing/flame` tras `set_progress`, handshake falla en desconocido).
+Goldens literales para rangos `Progress` / `TtlSecs`, `R2Key` trim / `..`, JPEG/PNG con filler.
+Seam 1 tiene 6 tests `TestClient` + WS real (`backend/tests/test_api.py`: snapshot `queued`, `processing/flame` tras `set_progress`, handshake falla en desconocido).

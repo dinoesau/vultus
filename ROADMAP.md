@@ -1,5 +1,8 @@
 # ROADMAP - Vultus Comparador Visual Forense
 
+> Estado objetivo sin Rust: un solo PR atomico que borra `backend/crates`, `Cargo.*`, `Dockerfile` Rust.
+> Comandos nuevos: `docker compose up --build -d`, `bash scripts/smoke-fase0.sh`, `npm run test:e2e --prefix frontend`.
+
 ## 1. Resumen
 
 Vultus es un comparador visual forense en espacio canónico.
@@ -65,10 +68,10 @@ Si el usuario cierra la pestaña antes de descargar, el resultado expira y debe 
 
 ### 4.1 Backend híbrido Rust + Python ML
 
-Rust gestionado con `cargo` en `backend/` workspace (`api`, `core`, `workers_cpu` + `anyhow`, `nutype`, `proptest` dev).
-Framework `Axum + tokio + serde + utoipa` para Seam 1 (`AppError 400/404/500`, `AppState(Arc<dyn Queue>)`, `CompareResponse` / `JobResponse`, `main -> anyhow::Result`).
-Queue con trait `Queue` en `vultus-core` (`MemoryQueue` local/test con `stored_lens`, `R2PointerQueue` prod con `Some(R2Keys)`, `Store` compartido, `EnqueueCommand`, `Stage` enum, `progress` / `set_progress`).
-Validación en bordes con `ImageBytes::parse` + `ImageBytesRef` zero-cost, `JobId::parse(trim)`, `Progress::parse` + `zero`, `R2Key` / `R2Keys` privados, `TtlSecs` nutype `1..=3600` default 60, `Job<State>` typestate, `assert_ok` para invariantes (500).
+Python gestionado con `pip` en `backend/` (`domain.py`, `store.py`, `gnm.py`, `pipeline_local.py`, `app.py` + `pytest/mypy/ruff` dev).
+Framework `FastAPI + asyncio` para Seam 1 (`400/404/409/500`, `TestClient`, `CompareResponse` / `JobResponse`).
+Queue con `Store` compartido en `backend/store.py` (`MemoryQueue` local/test con `stored_lens`, `R2PointerQueue` prod con `Some(R2Keys)`, `EnqueueCommand`, `Stage` enum, `progress` / `set_progress`).
+Validación en bordes con `parse_image_bytes`, `parse_job_id(trim)`, `parse_progress` + `zero`, `R2Key` / `R2Keys`, `TtlSecs` `1..=3600` default 60, estados `Queued/Processing/Done/Failed/Expired`, `Invariant` (500).
 CPU: `vultus-workers-cpu` infallible (`compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap`, `bake_bfm_to_gnm(&FlawUv) -> CompleteUv`, sin dep `image`, `UV_LEN = 786432`).
 ML GPU: sidecar Python en `backend/modal_app.py` con inferencia real (`MediaPipe Tasks Vision`, `DECA para FLAME`, `FreeUV` con `SD1.5 + CLIP`), N workers por modelo más `HTTP Pull Consumer` desde `Cloudflare Queues` con patrón `R2 pointer`, `gnm_bake_worker` deprecated (bake real en Fase 2) tras `POST /ml/landmarks|flame|freeuv`, consumido por `MlSidecarClient::new(BaseUrl)` tipado (`-> Landmarks 478 JSON`, `-> FlawUv`, `-> CompleteUv` vía `FlamePayload u32 BE`). Rust nunca importa `torch`.
 
@@ -105,15 +108,16 @@ vultus/
 ├── README.md
 ├── wrangler.toml              # Cloudflare Workers + Queues + R2 + Durable Objects (prod)
 ├── backend/
-│   ├── Cargo.toml             # workspace Rust + anyhow/nutype/proptest
-│   ├── Cargo.lock
-│   ├── modal_app.py           # Modal GPU workers: MediaPipe/FLAME/FreeUV reales + pull consumer de Queues + sidecar /ml/* (bake GNM en Fase 2)
-│   ├── Dockerfile
+│   ├── requirements-api.txt   # deps Python API local
+│   ├── modal_app.py           # Modal GPU workers: MediaPipe/FLAME/FreeUV reales + pull consumer de Queues + sidecar /ml/*
+│   ├── Dockerfile.api
 │   ├── Dockerfile.gpu
-│   ├── crates/
-│   │   ├── api/               # Seam 1 Axum + tests/seam1.rs (11 tests TestServer + 2 config)
-│   │   ├── core/              # assert + error + job + ml + queue (MemoryQueue + R2PointerQueue + Store)
-│   │   └── workers_cpu/       # bake + heatmap infallibles (UV_LEN)
+│   ├── domain.py              # tipos probados + Result
+│   ├── store.py               # cola TTL60 + reloj inyectable
+│   ├── gnm.py                 # bake + heatmap + GLB + zip CPU
+│   ├── pipeline_local.py      # orquestador paralelo + timeouts
+│   ├── app.py                 # API FastAPI (Seam 1)
+│   └── tests/                 # 29 tests Python
 └── frontend/
     ├── astro.config.mjs       # -> Cloudflare Pages en prod
     ├── src/
@@ -124,9 +128,9 @@ vultus/
 
 ### Fase 0 - Infra base (1 semana)
 
-Objetivo: `cargo + Docker + Async` corriendo end-to-end con job dummy stateless con paridad Cloudflare.
-Tasks: crear `Cargo.toml` workspace con `anyhow/nutype/proptest`, `Dockerfile` multi-stage, `docker-compose.yml` con `api/ml-sidecar/frontend` para dev local (sin `redis`; `MemoryQueue` en memoria), configurar trait `Queue` (`MemoryQueue` local/test + `R2PointerQueue` prod) con `POST /v1/compare` (`202 {job_id, status queued}`) y `GET /v1/jobs/{id}` (`200 {job_id, status}`) y `WS /v1/jobs/{id}/events` vía Durable Objects, implementar `wrangler.toml` y healthchecks.
-Done: `cargo test` pasa (56 tests: 16 api con 2 config + 11 seam1 + 3 ws, 37 core con 32 unit + 5 edge_parity, 3 workers_cpu), `docker compose up` levanta todo en local, `wrangler dev` levanta edge, un job fake se encola (`MemoryQueue` local o `R2PointerQueue` en prod con `Some(R2Keys)`), es consumido, retorna longitudes vía `stored_lens` y expira a los 60s (`TtlSecs`) sin dejar archivos en `/tmp`.
+Objetivo: `Python + Docker + Async` corriendo end-to-end con job dummy stateless con paridad Cloudflare.
+Tasks: crear `requirements-api.txt` con `fastapi/pytest/mypy`, `Dockerfile.api` multi-stage, `docker-compose.yml` con `api/ml-sidecar/frontend` para dev local (sin `redis`; `MemoryQueue` en memoria), configurar `Store` (`MemoryQueue` local/test + `R2PointerQueue` prod) con `POST /v1/compare` (`202 {job_id, status queued}`) y `GET /v1/jobs/{id}` (`200 {job_id, status}`) y `WS /v1/jobs/{id}/events` vía Durable Objects, implementar `wrangler.toml` y healthchecks.
+Done: `pytest backend/tests -q` pasa (29 tests: dominio + cola + API + pipeline + CPU), `docker compose up` levanta todo en local, `wrangler dev` levanta edge, un job fake se encola (`MemoryQueue` local o `R2PointerQueue` en prod con `Some(R2Keys)`), es consumido, retorna longitudes vía `stored_lens` y expira a los 60s (`TtlSecs`) sin dejar archivos en `/tmp`.
 
 ### Fase 1 - MVP UV canónico (3 semanas) - HECHA (PR #17, 2026-09-06)
 
@@ -134,7 +138,7 @@ Objetivo: comparación en UV canónico sin GNM.
 Tasks: Worker MediaPipe 478 en CPU, Worker FLAME fitting con `DECA`, Worker FreeUV con `SD1.5 + CLIP`, orquestación `landmarks -> FLAME -> unwrap incompleto -> FreeUV -> UV completo 512x512`, API `POST /v1/compare` con 2 imágenes, frontend visor `UV_A | UV_B | heatmap diff` con slider de opacidad y normalización de pose.
 El bake GNM quedó como identidad y el zip vivo trae `uv_a.png, uv_b.png, heatmap.png`.
 Done: desplegado vivo en `https://vultus.pages.dev/` con gateway edge más `HTTP Pull Consumer` en Modal y patrón `R2 pointer`.
-Evals en verde: sidecar con 478 puntos finitos y UV de 786432 bytes reales, smoke prod ~16.7s, e2e prod 3/3, `cargo test` más `clippy` más `fmt` verdes.
+Evals en verde: sidecar con 478 puntos finitos y UV de 786432 bytes reales, smoke prod ~16.7s, e2e prod 3/3, `pytest` mas `mypy` mas `ruff` verdes.
 Pendiente de Fase 1 original: validación de 10 pares con pose 0-30 grados, solo se congeló el par dorado frontal.
 
 ### Fase 2 - GNM Render 3D (2 semanas)
@@ -206,7 +210,7 @@ No hacer horizontal slicing de todos los modelos antes de tener API.
 Mock solo en boundaries externos: queue (`MemoryQueue` vs `R2PointerQueue`), tiempo (`TtlSecs`), filesystem efímero, sidecar (`BaseUrl`).
 Usar inyección de dependencias para `MlSidecarClient` y `Queue` (`AppState::new(impl Queue)`).
 No soltar `Vec<u8>` ni `&str` en seams: usa `EnqueueCommand`, `Stage`, `Landmarks`, `FlawUv` / `CompleteUv` / `Heatmap`, `R2Key`.
-No `unwrap` en request path: usa `AppError` + `anyhow::Context`.
+Sin `unwrap` en request path: usa `Result` + `domain_to_status` con cuerpo `{"detail":...}`.
 
 ### 8.3 Vertical slices
 
@@ -214,7 +218,7 @@ Cada fase avanza como `1 seam, 1 test RED, 1 implementación mínima GREEN`.
 Ejemplo Fase 0: `test_create_job_returns_202` + `test_create_then_status_is_queued` + `test_r2_pointer_queue_serves_same_seam` en Seam 1 antes de worker real.
 Ejemplo Fase 1: `test_frontal_face_produces_512_uv` en Seam 3 con `CompleteUv::parse(vec![...; UV_LEN])` y `assert heat.as_bytes()[..2] == [6,10]`.
 Ejemplo stateless: `test_memory_queue_keeps_bytes_and_tracks_progress` verifica `stored_lens == (64,64)` y `progress (zero, Queued) -> (0.4, Flame)`; `test_unknown_job_is_not_found` verifica `NotFound`.
-Propiedades `proptest`: `parse_never_panics`, `Progress`, `TtlSecs`, `R2Key`.
+Goldens literales a mano: `Progress`, `TtlSecs`, `R2Key`, heatmap `[6,10]`, bake texel0 `[10,176,7]`.
 
 ## 9. Riesgos y mitigaciones
 

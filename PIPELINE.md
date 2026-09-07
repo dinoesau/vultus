@@ -1,10 +1,14 @@
 # PIPELINE - Flujo Completo Vultus
 
+> Estado objetivo sin Rust: orquestador local Python en `backend/pipeline_local.py`
+> (paralelismo por cara, timeouts 5s/10s/30s/total 60s=TTL), bake CPU en `backend/gnm.py`.
+> Comandos nuevos: `pytest backend/tests/test_pipeline.py -q`, `bash scripts/smoke-fase0.sh`.
+
 ## 1. Resumen
 
 Este documento describe el flujo end-to-end desde que el usuario sube 2 caras hasta que descarga el resultado.
 El pipeline es asíncrono, stateless y sin persistencia.
-En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` vía `HTTP Pull Consumer`; en dev local/test consume de `MemoryQueue` o `R2PointerQueue` vía el mismo trait `vultus-core::Queue` (`Store` compartido).
+En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` vía `HTTP Pull Consumer`; en dev local/test consume de `MemoryQueue` o `R2PointerQueue` vía el mismo `Store` compartido en `backend/store.py`.
 
 ## 2. Diagrama de pipeline
 
@@ -239,12 +243,12 @@ Cliente cierra pestaña: `Store` expira solo, sin leak.
 
 Métricas por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms` (local `Store` / `Cloudflare Queues lag + Modal GPU util` prod).
 Logs estructurados con `job_id` sin datos biométricos (Workers Logs 3 días free, Modal logs).
-`main` con `anyhow::Context` en `bind` y `serve`; `tracing_subscriber::EnvFilter`.
+`app.py` con lifespan (reaper TTL/2) y logs con `job_id` + `duration_ms`, sin bytes.
 Health: `GET /health` verifica `queue ping` (local `Store` / Queues health prod) y `gpu available` (local `nvidia-smi` / Modal `torch.cuda.is_available`). En prod `Cloudflare Analytics` + `OpenTelemetry` + `Sentry` si se configura.
 
 ## 9. Escalado
 
-Local: Workers CPU y GPU escalan independiente vía `docker compose --scale`, `Store` tras `tokio::RwLock<HashMap<JobId,_>>`.
+Local: Workers CPU y GPU escalan independiente vía `docker compose --scale`, `Store` tras `RLock` + `dict`.
 Prod: `Cloudflare Workers` escala a 0 automático, `Modal` escala GPU `0 -> 100` (`Starter 10 GPU concurrency free`, `Team 50`), `1-2s` cold start, R2/Queues sin gestión. `FreeUV concurrency=1` por GPU para no OOM sigue vigente en Modal.
 Sin storage persistente, no hay cuello de botella de I/O.
 Cache opcional efímera `hash(image) -> UV` en R2 con TTL 60s (`TtlSecs`) si se quiere evitar recomputar misma cara en ventana corta, desactivada por defecto por stateless estricto.

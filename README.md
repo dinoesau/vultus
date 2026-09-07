@@ -1,5 +1,8 @@
 # Vultus - Comparador Visual Forense en Espacio Canónico
 
+> Estado objetivo sin Rust: backend Python (`backend/app.py` en `:8000`) + sidecar ML (`:8081`) + frontend Astro (`:4321`).
+> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `docker compose up --build -d`.
+
 Vultus normaliza 2 caras a un espacio UV canónico y permite comparación pixel a pixel invariante a pose y expresión.
 El sistema es stateless por diseño.
 No persistimos imágenes ni resultados tras la entrega.
@@ -14,17 +17,17 @@ Necesitas `uv` 0.4+, `Docker` 24+ y `Docker Compose` v2.
 Para workers GPU necesitas `nvidia-container-toolkit`.
 Sin GPU puedes correr solo validación y tests de Seam 1 y 2.
 
-### Backend híbrido (Rust API + Python ML)
+### Backend Python (API + ML)
 
 ```bash
-cd backend
-cargo test
-cargo run -p vultus-api
+pip install -r backend/requirements-api.txt
+pytest backend/tests -q
+python3 -m uvicorn backend.app:app --host 0.0.0.0 --port 8000
 ```
 
 El API queda en `http://localhost:8000`.
-Sidecar ML local en `:8081` vía `modal_app.sidecar` (stubs `{"todo":...}` hasta Fase 1, `gnm_bake_worker` deprecated a Rust).
-`MlSidecarClient::new(BaseUrl)` tipa `landmarks -> Landmarks`, `flame -> FlawUv`, `freeuv -> CompleteUv`.
+Sidecar ML local en `:8081` vía `modal_app.sidecar`.
+`MlSidecarClient(BaseUrl)` tipa `landmarks -> Landmarks`, `flame -> FlawUv`, `freeuv -> CompleteUv`.
 
 ### Full stack con Docker (dev local)
 
@@ -70,12 +73,15 @@ vultus/
 ├── DEVELOPMENT.md
 ├── wrangler.toml              # gateway edge fino (prod)
 ├── backend/
-│   ├── Cargo.toml             # workspace Rust + anyhow/nutype/proptest
-│   ├── modal_app.py           # sidecar Python ML (MediaPipe/FLAME/FreeUV) + POST /ml/* (stubs Fase 1)
-│   ├── crates/
-│   │   ├── api/               # Seam 1 Axum (AppError, Arc<dyn Queue>, tests/seam1.rs 11 tests + 2 config)
-│   │   ├── core/              # assert + error + job tipado + ml tipado + queue dual (deep)
-│   │   └── workers_cpu/       # bake + heatmap infallibles (deep CPU, sin dep image)
+│   ├── requirements-api.txt   # deps API local Python
+│   ├── Dockerfile.api         # imagen Python vultus-api
+│   ├── domain.py              # tipos probados + Result
+│   ├── store.py               # cola TTL60 + reloj inyectable
+│   ├── gnm.py                 # bake + heatmap + GLB + zip CPU
+│   ├── pipeline_local.py      # orquestador paralelo + timeouts
+│   ├── app.py                 # API FastAPI (Seam 1)
+│   ├── modal_app.py           # sidecar Python ML (MediaPipe/FLAME/FreeUV) + POST /ml/*
+│   └── tests/                 # 29 tests Python + goldens
 └── frontend/
     ├── astro.config.mjs       # -> Cloudflare Pages en prod
     └── src/
@@ -95,8 +101,8 @@ En dev local el flujo es idéntico pero con `MemoryQueue` / `R2PointerQueue` en 
 - `ROADMAP.md` - fases 0 a 5 y plan de entrega.
 - `CONTEXT.md` - vocabulario de dominio, tipos opacos y seams TDD.
 - `PIPELINE.md` - flujo completo, secuencia de modelos y contratos tipados.
-- `ARCHITECTURE.md` - módulos, seams y decisiones de diseño (ADR-001 histórico, ADR-005 híbrido, ADR-006 typestate).
-- `DEVELOPMENT.md` - guía de desarrollo con `cargo` y Docker.
+- `ARCHITECTURE.md` - módulos, seams y decisiones de diseño (ADR-001 histórico, ADR-005 histórico Rust, ADR-006 tipos probados).
+- `DEVELOPMENT.md` - guía de desarrollo con Python + Docker.
 
 ## API
 
@@ -118,14 +124,14 @@ Ver `PIPELINE.md` sección 5.8 y `ARCHITECTURE.md` ADR-004 para verificación.
 ## Testing
 
 ```bash
-cd backend
-cargo test
+pip install -r backend/requirements-api.txt
+pytest backend/tests -q
 ```
 
-56 tests en verde (`16 api: 2 config + 11 seam1 + 3 ws, 37 core: 32 unit + 5 edge_parity, 3 workers_cpu`).
-Tests Seam 1 en `backend/crates/api/tests/seam1.rs` con `axum-test::TestServer` y paridad `MemoryQueue` / `R2PointerQueue`.
-Dominio en `crates/core` con `proptest` + golden `UV_LEN`.
-CPU en `crates/workers_cpu` con golden heatmap.
+29 tests en verde (dominio 10, cola 5, API 6, pipeline 3, CPU 5).
+Tests Seam 1 en `backend/tests/test_api.py` con servidor real y paridad `MemoryQueue` / `R2PointerQueue`.
+Dominio en `backend/domain.py` con goldens `UV_LEN`.
+CPU en `backend/gnm.py` con golden heatmap.
 Frontend E2E con `npm run test:e2e` en `frontend/e2e`.
 
 ## Licencia

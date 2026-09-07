@@ -40,6 +40,12 @@ def _assets_dir() -> str:
     env_dir = os.environ.get("GNM_ASSETS_DIR", "").strip()
     if env_dir:
         return env_dir
+    # En Modal los .bin viven en el Volume (`/weights/gnm`), no junto al
+    # codigo (la imagen solo lleva .py). Sin este default el consumer muere
+    # con `gnm asset missing` en prod aunque local pase (repo `assets/`).
+    weights_dir = os.environ.get("WEIGHTS_DIR", "").strip()
+    if weights_dir:
+        return os.path.join(weights_dir, "gnm")
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, "assets")
 

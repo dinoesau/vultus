@@ -482,6 +482,12 @@ if HAVE_MODAL:
             # aunque haya nvcc; T4 es sm_75, una sola arch para compilar rapido.
             "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST=7.5 CXX=g++ CC=gcc pip install --no-cache-dir --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git",
         )
+        # Codigo compartido en la imagen: Modal solo monta `modal_app.py`;
+        # sin esto el consumer muere con ModuleNotFoundError al importar
+        # `backend.domain` / `backend.gnm` en bake/heatmap/GLB/zip.
+        # Solo .py (los .bin viven en el Volume). Al final para no
+        # invalidar las capas pesadas de torch.
+        .add_local_python_source("backend")
     )
 
     # Volume para cachear pesos FreeUV / FLAME / GNM (evita re-descarga en cold start)
@@ -1071,6 +1077,10 @@ if HAVE_MODAL:
             modal.Secret.from_name("vultus-cloudflare"),
             modal.Secret.from_name("vultus-queues-token"),
         ],
+        # Cableado explicito: `gnm` resuelve assets en `GNM_ASSETS_DIR`.
+        # Sin esto cae al `assets/` del repo, que no existe en la imagen
+        # (solo viajan .py) y el bake muere con `gnm asset missing` en prod.
+        env={"GNM_ASSETS_DIR": "/weights/gnm"},
         schedule=modal.Period(seconds=5),
     )(queue_pull_consumer)
 

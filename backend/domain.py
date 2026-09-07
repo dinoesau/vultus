@@ -9,11 +9,20 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Generic, Never, TypeVar
+from typing import Generic, TypeAlias, TypeVar
+
+# La imagen Modal pina Python 3.10: nada de sintaxis 3.11+ aqui
+# (`type X =` PEP 695 ni `typing.Never`). Este modulo viaja a Modal
+# via `add_local_python_source` y debe importar en 3.10.
+if sys.version_info >= (3, 11):
+    from typing import Never
+else:
+    from typing import NoReturn as Never
 
 T = TypeVar("T")
 E = TypeVar("E")
@@ -107,7 +116,7 @@ class Err(Generic[E]):
     error: E
 
 
-type Result[T, E] = Ok[T] | Err[E]
+Result: TypeAlias = Ok[T] | Err[E]
 
 
 def map_result(result: Result[T, E], fn: Callable[[T], U]) -> Result[U, E]:
@@ -146,7 +155,7 @@ class UnsupportedFormat:
     detail: str = "not jpeg nor png"
 
 
-type ImageError = SizeOutOfRange | UnsupportedFormat
+ImageError: TypeAlias = SizeOutOfRange | UnsupportedFormat
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +168,7 @@ class EmptyUrl:
     detail: str = "base_url is empty"
 
 
-type BaseUrlError = BadScheme | EmptyUrl
+BaseUrlError: TypeAlias = BadScheme | EmptyUrl
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +191,7 @@ class MlEmpty:
     detail: str = "ml empty payload"
 
 
-type MlError = MlTransport | MlBadStatus | MlDecode | MlEmpty
+MlError: TypeAlias = MlTransport | MlBadStatus | MlDecode | MlEmpty
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,7 +249,7 @@ class Invariant:
     detail: str
 
 
-type DomainError = (
+DomainError: TypeAlias = (
     InvalidImage
     | InvalidJobId
     | InvalidProgress

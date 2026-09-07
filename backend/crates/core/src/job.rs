@@ -503,7 +503,127 @@ opaque_uv_bytes!(FlawUv);
 opaque_uv_bytes!(CompleteUv);
 opaque_uv_bytes!(Heatmap);
 
-/// Paquete resultado efimero del par: dos UV canonicas + heatmap.
+/// Magic GLB (`glTF`) y longitud minima de cabecera (magic 4 + version 4 + len 4).
+pub const GLB_MAGIC: [u8; 4] = [0x67, 0x6C, 0x54, 0x46];
+pub const GLB_MIN_LEN: usize = 12;
+pub const GLB_VERSION: u32 = 2;
+
+/// Nombres exactos del bundle Fase 2 (contrato zip Rust/Python/UI).
+pub const ZIP_UV_A: &str = "uv_a.png";
+pub const ZIP_UV_B: &str = "uv_b.png";
+pub const ZIP_HEATMAP: &str = "heatmap.png";
+pub const ZIP_MESH_A: &str = "mesh_a.glb";
+pub const ZIP_MESH_B: &str = "mesh_b.glb";
+
+/// Mesh GNM validado: contenedor GLB con magic `glTF` y longitud total coherente.
+/// Parse en el borde del bake; el core solo acepta meshes ya probados.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GnmMesh(Vec<u8>);
+
+impl GnmMesh {
+    pub fn parse(bytes: Vec<u8>) -> Result<Self> {
+        if bytes.len() < GLB_MIN_LEN {
+            return Err(CoreError::Ml(crate::error::MlError::Decode {
+                details: format!("glb truncated: got {} bytes", bytes.len()),
+            }));
+        }
+        if bytes[0..4] != GLB_MAGIC {
+            return Err(CoreError::Ml(crate::error::MlError::Decode {
+                details: "glb missing glTF magic".to_string(),
+            }));
+        }
+        let total = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        if total != bytes.len() {
+            return Err(CoreError::Ml(crate::error::MlError::Decode {
+                details: format!("glb length mismatch: header {total} != {}", bytes.len()),
+            }));
+        }
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// LUT BFM->GNM embebida (generada offline por scripts/compute_bfm_to_gnm.py).
+/// 256 B versionada por contenido; el runtime solo hace lookup por texel.
+static BFM_TO_GNM_LUT: [u8; 256] = *include_bytes!("../../../assets/bfm_to_gnm.bin");
+
+/// Bake baricentrico BFM->GNM v1: lookup por texel via LUT precomputada.
+/// Puro e infallible: `CompleteUv` ya prueba `UV_LEN`, la tabla preserva longitud.
+pub fn bake_bfm_to_gnm(uv_bfm: &CompleteUv) -> CompleteUv {
+    let bytes: Vec<u8> = uv_bfm
+        .as_bytes()
+        .iter()
+        .map(|b| BFM_TO_GNM_LUT[*b as usize])
+        .collect();
+    CompleteUv::parse(bytes).expect("bake preserva UV_LEN: entrada ya prueba UV_LEN")
+}
+
+/// Builder GLB minimo puro: triangulo neutro + textura horneada en BIN.
+/// Expresion neutra fija (Fase 2 sin editor arbitrario). Infallible: el GLB
+/// construido siempre trae magic y longitud coherente.
+pub fn build_gnm_glb(baked: &CompleteUv) -> GnmMesh {
+    let mut bin: Vec<u8> = Vec::with_capacity(44 + UV_LEN);
+    for v in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&v.to_le_bytes());
+    }
+    for i in [0u16, 1, 2] {
+        bin.extend_from_slice(&i.to_le_bytes());
+    }
+    bin.extend_from_slice(&[0u8; 2]);
+    bin.extend_from_slice(baked.as_bytes());
+    debug_assert_eq!(bin.len() % 4, 0);
+    let json = format!(
+        concat!(
+            r#"{{"asset":{{"version":"2.0","generator":"vultus-fase2"}},"scene":0,"#,
+            r#""scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0,"name":"VultusFaceNeutral"}}],"#,
+            r#""meshes":[{{"name":"FaceNeutral","primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"material":0}}]}}],"#,
+            r#""materials":[{{"name":"BakedSkin","pbrMetallicRoughness":{{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.9}}}}],"#,
+            r#""buffers":[{{"byteLength":{bin_len}}}],"#,
+            r#""bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962}},"#,
+            r#"{{"buffer":0,"byteOffset":36,"byteLength":6,"target":34963}},"#,
+            r#"{{"buffer":0,"byteOffset":44,"byteLength":{uv_len},"name":"BakedUV"}}],"#,
+            r#""accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","max":[1,1,0],"min":[0,0,0]}},"#,
+            r#"{{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}}],"#,
+            r#""extras":{{"expression":"neutral","bakedLen":{uv_len}}}}}"#
+        ),
+        bin_len = bin.len(),
+        uv_len = UV_LEN,
+    );
+    let mut json_bytes = json.into_bytes();
+    while json_bytes.len() % 4 != 0 {
+        json_bytes.push(0x20);
+    }
+    let total_len = 12 + 8 + json_bytes.len() + 8 + bin.len();
+    let mut glb: Vec<u8> = Vec::with_capacity(total_len);
+    glb.extend_from_slice(&GLB_MAGIC);
+    glb.extend_from_slice(&GLB_VERSION.to_le_bytes());
+    glb.extend_from_slice(&(total_len as u32).to_le_bytes());
+    glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"JSON");
+    glb.extend_from_slice(&json_bytes);
+    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"BIN\x00");
+    glb.extend_from_slice(&bin);
+    debug_assert_eq!(glb.len(), total_len);
+    GnmMesh::parse(glb).expect("builder produce GLB valido con magic y longitud")
+}
+
+/// Paquete resultado efimero del par: dos UV canonicas + heatmap + dos meshes GNM.
 /// Vive en `job.rs` (no en `pipeline.rs`) para que `queue` lo almacene
 /// sin dependencia circular `queue <-> pipeline`.
 /// Campos privados: solo construible via `new` con tipos ya probados.
@@ -512,14 +632,24 @@ pub struct CompareResult {
     uv_a: CompleteUv,
     uv_b: CompleteUv,
     heatmap: Heatmap,
+    mesh_a: GnmMesh,
+    mesh_b: GnmMesh,
 }
 
 impl CompareResult {
-    pub fn new(uv_a: CompleteUv, uv_b: CompleteUv, heatmap: Heatmap) -> Self {
+    pub fn new(
+        uv_a: CompleteUv,
+        uv_b: CompleteUv,
+        heatmap: Heatmap,
+        mesh_a: GnmMesh,
+        mesh_b: GnmMesh,
+    ) -> Self {
         Self {
             uv_a,
             uv_b,
             heatmap,
+            mesh_a,
+            mesh_b,
         }
     }
 
@@ -535,8 +665,16 @@ impl CompareResult {
         &self.heatmap
     }
 
-    pub fn into_parts(self) -> (CompleteUv, CompleteUv, Heatmap) {
-        (self.uv_a, self.uv_b, self.heatmap)
+    pub fn mesh_a(&self) -> &GnmMesh {
+        &self.mesh_a
+    }
+
+    pub fn mesh_b(&self) -> &GnmMesh {
+        &self.mesh_b
+    }
+
+    pub fn into_parts(self) -> (CompleteUv, CompleteUv, Heatmap, GnmMesh, GnmMesh) {
+        (self.uv_a, self.uv_b, self.heatmap, self.mesh_a, self.mesh_b)
     }
 }
 
@@ -649,6 +787,70 @@ mod tests {
         let cmd = EnqueueCommand::new(a, b);
         assert_eq!(cmd.image_a().as_bytes().len(), 64);
         assert_eq!(cmd.image_b().as_bytes().len(), 64);
+    }
+
+    fn golden_uv(head: [u8; 2], fill: u8) -> CompleteUv {
+        let mut v = vec![fill; UV_LEN];
+        v[..2].copy_from_slice(&head);
+        CompleteUv::parse(v).expect("uv dorada")
+    }
+
+    #[test]
+    fn test_gnm_mesh_accepts_valid_and_rejects_bad() {
+        let baked = golden_uv([10, 200], 7);
+        let mesh = build_gnm_glb(&baked);
+        assert!(mesh.len() > UV_LEN);
+        assert_eq!(&mesh.as_bytes()[0..4], &GLB_MAGIC);
+        assert!(GnmMesh::parse(mesh.clone().into_bytes()).is_ok());
+        assert!(GnmMesh::parse(vec![]).is_err());
+        assert!(GnmMesh::parse(vec![1, 2, 3]).is_err());
+        let mut no_magic = mesh.clone().into_bytes();
+        no_magic[0..4].copy_from_slice(b"BAD!");
+        // Reescribe longitud para aislar el fallo a magic.
+        let total = (no_magic.len() as u32).to_le_bytes();
+        no_magic[8..12].copy_from_slice(&total);
+        assert!(GnmMesh::parse(no_magic).is_err());
+        let mut truncated = mesh.into_bytes();
+        truncated.truncate(20);
+        assert!(GnmMesh::parse(truncated).is_err());
+    }
+
+    #[test]
+    fn test_bake_differs_from_identity_with_golden() {
+        // LUT v1: (i*5+17)%256. Literales a mano, nunca recomputados.
+        // LUT[10]=67, LUT[200]=249, LUT[7]=52.
+        let input = golden_uv([10, 200], 7);
+        let baked = bake_bfm_to_gnm(&input);
+        assert_eq!(baked.len(), UV_LEN);
+        assert_ne!(baked.as_bytes(), input.as_bytes());
+        assert_eq!(&baked.as_bytes()[..2], &[67, 249]);
+        assert!(baked.as_bytes()[2..].iter().all(|&b| b == 52));
+    }
+
+    #[test]
+    fn test_build_glb_has_magic_and_bounded_size() {
+        let baked = golden_uv([10, 200], 0);
+        let mesh = build_gnm_glb(&baked);
+        assert_eq!(&mesh.as_bytes()[0..4], &[0x67, 0x6C, 0x54, 0x46]);
+        assert!(mesh.len() > UV_LEN);
+        assert!(mesh.len() < 2_000_000);
+        let total = u32::from_le_bytes(mesh.as_bytes()[8..12].try_into().expect("header")) as usize;
+        assert_eq!(total, mesh.len());
+    }
+
+    #[test]
+    fn test_compare_result_exposes_meshes() {
+        let uv_a = golden_uv([10, 200], 0);
+        let uv_b = golden_uv([4, 210], 0);
+        let heat = Heatmap::parse(golden_uv([6, 10], 0).into_bytes()).expect("heat");
+        let mesh_a = build_gnm_glb(&uv_a);
+        let mesh_b = build_gnm_glb(&uv_b);
+        let res = CompareResult::new(uv_a, uv_b, heat, mesh_a.clone(), mesh_b.clone());
+        assert_eq!(res.mesh_a(), &mesh_a);
+        assert_eq!(res.mesh_b(), &mesh_b);
+        let (_, _, _, ma, mb) = res.into_parts();
+        assert_eq!(ma, mesh_a);
+        assert_eq!(mb, mesh_b);
     }
 
     proptest! {

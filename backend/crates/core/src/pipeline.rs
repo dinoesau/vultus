@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::error::{CoreError, Result};
-use super::job::{CompareResult, CompleteUv, FlawUv, Heatmap, ImageBytes, JobId, Landmarks};
+use super::job::{
+    bake_bfm_to_gnm, build_gnm_glb, CompareResult, CompleteUv, FlawUv, Heatmap, ImageBytes, JobId,
+    Landmarks,
+};
 use super::ml::MlSidecarClient;
 use super::queue::Queue;
 use super::tmp::{cleanup_job_dir, job_dir};
@@ -51,11 +54,12 @@ impl PipelineConfig {
     }
 }
 
-/// Orquestador profundo Fase 1 (Seam 3): paralelismo + timeouts + progreso +
+/// Orquestador profundo Fase 2 (Seam 3): paralelismo + timeouts + progreso +
 /// limpieza tras una interfaz estrecha (`PipelineConfig`, `run_pair`).
 /// Concurrencia con `join!` A/B en Rust, sin semaforo (erroneo con replicas);
-/// la serializacion vive solo en el sidecar. Bake Fase 1 es identidad:
-/// FreeUV ya entrega `CompleteUv` canonica, sin GNM real.
+/// la serializacion vive solo en el sidecar. Bake Fase 2 real: FreeUV entrega
+/// `CompleteUv` BFM, el bake LUT la transfiere a GNM por cara para el render;
+/// el heatmap sigue en espacio BFM como en Fase 1.
 pub async fn run_pair(
     queue: &Arc<dyn Queue>,
     ml: &MlSidecarClient,
@@ -120,8 +124,22 @@ async fn run_pair_inner(
     queue
         .set_progress(job_id, progress(0.95), super::job::Stage::Bake)
         .await?;
+    let bake_start = std::time::Instant::now();
+    let (baked_a, baked_b) = tokio::join!(async { bake_bfm_to_gnm(&uv_a) }, async {
+        bake_bfm_to_gnm(&uv_b)
+    },);
+    let (mesh_a, mesh_b) = tokio::join!(async { build_gnm_glb(&baked_a) }, async {
+        build_gnm_glb(&baked_b)
+    },);
+    tracing::info!(
+        job_id = %job_id,
+        bake_ms = bake_start.elapsed().as_millis(),
+        mesh_a_len = mesh_a.len(),
+        mesh_b_len = mesh_b.len(),
+        "bake gnm done"
+    );
     let heatmap = heatmap_abs_diff(&uv_a, &uv_b);
-    let output = PipelineOutput::new(uv_a, uv_b, heatmap);
+    let output = PipelineOutput::new(uv_a, uv_b, heatmap, mesh_a, mesh_b);
     queue.complete_with_result(job_id, output.clone()).await?;
     Ok(output)
 }
@@ -380,6 +398,14 @@ mod tests {
         assert_eq!(out.heatmap().len(), UV_LEN);
         assert_eq!(&out.heatmap().as_bytes()[..2], &[6, 10]);
         assert!(out.heatmap().as_bytes()[2..].iter().all(|&b| b == 0));
+        // Bake Fase 2 real: meshes GLB validos con magic, construidos del horneado.
+        for mesh in [out.mesh_a(), out.mesh_b()] {
+            assert_eq!(&mesh.as_bytes()[0..4], &[0x67, 0x6C, 0x54, 0x46]);
+            assert!(mesh.len() > UV_LEN);
+            assert!(mesh.len() < 2_000_000);
+        }
+        // El bake LUT es determinista: misma entrada da mismo mesh.
+        assert_ne!(out.mesh_a(), out.mesh_b());
 
         assert_eq!(
             queue.status(&job_id).await.expect("status"),

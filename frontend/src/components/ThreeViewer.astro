@@ -77,8 +77,8 @@
     meshUrls.push(url);
   }
 
-  // Tras done: expone re-descarga local desde memoria e intenta pintar GLBs.
-  // Si el GLB minimo no carga en el loader, se conserva el neutro procedural.
+  // Tras done: expone re-descarga local e intenta pintar la cara real.
+  // El neutro procedural es solo carga; el exito exige GLB parseado.
   window.addEventListener("vultus:meshes", (ev) => {
     const detail = (ev as CustomEvent).detail as
       | { meshA?: Blob; meshB?: Blob }
@@ -96,7 +96,7 @@
       linkB.href = urlB;
       linkB.hidden = false;
     }
-    setStatus("meshes listos (neutro). GLB guardados en memoria para re-descarga local.");
+    setStatus("cargando cara real (GLB)...");
     void loadGlbs(urlA, urlB);
   });
 
@@ -106,14 +106,35 @@
       const THREE = await import("three");
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
       const loader = new GLTFLoader();
-      // Carga best-effort del primer mesh para validar el contenedor;
-      // el neutro procedural sigue visible aunque falle el parseo.
-      await loader.loadAsync(urlA);
-      setStatus("mesh A cargado en visor (neutro).");
-      void urlB;
-      void THREE;
+      // Exito solo si ambos GLB parsean; se renderiza el primero como cara real.
+      const [gltfA, gltfB] = await Promise.all([
+        loader.loadAsync(urlA),
+        loader.loadAsync(urlB),
+      ]);
+      void gltfB;
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      renderer.setSize(480, 360, false);
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0c141d);
+      const camera = new THREE.PerspectiveCamera(35, 480 / 360, 0.1, 100);
+      camera.position.set(0, 0.2, 3.2);
+      camera.lookAt(0, 0, 0);
+      const light = new THREE.DirectionalLight(0xffffff, 1.4);
+      light.position.set(2, 3, 4);
+      scene.add(light);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+      scene.add(gltfA.scene);
+      renderer.render(scene, camera);
+      let frames = 0;
+      const tick = () => {
+        gltfA.scene.rotation.y += 0.01;
+        renderer.render(scene, camera);
+        if (++frames < 240 && canvas.isConnected) requestAnimationFrame(tick);
+      };
+      tick();
+      setStatus("cara real lista: mesh A cargado en visor (GLB parseado).");
     } catch {
-      // Fallback silencioso al neutro procedural ya renderizado.
+      setStatus("GLB invalido: no se pudo parsear (revisa el zip).");
     }
   }
 

@@ -1,14 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_IMAGE_BYTES,
+  PROGRESS_BAKE,
+  PROGRESS_DONE,
+  PROGRESS_FLAME,
+  PROGRESS_FREEUV,
+  PROGRESS_LANDMARKS,
   RESULT_TTL_SECONDS,
   STAGES,
+  STATUSES,
+  TERMINAL_STATUSES,
   hasSupportedMagic,
+  isJobStatus,
   isUuid,
   isValidProgress,
   isValidStage,
   jobIdToString,
   parseJobId,
+  parseJobStatus,
   parseProgress,
   parseStage,
   parseTtlSecs,
@@ -67,5 +76,27 @@ describe("contrato edge como fuente de verdad", () => {
     expect(hasSupportedMagic(png)).toBe(true);
     expect(hasSupportedMagic(jpeg)).toBe(true);
     expect(hasSupportedMagic(new Uint8Array([1, 2, 3]))).toBe(false);
+  });
+
+  it("status union con orden canonico y Result", () => {
+    expect([...STATUSES]).toEqual(["queued", "processing", "done", "failed", "expired"]);
+    expect([...TERMINAL_STATUSES]).toEqual(["done", "failed", "expired"]);
+    const ok = parseJobStatus("processing");
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.value).toBe("processing");
+    expect(parseJobStatus("nope").ok).toBe(false);
+    expect(parseJobStatus("").ok).toBe(false);
+    expect(parseJobStatus(42).ok).toBe(false);
+    expect(isJobStatus("done")).toBe(true);
+    expect(isJobStatus("queued")).toBe(true);
+    expect(isJobStatus("bogus")).toBe(false);
+  });
+
+  it("hitos de progreso espejan pipeline 0.15/0.40/0.75/0.95/1.0", () => {
+    expect(PROGRESS_LANDMARKS).toBeCloseTo(0.15);
+    expect(PROGRESS_FLAME).toBeCloseTo(0.4);
+    expect(PROGRESS_FREEUV).toBeCloseTo(0.75);
+    expect(PROGRESS_BAKE).toBeCloseTo(0.95);
+    expect(PROGRESS_DONE).toBe(1.0);
   });
 });

@@ -34,9 +34,6 @@ E_co = TypeVar("E_co", covariant=True)
 # --- Constantes canonicas (no inventar valores nuevos) ---
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-RESULT_TTL_SECONDS = 60
-TTL_MIN_SECS = 1
-TTL_MAX_SECS = 3600
 
 JPEG_MAGIC = b"\xff\xd8\xff"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -84,23 +81,6 @@ class Stage(str, Enum):
 
     def as_str(self) -> str:
         return self.value
-
-
-STAGES = ("queued", "landmarks", "flame", "freeuv", "bake", "done")
-
-
-class JobStatus(str, Enum):
-    QUEUED = "queued"
-    PROCESSING = "processing"
-    DONE = "done"
-    FAILED = "failed"
-    EXPIRED = "expired"
-
-    def as_str(self) -> str:
-        return self.value
-
-
-TERMINAL_STATUSES = ("done", "failed", "expired")
 
 
 # --- Result y combinadores (railway) ---
@@ -195,11 +175,6 @@ MlError: TypeAlias = MlTransport | MlBadStatus | MlDecode | MlEmpty
 
 
 @dataclass(frozen=True, slots=True)
-class QueueBackend:
-    details: str
-
-
-@dataclass(frozen=True, slots=True)
 class InvalidImage:
     detail: ImageError
 
@@ -215,11 +190,6 @@ class InvalidProgress:
 
 
 @dataclass(frozen=True, slots=True)
-class InvalidR2Key:
-    detail: str = "invalid r2_key"
-
-
-@dataclass(frozen=True, slots=True)
 class InvalidBaseUrl:
     detail: BaseUrlError
 
@@ -227,11 +197,6 @@ class InvalidBaseUrl:
 @dataclass(frozen=True, slots=True)
 class EmptyPayload:
     detail: str = "empty payload"
-
-
-@dataclass(frozen=True, slots=True)
-class QueueFailed:
-    detail: QueueBackend
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,10 +218,8 @@ DomainError: TypeAlias = (
     InvalidImage
     | InvalidJobId
     | InvalidProgress
-    | InvalidR2Key
     | InvalidBaseUrl
     | EmptyPayload
-    | QueueFailed
     | MlFailed
     | NotFound
     | Invariant
@@ -264,11 +227,11 @@ DomainError: TypeAlias = (
 
 
 def domain_to_status(error: DomainError) -> int:
-    if isinstance(error, (InvalidImage, InvalidJobId, InvalidProgress, InvalidR2Key, InvalidBaseUrl, EmptyPayload)):
+    if isinstance(error, (InvalidImage, InvalidJobId, InvalidProgress, InvalidBaseUrl, EmptyPayload)):
         return 400
     if isinstance(error, NotFound):
         return 404
-    if isinstance(error, (QueueFailed, MlFailed, Invariant)):
+    if isinstance(error, (MlFailed, Invariant)):
         return 500
     assert_never(error)
 
@@ -283,15 +246,13 @@ def domain_to_message(error: DomainError) -> str:
         return "invalid job_id"
     if isinstance(error, InvalidProgress):
         return "invalid progress"
-    if isinstance(error, InvalidR2Key):
-        return "invalid r2_key"
     if isinstance(error, InvalidBaseUrl):
         return f"invalid base_url: {error.detail.detail}"
     if isinstance(error, EmptyPayload):
         return "empty payload"
     if isinstance(error, NotFound):
         return f"not found: {error.job_id}"
-    if isinstance(error, (QueueFailed, MlFailed, Invariant)):
+    if isinstance(error, (MlFailed, Invariant)):
         return "internal error"
     assert_never(error)
 
@@ -393,80 +354,6 @@ def parse_stage(raw: object) -> Result[Stage, DomainError]:
         return Ok(Stage(raw))
     except ValueError:
         return Err(InvalidProgress())
-
-
-@dataclass(frozen=True, slots=True)
-class TtlSecs:
-    """Solo via parse_ttl_secs. Rango 1..3600."""
-
-    _value: int
-
-    def value(self) -> int:
-        return self._value
-
-    def reaper_interval_secs(self) -> int:
-        doubled = (self._value + 1) // 2
-        return max(doubled, 1)
-
-    def purge_after_secs(self) -> int:
-        return self._value * 2
-
-
-def parse_ttl_secs(raw: object) -> Result[TtlSecs, DomainError]:
-    if isinstance(raw, bool):
-        return Err(Invariant(detail="ttl out of range"))
-    if not isinstance(raw, int):
-        return Err(Invariant(detail="ttl out of range"))
-    if raw < TTL_MIN_SECS or raw > TTL_MAX_SECS:
-        return Err(Invariant(detail="ttl out of range"))
-    return Ok(TtlSecs(_value=raw))
-
-
-def default_ttl() -> TtlSecs:
-    return TtlSecs(_value=RESULT_TTL_SECONDS)
-
-
-@dataclass(frozen=True, slots=True)
-class R2Key:
-    """Solo via parse_r2_key."""
-
-    _value: str
-
-    def as_str(self) -> str:
-        return self._value
-
-
-def parse_r2_key(raw: object) -> Result[R2Key, DomainError]:
-    if not isinstance(raw, str):
-        return Err(InvalidR2Key())
-    trimmed = raw.strip()
-    if not trimmed or len(trimmed) > 1024 or ".." in trimmed:
-        return Err(InvalidR2Key())
-    return Ok(R2Key(_value=trimmed))
-
-
-@dataclass(frozen=True, slots=True)
-class R2Keys:
-    image_a: R2Key
-    image_b: R2Key
-
-
-@dataclass(frozen=True, slots=True)
-class EnqueueCommand:
-    image_a: ImageBytes
-    image_b: ImageBytes
-
-    def stored_lens(self) -> tuple[int, int]:
-        return (len(self.image_a), len(self.image_b))
-
-
-@dataclass(frozen=True, slots=True)
-class EnqueuedJob:
-    job_id: JobId
-    r2_keys: R2Keys | None
-
-    def is_r2_pointer(self) -> bool:
-        return self.r2_keys is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -665,62 +552,3 @@ def decode_flame_payload(raw: object) -> Result[tuple[Landmarks, ImageBytes], Do
         detail = domain_to_message(img_result.error)
         return Err(MlFailed(detail=MlDecode(details=detail)))
     return Ok((lm_result.value, img_result.value))
-
-
-# --- Type-state del ciclo de job (estados separados, sin bool) ---
-
-
-@dataclass(frozen=True, slots=True)
-class JobQueued:
-    job_id: JobId
-    progress: Progress
-    stage: Stage
-
-
-@dataclass(frozen=True, slots=True)
-class JobProcessing:
-    job_id: JobId
-    progress: Progress
-    stage: Stage
-
-
-@dataclass(frozen=True, slots=True)
-class JobDone:
-    job_id: JobId
-
-    def receipt(self) -> str:
-        return f"done {self.job_id.as_str()}"
-
-
-@dataclass(frozen=True, slots=True)
-class JobFailed:
-    job_id: JobId
-
-
-@dataclass(frozen=True, slots=True)
-class JobExpired:
-    job_id: JobId
-
-
-def new_queued(job_id: JobId) -> JobQueued:
-    return JobQueued(job_id=job_id, progress=zero_progress(), stage=Stage.QUEUED)
-
-
-def start_job(job: JobQueued) -> JobProcessing:
-    return JobProcessing(job_id=job.job_id, progress=job.progress, stage=Stage.LANDMARKS)
-
-
-def set_job_progress(job: JobProcessing, progress: Progress, stage: Stage) -> JobProcessing:
-    return JobProcessing(job_id=job.job_id, progress=progress, stage=stage)
-
-
-def complete_job(job: JobProcessing) -> JobDone:
-    return JobDone(job_id=job.job_id)
-
-
-def fail_job_state(job: JobProcessing) -> JobFailed:
-    return JobFailed(job_id=job.job_id)
-
-
-def expire_job_state(job: JobProcessing) -> JobExpired:
-    return JobExpired(job_id=job.job_id)

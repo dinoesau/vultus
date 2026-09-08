@@ -1,0 +1,105 @@
+name: cd
+
+# CD optimizado: edge primero, humo, luego GPU, luego humo final.
+# Solo corre en push a production o manual. main es integracion (CI).
+# Release = PR main -> production. PRs usan CI + dry-run, sin coste GPU.
+# Deploys secuenciales: dos builds Modal concurrentes no comparten cache.
+
+on:
+  push:
+    branches: [production]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      run_modal:
+        description: 'Deploy Modal GPU workers'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-edge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: ensure queues and r2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx --yes wrangler@4 queues create vultus-jobs 2>&1 || true
+          npx --yes wrangler@4 r2 bucket create vultus-jobs 2>&1 || true
+          npx --yes wrangler@4 r2 bucket lifecycle add vultus-jobs --prefix 'jobs/' --expire-days 1 2>&1 || true
+      - name: deploy worker production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 deploy --env production
+      - name: build frontend
+        working-directory: frontend
+        run: |
+          npm ci --prefer-offline --no-audit --no-fund
+          VITE_API_URL=https://api.vultus.esau.com.mx npm run build
+      - name: deploy pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 pages deploy frontend/dist --project-name vultus --commit-hash '${{ github.sha }}'
+
+  smoke-edge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: deploy-edge
+    steps:
+      - uses: actions/checkout@v4
+      - name: smoke prod gateway
+        env:
+          API_URL: https://api.vultus.esau.com.mx
+        run: bash scripts/smoke-prod.sh
+
+  deploy-modal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: smoke-edge
+    if: inputs.run_modal != false
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: install modal cli
+        run: pip install 'modal==1.5.5'
+      - name: deploy modal workers
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: modal deploy backend/modal_app.py
+
+  smoke-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: deploy-modal
+    if: always() && needs.smoke-edge.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+      - name: smoke prod after modal
+        env:
+          API_URL: https://api.vultus.esau.com.mx
+        run: bash scripts/smoke-prod.sh

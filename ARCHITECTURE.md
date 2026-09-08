@@ -1,11 +1,10 @@
 # ARCHITECTURE - Vultus
 
-> Estado objetivo sin Rust (plan-remove-rust-stack): dos duenos.
-> TypeScript es fuente de verdad del contrato HTTP en el borde (`edge/contract.ts`).
-> Python es dueno de API local (`backend/app.py`), cola en memoria (`backend/store.py`),
-> orquestador local (`backend/pipeline_local.py`) y bake CPU (`backend/gnm.py`).
-> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `mypy --strict backend/domain.py`,
-> `pytest backend/tests -q`, `npx vitest run edge/contract.test.ts`.
+> Estado objetivo sin Rust ni API Python (plan-single-gateway-ts): un solo dueno por seam.
+> TypeScript es fuente de verdad del contrato HTTP y dueno del gateway (`edge/worker.ts`, entrada dev `edge/worker.dev.ts`).
+> Python es dueno del runner local (`backend/local_runner.py`), el orquestador (`backend/pipeline_local.py`) y el bake CPU (`backend/gnm.py`).
+> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `mypy --strict backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py`,
+> `pytest backend/tests -q`, `npx vitest run edge/contract.test.ts`, pool suite `npx vitest run --config vitest.pool.config.ts` (desde `frontend/`).
 
 ## 1. Objetivo
 
@@ -16,8 +15,8 @@ Usa vocabulario de `codebase-design` para seams y profundidad.
 ## 2. Principios
 
 Stateless por defecto.
-No hay persistencia más allá de 60s (local: `Store` TTL 60s + purga a 2xTTL; prod: R2 `lifecycle 60s` + Queues `retención 24h` pero `TTL lógico 60s`).
-Async por queue, no por threads en API.
+No hay persistencia más allá de 60s (local: DO TTL 60s + purga a 2xTTL con R2/Queue emulados; prod: R2 `lifecycle 60s` + Queues `retención 24h` pero `TTL lógico 60s`).
+Async por queue, no por threads en el gateway.
 Deep modules con interfaces estrechas y lógica profunda dentro.
 Infra: `Cloudflare Pages + Workers + Queues + R2 + Durable Objects` para edge + `Modal` para GPU (ver ADR-004).
 
@@ -29,17 +28,17 @@ Seam es la frontera pública donde se testean comportamientos sin mirar internos
 
 `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events`, `GET /health`.
 Es la única entrada para el cliente Astro.
-Testeable con `TestClient` real sin mocks (6 tests API: 202 + `status queued`, `GET` queued, 400 imagen / faltante / uuid, 404 desconocido, 409 pre-done, `health`, expiración `expired`) mas WS real con cliente websocket.
-Respuestas tipadas `CompareResponse` / `JobResponse` y errores `AppError -> {400,404,500}` con cuerpo `{"detail":...}`.
-Contrato en `backend/app.py` (dueno Python) con fuente de verdad HTTP en `edge/contract.ts`.
+Testeable con suite pool en runtime real sin mocks (6 tests: 202 + `status queued`, `GET` queued, 400 imagen / faltante / uuid, 404 desconocido, 409 pre-done, `health` con `gateway:"worker"`, expiración `expired`) mas WS real (snapshot `queued`, handshake falla en desconocido) y negativo del backdoor dev (`404` con vars prod).
+Respuestas tipadas `CompareResponse` / `JobResponse` y errores `-> {400,404,500}` con cuerpo `{"detail":...}`.
+Contrato en `edge/contract.ts` (fuente única) con gateway en `edge/worker.ts` y entrada dev en `edge/worker.dev.ts`.
 
-### Seam 2 - Queue Contract
+### Seam 2 - Progress Sink
 
-`enqueue(EnqueueCommand) -> EnqueuedJob`, `status`, `progress -> (Progress, Stage)`, `set_progress(Progress, Stage)`, `stored_lens -> (usize, usize)`.
-Contrato con un solo `Store` compartido en `backend/store.py` tras dos adapters (`MemoryQueue` / `R2PointerQueue`):
-- **Local/dev/test:** `MemoryQueue` (guarda longitudes para probar que los bytes fluyen, `r2_keys None`).
-- **Prod:** `R2PointerQueue` que simula `Cloudflare Queues + R2` (Queues limita a 128KB/mensaje, se encola solo `{job_id, r2_keys jobs/{id}/a|b}` y los bytes viven en R2; consumo vía `HTTP Pull Consumer` desde Modal).
-Testeable con `MemoryQueue` o `R2PointerQueue` sin tocar Cloudflare (`test_r2_pointer_queue_serves_same_seam` prueba paridad).
+`report(Progress, Stage)`, `complete(CompareResult)`, `fail()`.
+Contrato estrecho entre pipeline y progreso, misma forma en local y prod:
+- **Local/dev/test:** `HttpProgressSink` en el runner (`POST /progress`, `PUT /dev/results`) e `InMemorySink` en tests.
+- **Prod:** los workers GPU reportan al mismo seam HTTP y escriben `result.zip` a R2.
+Testeable con el sink en memoria sin tocar Cloudflare.
 No se testea Queues/R2 interno de Cloudflare.
 
 ### Seam 3 - Worker Contract
@@ -57,10 +56,11 @@ Se cubren indirectamente vía Seam 3.
 ```mermaid
 graph TD
     FE[frontend - Astro islands<br/>shallow, orquesta UI<br/>Cloudflare Pages prod]
-    API[api - FastAPI / Cloudflare Worker<br/>shallow, valida y encola]
-    CORE[core - queue + tmpfs<br/>deep, gestiona ciclo de vida<br/>adapter MemoryQueue / Queues+R2]
+    API[gateway - Worker TS<br/>shallow, valida y encola<br/>misma entrada en prod y dev]
+    CORE[progreso - DO + R2 + Queue<br/>deep, ciclo de vida 60s<br/>emulado en dev, real en prod]
     CFQ[Cloudflare Queues + R2<br/>prod edge]
-    LOCAL[Store en memoria<br/>local dev y test]
+    LOCAL[Queue + R2 emulados<br/>dev y test]
+    RN[runner local<br/>thin, webhook + sink HTTP]
     MO[Modal GPU containers<br/>prod workers]
     W1[workers/mediapipe<br/>deep, 478 landmarks]
     W2[workers/flame<br/>deep, fitting 3D]
@@ -75,44 +75,42 @@ graph TD
     CORE --> LOCAL
     CORE --> DO
     CFQ --> MO
-    LOCAL --> W1 & W2 & W3 & W4
+    LOCAL --> RN
+    RN --> W1 & W2 & W3 & W4
     MO --> W1 & W2 & W3 & W4
     W1 & W2 & W3 & W4 --> MODELS
 ```
 
-### 4.1 api
+### 4.1 gateway
 
-Módulo shallow en Python (`FastAPI`).
-Valida `multipart`, magic bytes y tamaño vía `ImageBytes::parse` y construye `EnqueueCommand::new(a, b)`.
-`AppState(Arc<dyn Queue>)` genérico vía `AppState::new(impl Queue)` para paridad `MemoryQueue` / `R2PointerQueue`.
-Errores `AppError::{BadRequest, Domain(CoreError)}` mapean a `400` (validación + `Empty`), `404` (`NotFound`), `500` (`Queue | Ml | Invariant` con `detail internal error`).
-`app.py` expone `create_app()` con lifespan (reaper) y sirve `:8000` vía `uvicorn`.
-Expone `CompareResponse{job_id, status:"queued"}` (`202`), `JobResponse{job_id, status: JobStatus::as_str}` (`200`) y `WS`.
+Módulo shallow en TypeScript (`edge/worker.ts` en prod, `edge/worker.dev.ts` en dev).
+Valida `multipart`, magic bytes y tamaño vía el contrato y encola solo `{job_id, r2_keys}`.
+La entrada dev agrega exactamente dos rutas (`GET /dev/blobs`, `PUT /dev/results`, solo con `ALLOW_DEV_ROUTES=1`) y el consumer dev hacia el webhook del runner.
+Errores mapean a `400` (validación), `404` (`NotFound`), `500` (bindings) con cuerpo `{"detail":...}`.
+Expone `CompareResponse{job_id, status:"queued"}` (`202`), `JobResponse{job_id, status}` (`200`), `GET /health` con `gateway:"worker"` y `WS`.
 No contiene lógica de visión.
 
-### 4.2 core
+### 4.2 progreso y cómputo
 
-Módulo deep.
-Gestiona `Store` compartido, `TTL 60` (`TtlSecs` `1..=3600`), ciclo `Queued->Processing->Done|Failed|Expired`, `tmpfs` lifecycle y `progress` events.
-Esconde detalles de `MemoryQueue` (local) y `R2PointerQueue` (prod `Queues+R2`) tras el mismo trait `Queue`.
-Tipos `ImageBytes` + `ImageBytesRef` zero-cost, `R2Key` / `R2Keys` privados, `EnqueuedJob` con `is_r2_pointer()`, `Stage` enum (prohibido `&str`), `Progress::zero()`, `Landmarks` 478 JSON, `FlawUv` / `CompleteUv` / `Heatmap` con `UV_LEN`, `BaseUrl`, `FlamePayload`, `CoreError` taxonómico (`Image | JobId | Progress | R2Key | BaseUrl | Empty | Queue | Ml | NotFound | Invariant`).
-Patrón `R2 pointer`: en prod sube bytes a `R2` y encola solo `r2_keys` (Queues <128KB).
-Provee `Queue::{enqueue, status, progress, set_progress, stored_lens}` agnósticos a la infra.
-Deps API local: `fastapi/uvicorn/httpx/pytest/mypy/ruff/Pillow` (ver `backend/requirements-api.txt`).
+Módulo deep en edge (`ProgressDO` + R2 + Queue).
+Gestiona ciclo `queued->processing->done|failed|expired`, `TTL 60`, ventana `expired` visible y purga a 2xTTL.
+Tipos del contrato (`JobId`, `TtlSecs`, `Progress`, `Stage`, `JobStatus`) con smart constructors que retornan `Result`; el pipeline recibe tipos ya probados.
+Patrón `R2 pointer`: el worker sube bytes a `R2` y encola solo `r2_keys` (Queues <128KB).
+El runner local (`backend/local_runner.py`, thin, solo stdlib) implementa el sink sobre HTTP; los tests lo implementan en memoria.
+Deps compute local: `httpx/Pillow/numpy` (ver `backend/requirements-api.txt`).
 
 ### 4.3 workers
 
 Cada worker es módulo deep con una sola responsabilidad.
-`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|flame|freeuv` consumido por `MlSidecarClient::new(BaseUrl)` con firmas tipadas (`-> Landmarks`, `-> FlawUv`, `-> CompleteUv`) y errores `Ml::{Transport, BadStatus, Decode, Empty}`.
-`Worker 4 CPU` (`bake`, `heatmap`, `report`) vive en Rust `vultus-workers-cpu` con firmas infallibles `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` y `bake_bfm_to_gnm(&FlawUv) -> CompleteUv` (sin dep `image`).
+`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|flame|freeuv` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FlawUv`, `-> CompleteUv`).
+`Worker 4 CPU` (`bake`, `heatmap`, `report`) vive en `backend/gnm.py` con firmas `compute_heatmap` y `bake_bfm_to_gnm` (sin dep `torch/diffusers/mediapipe`).
 Reciben tipos ya probados, escriben a `/tmp/{job_id}` en tmpfs, retornan tipos con `UV_LEN`.
 No conocen HTTP ni frontend.
 
 ### 4.4 models
 
 Adaptadores a librerías externas.
-Python: sidecar `backend/modal_app.py` (`/ml/landmarks|flame|freeuv`, stubs `{"todo":...}` hasta Fase 1, `gnm_bake_worker` deprecated a `NotImplementedError`).
-Rust: CPU puro en `vultus-workers-cpu` (`compute_heatmap`, `bake_bfm_to_gnm`, sin `torch/diffusers/mediapipe/image`).
+Python: sidecar `backend/modal_app.py` (`/ml/landmarks|flame|freeuv`) y bake CPU `backend/gnm.py` (`compute_heatmap`, `bake_bfm_to_gnm`, `build_result_zip`).
 Son los únicos lugares donde viven esas dependencias.
 
 ### 4.5 frontend
@@ -219,9 +217,9 @@ Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
 ## 7. Data Flow
 
 Imagen entra como `bytes` y nunca toca disco persistente más allá de `tmpfs`/`R2 60s`.
-Prod: `Browser -> R2 PutObject (via Worker presigned) -> Queues {job_id, r2_keys} -> Modal workers leen R2 -> /tmp tmpfs -> R2 result.zip -> Worker StreamingResponse`.
-Local: `Browser -> FastAPI -> MemoryQueue (stored_lens) -> /tmp tmpfs -> GET status / WS events`. Sin `Redis`.
-El bundle final viajará `worker -> R2 bytes -> API/Worker -> StreamingResponse` en prod (Fase 1+); en Fase 0 local solo hay `stored_lens` en memoria.
+Prod: `Browser -> Worker POST /v1/compare -> R2 PutObject -> Queues {job_id, r2_keys} -> Modal workers leen R2 -> /tmp tmpfs -> R2 result.zip -> Worker StreamingResponse`.
+Local: `Browser -> Worker dev -> R2/Queue emulados -> runner webhook -> /tmp tmpfs -> PUT /dev/results -> GET status / WS events`.
+El bundle final viaja `R2 bytes -> Worker -> StreamingResponse` en prod; en local el runner lo escribe por la ruta dev.
 Ningún artefacto se guarda en S3/Postgres persistente. `R2 lifecycle 60s` garantiza olvido.
 
 ## 8. Escalado
@@ -242,10 +240,9 @@ Métricas expuestas para `OpenTelemetry`.
 
 ## 10. Testing
 
-Seam 1 con `TestClient` real (6 tests API) + WS real.
-Seam 2 con `MemoryQueue` y `R2PointerQueue` (`stored_lens`, `progress`, `unknown is NotFound`).
-Seam 3 con golden `UV_LEN` (`black_heatmap`, `known_diff [6,10]`, `wrong_uv_length_rejected_at_parse`) y `Landmarks` 478.
-Goldens literales y relojes manuales para rangos.
-Nada de unit tests a `fit_flame` interno.
-56 tests en verde (`16 api: 2 config + 11 seam1 + 3 ws, 37 core: 32 unit + 5 edge_parity, 3 workers_cpu`).
+Seam 1 con suite pool en runtime real (6 tests) + WS real.
+Seam 2 con sink en memoria (`report` ordenado, `complete`, `fail`).
+Seam 3 con golden `UV_LEN` (`[10,200] vs [4,210] -> [6,10]`, `GLB magic`) y `Landmarks` 478.
+Goldens literales y tipos probados en el borde.
+Nada de unit tests al pipeline interno.
 Ver `CONTEXT.md` y `PIPELINE.md` para contratos.

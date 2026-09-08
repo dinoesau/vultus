@@ -12,7 +12,6 @@ from backend.domain import (
     Err,
     Ok,
     Stage,
-    default_ttl,
     new_job_id,
     parse_base_url,
     parse_complete_uv,
@@ -23,9 +22,7 @@ from backend.domain import (
     parse_job_id,
     parse_landmarks,
     parse_progress,
-    parse_r2_key,
     parse_stage,
-    parse_ttl_secs,
     zero_progress,
 )
 
@@ -50,16 +47,6 @@ def test_rejects_empty_huge_and_broken_magic_accepts_jpeg_and_png() -> None:
     assert png.value.as_bytes() == _png_min()
 
 
-def test_ttl_only_1_to_3600_default_60() -> None:
-    assert default_ttl().value() == 60
-    assert isinstance(parse_ttl_secs(1), Ok)
-    assert isinstance(parse_ttl_secs(3600), Ok)
-    assert isinstance(parse_ttl_secs(0), Err)
-    assert isinstance(parse_ttl_secs(3601), Err)
-    assert default_ttl().reaper_interval_secs() == 30
-    assert default_ttl().purge_after_secs() == 120
-
-
 def test_progress_only_0_to_1_finite() -> None:
     assert zero_progress().value() == 0.0
     assert isinstance(parse_progress(0.0), Ok)
@@ -70,16 +57,6 @@ def test_progress_only_0_to_1_finite() -> None:
     assert isinstance(parse_progress(float("nan")), Err)
     assert isinstance(parse_progress(float("inf")), Err)
     assert isinstance(parse_progress("0.5"), Err)
-
-
-def test_r2key_rejects_empty_and_dotdot() -> None:
-    assert isinstance(parse_r2_key("jobs/1/a"), Ok)
-    assert isinstance(parse_r2_key(""), Err)
-    assert isinstance(parse_r2_key("  "), Err)
-    assert isinstance(parse_r2_key("a/../b"), Err)
-    trimmed = parse_r2_key("  jobs/1/a  ")
-    assert isinstance(trimmed, Ok)
-    assert trimmed.value.as_str() == "jobs/1/a"
 
 
 def test_jobid_trims_uuid() -> None:

@@ -50,7 +50,7 @@ jobs:
       - name: python deps
         run: pip install -r backend/requirements-api.txt
       - name: python typecheck
-        run: mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/store.py backend/gnm.py backend/pipeline_local.py backend/app.py
+        run: mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py
       - name: python lint
         run: ruff check backend/
       - name: python tests
@@ -69,6 +69,10 @@ jobs:
         run: |
           npm ci --prefer-offline --no-audit --no-fund
           npx vitest run ../edge/contract.test.ts --root ..
+      - name: gateway pool tests
+        working-directory: frontend
+        run: |
+          npx vitest run --config vitest.pool.config.ts
       - name: frontend build
         working-directory: frontend
         run: |
@@ -98,7 +102,10 @@ jobs:
         include:
           - name: api
             context: .
-            dockerfile: ./backend/Dockerfile.api
+            dockerfile: ./backend/Dockerfile.wrangler
+          - name: runner
+            context: .
+            dockerfile: ./backend/Dockerfile.runner
           - name: frontend
             context: ./frontend
             dockerfile: ./frontend/Dockerfile

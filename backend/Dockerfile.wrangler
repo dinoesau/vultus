@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+# Gateway unico en local: mismo handler que prod (`edge/worker.dev.ts`)
+# sobre el runtime worker con R2/Queue/DO emulados. Sin Python web.
+FROM node:22-slim
+ENV NODE_ENV=production
+WORKDIR /work
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/* \
+  && npm install -g wrangler@4
+COPY wrangler.dev.toml ./wrangler.dev.toml
+COPY edge/ ./edge/
+ENV PORT=8000 R2_TTL_SECONDS=60 RUNNER_WEBHOOK_URL=http://runner:8001/hooks/queue
+EXPOSE 8000
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+CMD ["sh", "-c", "wrangler dev -c wrangler.dev.toml --ip 0.0.0.0 --port ${PORT:-8000} --var R2_TTL_SECONDS:${R2_TTL_SECONDS:-60} --var RUNNER_WEBHOOK_URL:${RUNNER_WEBHOOK_URL}"]

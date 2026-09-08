@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
 
 import httpx
 
@@ -30,6 +34,7 @@ from backend.domain import (
     MlTransport,
     NotFound,
     Ok,
+    Progress,
     Stage,
     encode_flame_payload,
     parse_complete_uv,
@@ -38,11 +43,40 @@ from backend.domain import (
     parse_progress,
 )
 from backend.gnm import bake_bfm_to_gnm, build_gnm_glb, compute_heatmap
-from backend.store import MemoryQueue, R2PointerQueue, cleanup_job_dir, job_dir
 
 logger = logging.getLogger("vultus-pipeline")
 
-QueueLike = MemoryQueue | R2PointerQueue
+
+def job_dir(job_id: JobId) -> Path:
+    """Directorio efimero del job en tmpfs. Ciclo de vida del pipeline, no de la cola."""
+    return Path(tempfile.gettempdir()) / f"vultus-{job_id.as_str()}"
+
+
+def cleanup_job_dir(job_id: JobId) -> None:
+    directory = job_dir(job_id)
+    try:
+        shutil.rmtree(directory, ignore_errors=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("tmp cleanup failed job=%s path=%s err=%s", job_id.as_str(), str(directory), exc)
+
+
+class ProgressSink(Protocol):
+    """Seam estrecho de progreso: el pipeline reporta, completa o falla.
+
+    Los tests inyectan el sink en memoria; el runner local y los workers
+    GPU lo implementan sobre HTTP. Misma forma en ambos entornos.
+    """
+
+    def report(self, progress: Progress, stage: Stage) -> Ok[None] | Err[DomainError]:
+        ...
+
+    def complete(self, result: CompareResult) -> Ok[None] | Err[DomainError]:
+        ...
+
+    def fail(self) -> Ok[None] | Err[DomainError]:
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +146,7 @@ class MlSidecarClient:
 
 
 def run_pair(
-    queue: QueueLike,
+    sink: ProgressSink,
     ml: MlSidecarClient,
     job_id: JobId,
     image_a: ImageBytes,
@@ -131,7 +165,7 @@ def run_pair(
         return time.monotonic() > deadline
 
     def _fail(message: str) -> Err[DomainError]:
-        queue.fail_job(job_id)
+        sink.fail()
         try:
             cleanup_job_dir(job_id)
         except OSError:
@@ -142,7 +176,7 @@ def run_pair(
 
     p15 = parse_progress(0.15)
     assert isinstance(p15, Ok)
-    progress_result = queue.set_progress(job_id, p15.value, Stage.LANDMARKS)
+    progress_result = sink.report(p15.value, Stage.LANDMARKS)
     if isinstance(progress_result, Err):
         cleanup_job_dir(job_id)
         return Err(progress_result.error)
@@ -157,11 +191,11 @@ def run_pair(
             except concurrent.futures.TimeoutError:
                 return _fail("landmarks timeout")
             if isinstance(ra_lm, Err):
-                queue.fail_job(job_id)
+                sink.fail()
                 cleanup_job_dir(job_id)
                 return ra_lm
             if isinstance(rb_lm, Err):
-                queue.fail_job(job_id)
+                sink.fail()
                 cleanup_job_dir(job_id)
                 return rb_lm
             landmarks_a = ra_lm.value
@@ -173,7 +207,7 @@ def run_pair(
         return _fail("pipeline total timeout")
     p40 = parse_progress(0.40)
     assert isinstance(p40, Ok)
-    if isinstance(queue.set_progress(job_id, p40.value, Stage.FLAME), Err):
+    if isinstance(sink.report(p40.value, Stage.FLAME), Err):
         cleanup_job_dir(job_id)
         return Err(NotFound(job_id=job_id.as_str()))
 
@@ -187,11 +221,11 @@ def run_pair(
             except concurrent.futures.TimeoutError:
                 return _fail("flame timeout")
             if isinstance(ra_flame, Err):
-                queue.fail_job(job_id)
+                sink.fail()
                 cleanup_job_dir(job_id)
                 return ra_flame
             if isinstance(rb_flame, Err):
-                queue.fail_job(job_id)
+                sink.fail()
                 cleanup_job_dir(job_id)
                 return rb_flame
             flaw_a = ra_flame.value
@@ -203,7 +237,7 @@ def run_pair(
         return _fail("pipeline total timeout")
     p75 = parse_progress(0.75)
     assert isinstance(p75, Ok)
-    if isinstance(queue.set_progress(job_id, p75.value, Stage.FREEUV), Err):
+    if isinstance(sink.report(p75.value, Stage.FREEUV), Err):
         cleanup_job_dir(job_id)
         return Err(NotFound(job_id=job_id.as_str()))
 
@@ -217,11 +251,11 @@ def run_pair(
             except concurrent.futures.TimeoutError:
                 return _fail("freeuv timeout")
             if isinstance(ra_uv, Err):
-                queue.fail_job(job_id)
+                sink.fail()
                 cleanup_job_dir(job_id)
                 return ra_uv
             if isinstance(rb_uv, Err):
-                queue.fail_job(job_id)
+                sink.fail()
                 cleanup_job_dir(job_id)
                 return rb_uv
             uv_a = ra_uv.value
@@ -231,7 +265,7 @@ def run_pair(
 
     p95 = parse_progress(0.95)
     assert isinstance(p95, Ok)
-    if isinstance(queue.set_progress(job_id, p95.value, Stage.BAKE), Err):
+    if isinstance(sink.report(p95.value, Stage.BAKE), Err):
         cleanup_job_dir(job_id)
         return Err(NotFound(job_id=job_id.as_str()))
 
@@ -250,7 +284,7 @@ def run_pair(
         len(mesh_b.as_bytes()),
     )
     output = CompareResult(uv_a=uv_a, uv_b=uv_b, heatmap=heatmap, mesh_a=mesh_a, mesh_b=mesh_b)
-    completed = queue.complete_with_result(job_id, output)
+    completed = sink.complete(output)
     if isinstance(completed, Err):
         cleanup_job_dir(job_id)
         return Err(completed.error)

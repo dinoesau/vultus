@@ -1,0 +1,36 @@
+# Gateway unico en dev: mismo handler que prod (`edge/worker.dev.ts`
+# envuelve `edge/worker.ts`) con R2/Queue/DO emulados y consumer dev
+# hacia el runner local. Nunca se despliega: prod usa `wrangler.toml`.
+name = "vultus-api-dev"
+main = "edge/worker.dev.ts"
+compatibility_date = "2026-09-03"
+compatibility_flags = ["nodejs_compat"]
+
+[[r2_buckets]]
+binding = "VULTUS_BUCKET"
+bucket_name = "vultus-jobs-dev"
+
+[[queues.producers]]
+queue = "vultus-jobs-dev"
+binding = "VULTUS_QUEUE"
+
+[[queues.consumers]]
+queue = "vultus-jobs-dev"
+max_batch_size = 1
+
+[[durable_objects.bindings]]
+name = "VULTUS_PROGRESS"
+class_name = "ProgressDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ProgressDO"]
+
+[vars]
+QUEUE_DRIVER = "cloudflare"
+R2_TTL_SECONDS = "60"
+ALLOW_DEV_ROUTES = "1"
+RUNNER_WEBHOOK_URL = "http://runner:8001/hooks/queue"
+
+[dev]
+port = 8000

@@ -25,6 +25,18 @@ export type StageName = (typeof STAGES)[number];
 export const TERMINAL_STATUSES = ["done", "failed", "expired"] as const;
 export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
 
+export const STATUSES = ["queued", "processing", "done", "failed", "expired"] as const;
+export type JobStatus = (typeof STATUSES)[number];
+export type JobStatusError = { readonly kind: "InvalidStatus" };
+
+// Hitos de progreso del pipeline (espejo de backend/domain.py).
+// Fuente TS unica: el pipeline Python los importa como literales del contrato.
+export const PROGRESS_LANDMARKS = 0.15;
+export const PROGRESS_FLAME = 0.4;
+export const PROGRESS_FREEUV = 0.75;
+export const PROGRESS_BAKE = 0.95;
+export const PROGRESS_DONE = 1.0;
+
 export type Result<T, E> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: E };
@@ -44,6 +56,15 @@ export type StageError = { readonly kind: "InvalidStage" };
 
 export function isTerminalStatus(s: unknown): s is TerminalStatus {
   return typeof s === "string" && (TERMINAL_STATUSES as readonly string[]).includes(s);
+}
+
+export function isJobStatus(s: unknown): s is JobStatus {
+  return typeof s === "string" && (STATUSES as readonly string[]).includes(s);
+}
+
+export function parseJobStatus(raw: unknown): Result<JobStatus, JobStatusError> {
+  if (!isJobStatus(raw)) return { ok: false, error: { kind: "InvalidStatus" } };
+  return { ok: true, value: raw };
 }
 
 export function isUuid(s: string): boolean {

@@ -1,28 +1,30 @@
-"""Worker local: pipeline par con sidecar falso, goldens literales a mano."""
+"""Worker local: pipeline par con sidecar falso, goldens literales a mano.
+
+El pipeline consume el sink estrecho (`report`, `complete`, `fail`);
+los tests inyectan el sink en memoria, el runner el sink HTTP.
+"""
 
 from __future__ import annotations
 
 import json
 
 from backend.domain import (
-    UV_LEN,
+    CompareResult,
     CompleteUv,
     DomainError,
-    EnqueueCommand,
     Err,
     FlawUv,
     ImageBytes,
     JobId,
-    JobStatus,
     Landmarks,
     Ok,
+    Progress,
     Stage,
     parse_image_bytes,
     parse_progress,
 )
-from backend.pipeline_local import QueueLike, default_config
+from backend.pipeline_local import ProgressSink, default_config, job_dir
 from backend.pipeline_local import run_pair as run_pair_real
-from backend.store import MemoryQueue, job_dir
 
 MARKER_A = 0xA1
 MARKER_B = 0xB2
@@ -43,7 +45,30 @@ def _landmarks_bytes() -> bytes:
 
 
 def _golden_complete(head: bytes) -> bytes:
+    from backend.domain import UV_LEN
+
     return bytes(head) + bytes(UV_LEN - len(head))
+
+
+class InMemorySink:
+    """Sink de tests: registra reportes y guarda el resultado."""
+
+    def __init__(self) -> None:
+        self.reports: list[tuple[Progress, Stage]] = []
+        self.result: CompareResult | None = None
+        self.failed = False
+
+    def report(self, progress: Progress, stage: Stage) -> Ok[None] | Err[DomainError]:
+        self.reports.append((progress, stage))
+        return Ok(None)
+
+    def complete(self, result: CompareResult) -> Ok[None] | Err[DomainError]:
+        self.result = result
+        return Ok(None)
+
+    def fail(self) -> Ok[None] | Err[DomainError]:
+        self.failed = True
+        return Ok(None)
 
 
 class FakeMlOk:
@@ -53,7 +78,7 @@ class FakeMlOk:
         return parse_landmarks(_landmarks_bytes())
 
     def flame(self, job_id: JobId, image: ImageBytes, landmarks: Landmarks) -> Ok[FlawUv] | Err[DomainError]:
-        from backend.domain import parse_flaw_uv
+        from backend.domain import UV_LEN, parse_flaw_uv
 
         flaw = FLAW_A if MARKER_A in image.as_bytes() else FLAW_B
         return parse_flaw_uv(bytes([flaw]) * UV_LEN)
@@ -72,7 +97,7 @@ class FakeMlFailLandmarks:
         return Err(MlFailed(detail=MlBadStatus(status=500)))
 
     def flame(self, job_id: JobId, image: ImageBytes, landmarks: Landmarks) -> Ok[FlawUv] | Err[DomainError]:
-        from backend.domain import parse_flaw_uv
+        from backend.domain import UV_LEN, parse_flaw_uv
 
         return parse_flaw_uv(bytes([FLAW_A]) * UV_LEN)
 
@@ -83,11 +108,13 @@ class FakeMlFailLandmarks:
 
 
 def test_pair_produces_canonical_uvs_and_golden_heatmap() -> None:
-    queue: QueueLike = MemoryQueue()
+    from backend.domain import UV_LEN, new_job_id
+
+    sink: ProgressSink = InMemorySink()
     image_a = _image(MARKER_A)
     image_b = _image(MARKER_B)
-    job_id = queue.enqueue(EnqueueCommand(image_a=image_a, image_b=image_b)).job_id
-    out = run_pair_real(queue, FakeMlOk(), job_id, image_a, image_b, default_config())  # type: ignore[arg-type]
+    job_id = new_job_id()
+    out = run_pair_real(sink, FakeMlOk(), job_id, image_a, image_b, default_config())  # type: ignore[arg-type]
     assert isinstance(out, Ok)
     result = out.value
     assert len(result.uv_a.as_bytes()) == UV_LEN
@@ -102,31 +129,32 @@ def test_pair_produces_canonical_uvs_and_golden_heatmap() -> None:
         assert mesh.as_bytes()[0:4] == b"glTF"
         assert 100_000 < len(mesh.as_bytes()) < 2_000_000
     assert result.mesh_a != result.mesh_b
-    status = queue.status(job_id)
-    assert isinstance(status, Ok)
-    assert status.value == JobStatus.DONE
-    progress = queue.progress(job_id)
-    assert isinstance(progress, Ok)
+    assert isinstance(sink, InMemorySink)
+    assert sink.result == result
+    assert not sink.failed
     done = parse_progress(1.0)
     assert isinstance(done, Ok)
-    assert progress.value[0].value() == done.value.value()
-    assert progress.value[1] == Stage.DONE
-    stored = queue.fetch_result(job_id)
-    assert isinstance(stored, Ok)
-    assert stored.value == result
+    assert [(p.value(), s) for p, s in sink.reports] == [
+        (0.15, Stage.LANDMARKS),
+        (0.40, Stage.FLAME),
+        (0.75, Stage.FREEUV),
+        (0.95, Stage.BAKE),
+    ]
     assert not job_dir(job_id).exists()
 
 
 def test_sidecar_error_fails_job_and_cleans_tmp() -> None:
-    queue: QueueLike = MemoryQueue()
+    from backend.domain import new_job_id
+
+    sink: ProgressSink = InMemorySink()
     image_a = _image(MARKER_A)
     image_b = _image(MARKER_B)
-    job_id = queue.enqueue(EnqueueCommand(image_a=image_a, image_b=image_b)).job_id
-    out = run_pair_real(queue, FakeMlFailLandmarks(), job_id, image_a, image_b, default_config())  # type: ignore[arg-type]
+    job_id = new_job_id()
+    out = run_pair_real(sink, FakeMlFailLandmarks(), job_id, image_a, image_b, default_config())  # type: ignore[arg-type]
     assert isinstance(out, Err)
-    status = queue.status(job_id)
-    assert isinstance(status, Ok)
-    assert status.value == JobStatus.FAILED
+    assert isinstance(sink, InMemorySink)
+    assert sink.failed
+    assert sink.result is None
     assert not job_dir(job_id).exists()
 
 

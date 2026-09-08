@@ -3,7 +3,7 @@ set -euo pipefail
 # E2E edge: wrangler dev efimero mas matriz curl. Corre desde la raiz del repo.
 # Uso: .agents/skills/e2e/scripts/e2e-edge.sh [port]
 PORT="${1:-8788}"
-npx wrangler dev --port "$PORT" > /tmp/wrangler-dev.log 2>&1 &
+npx --yes wrangler@4 dev -c wrangler.dev.toml --port "$PORT" > /tmp/wrangler-dev.log 2>&1 &
 echo $! > /tmp/wrangler.pid
 for _ in $(seq 1 25); do curl -sf "http://localhost:$PORT/health" && break; sleep 2; done
 echo "---HEALTH---"

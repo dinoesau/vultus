@@ -42,10 +42,25 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          QUEUE_NAME: vultus-jobs
+          R2_BUCKET: vultus-jobs
+          LIFECYCLE_RULE: expire-jobs
         run: |
-          npx --yes wrangler@4 queues create vultus-jobs 2>&1 || true
-          npx --yes wrangler@4 r2 bucket create vultus-jobs 2>&1 || true
-          npx --yes wrangler@4 r2 bucket lifecycle add vultus-jobs --prefix 'jobs/' --expire-days 1 2>&1 || true
+          if npx --yes wrangler@4 queues list 2>/dev/null | grep -q "$QUEUE_NAME"; then
+            echo "queue $QUEUE_NAME ya existe, se omite"
+          else
+            npx --yes wrangler@4 queues create "$QUEUE_NAME"
+          fi
+          if npx --yes wrangler@4 r2 bucket list 2>/dev/null | grep -q "$R2_BUCKET"; then
+            echo "bucket $R2_BUCKET ya existe, se omite"
+          else
+            npx --yes wrangler@4 r2 bucket create "$R2_BUCKET"
+          fi
+          if npx --yes wrangler@4 r2 bucket lifecycle list "$R2_BUCKET" 2>/dev/null | grep -q "$LIFECYCLE_RULE"; then
+            echo "lifecycle $LIFECYCLE_RULE ya existe, se omite"
+          else
+            npx --yes wrangler@4 r2 bucket lifecycle add "$R2_BUCKET" "$LIFECYCLE_RULE" 'jobs/' --expire-days 1 -y
+          fi
       - name: deploy worker production
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

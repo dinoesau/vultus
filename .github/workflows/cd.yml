@@ -92,7 +92,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: smoke-edge
-    if: inputs.run_modal != false
+    # En push inputs no existe y '' != false es falso: sin este OR Modal
+    # nunca desplegaria en release. Manual sigue con run_modal=false para saltarlo.
+    if: needs.smoke-edge.result == 'success' && (github.event_name == 'push' || inputs.run_modal != false)
     environment: production
     steps:
       - uses: actions/checkout@v4

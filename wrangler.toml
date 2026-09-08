@@ -11,8 +11,8 @@ workers_dev = true
 # Cloudflare Pages maneja el frontend Astro static; este Worker expone Seam 1
 # POST /v1/compare, GET /v1/jobs/:id, POST /v1/jobs/:id/progress (Modal),
 # WS /v1/jobs/:id/events (progreso vivo), GET /health. Sin fallbacks dummy en prod.
-# pages_build_output_dir: el `pages deploy` usa el toml en vez de solo args CLI.
-pages_build_output_dir = "frontend/dist"
+# Sin pages_build_output_dir: un solo toml no puede mezclar Worker (main) y
+# Pages en wrangler 4. El `pages deploy` CLI sigue funcionando con warning.
 
 [[queues.producers]]
 queue = "vultus-jobs"

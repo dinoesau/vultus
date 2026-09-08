@@ -102,16 +102,15 @@ Deps compute local: `httpx/Pillow/numpy` (ver `backend/requirements-api.txt`).
 ### 4.3 workers
 
 Cada worker es módulo deep con una sola responsabilidad.
-`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|flame|freeuv` consumido por `MlSidecarClient::new(BaseUrl)` con firmas tipadas (`-> Landmarks`, `-> FlawUv`, `-> CompleteUv`) y errores `Ml::{Transport, BadStatus, Decode, Empty}`.
-`Worker 4 CPU` (`bake`, `heatmap`, `report`) vive en Rust `vultus-workers-cpu` con firmas infallibles `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` y `bake_bfm_to_gnm(&FlawUv) -> CompleteUv` (sin dep `image`).
+`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|flame|freeuv` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FlawUv`, `-> CompleteUv`).
+`Worker 4 CPU` (`bake`, `heatmap`, `report`) vive en `backend/gnm.py` con firmas `compute_heatmap` y `bake_bfm_to_gnm` (sin dep `torch/diffusers/mediapipe`).
 Reciben tipos ya probados, escriben a `/tmp/{job_id}` en tmpfs, retornan tipos con `UV_LEN`.
 No conocen HTTP ni frontend.
 
 ### 4.4 models
 
 Adaptadores a librerías externas.
-Python: sidecar `backend/modal_app.py` (`/ml/landmarks|flame|freeuv`, stubs `{"todo":...}` hasta Fase 1, `gnm_bake_worker` deprecated a `NotImplementedError`).
-Rust: CPU puro en `vultus-workers-cpu` (`compute_heatmap`, `bake_bfm_to_gnm`, sin `torch/diffusers/mediapipe/image`).
+Python: sidecar `backend/modal_app.py` (`/ml/landmarks|flame|freeuv`) y bake CPU `backend/gnm.py` (`compute_heatmap`, `bake_bfm_to_gnm`, `build_result_zip`).
 Son los únicos lugares donde viven esas dependencias.
 
 ### 4.5 frontend

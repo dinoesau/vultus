@@ -1,12 +1,13 @@
 name: cd
 
 # CD optimizado: edge primero, humo, luego GPU, luego humo final.
-# Solo corre en push a main o manual. PRs usan CI + dry-run, sin coste GPU.
+# Solo corre en push a production o manual. main es integracion (CI).
+# Release = PR main -> production. PRs usan CI + dry-run, sin coste GPU.
 # Deploys secuenciales: dos builds Modal concurrentes no comparten cache.
 
 on:
   push:
-    branches: [main]
+    branches: [production]
     paths-ignore:
       - '**.md'
       - 'docs/**'

@@ -1,12 +1,6 @@
-fastapi
-uvicorn
 httpx
-pydantic
+Pillow
+numpy
 pytest
 mypy
 ruff
-Pillow
-python-multipart
-numpy
-websockets
-anyio

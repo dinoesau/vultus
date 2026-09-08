@@ -1,8 +1,9 @@
 # DEVELOPMENT - Guía de Desarrollo
 
-> Estado objetivo sin Rust: un solo compose sin toolchain Rust.
-> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `mypy --strict backend/`,
-> `ruff check backend/`, `pytest backend/tests -q`, `npx vitest run edge/contract.test.ts`.
+> Estado objetivo sin Rust: un solo compose sin toolchain Rust y un solo gateway.
+> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `mypy --strict backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py`,
+> `ruff check backend/`, `pytest backend/tests -q`, `npx vitest run edge/contract.test.ts`,
+> `npx vitest run --config vitest.pool.config.ts` (desde `frontend/`).
 
 ## 1. Requisitos
 
@@ -10,19 +11,21 @@ Sin toolchain Rust. Solo Python + Node + Docker.
 Instala `Docker` 24+ y `Docker Compose` v2.
 Para GPU instala `nvidia-container-toolkit` y verifica con `nvidia-smi`.
 Node 22+ para frontend Astro (Astro 7 exige 20.19+ o 22.12+).
-Python 3.12+ para API local y sidecar ML (`backend/app.py`, `backend/modal_app.py`, `Dockerfile.api`, `Dockerfile.gpu`).
-Historico: antes Rust Axum (ver ADR), borrado en plan-remove-rust-stack.
+Python 3.12+ para runner local y sidecar ML (`backend/local_runner.py`, `backend/modal_app.py`, `Dockerfile.runner`, `Dockerfile.gpu`).
+Node 22+ para el gateway (Worker `edge/worker.ts` + entrada dev `edge/worker.dev.ts`).
+Historico: antes API Python FastAPI y Rust Axum (ver ADRs), borrados en plan-single-gateway-ts.
 
 ## 2. Setup Python
 
 ```bash
 pip install -r backend/requirements-api.txt
-mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/store.py backend/gnm.py backend/pipeline_local.py backend/app.py
+mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py
 ruff check backend/
 pytest backend/tests -q
 ```
 
-API en `http://localhost:8000` (`/health`, `POST /v1/compare` -> `202 {job_id, status:"queued"}`, `GET /v1/jobs/{id}` -> `200 {job_id, status}`).
+Gateway en `http://localhost:8000` (`/health` con `gateway:"worker"`, `POST /v1/compare` -> `202 {job_id, status:"queued"}`, `GET /v1/jobs/{id}` -> `200 {job_id, status}`).
+Mismo handler que prod, servido local via `wrangler dev -c wrangler.dev.toml`.
 Sidecar ML local en `:8081` vía `modal_app.sidecar`.
 
 ```bash
@@ -36,21 +39,31 @@ python3 -c "import sys; sys.path.insert(0,'.'); import backend.modal_app; import
 
 ```
 backend/
-├── requirements-api.txt   # deps API local (fastapi/uvicorn/httpx/pytest/mypy/ruff/Pillow)
-├── Dockerfile.api         # imagen Python vultus-api (ML_SIDECAR_URL)
+├── requirements-api.txt   # deps compute/ML local (httpx/Pillow/numpy + pytest/mypy/ruff)
+├── Dockerfile.wrangler    # gateway worker local (misma entrada dev que prod)
+├── Dockerfile.runner      # runner local (webhook + pipeline contra sidecar)
 ├── Dockerfile.gpu         # sidecar Python ML (torch/diffusers)
-├── domain.py              # tipos probados + Result + errores (dueno local)
-├── store.py               # cola en memoria TTL60 + reloj inyectable
+├── domain.py              # tipos probados ML + Result + errores (sin mitad gateway)
 ├── gnm.py                 # bake + heatmap + GLB + zip CPU compartido
-├── pipeline_local.py      # orquestador local paralelo + timeouts
-├── app.py                 # API FastAPI (Seam 1)
+├── pipeline_local.py      # orquestador local con sink (report/complete/fail) + timeouts
+├── local_runner.py        # webhook de queue, blobs por rutas dev, sink HTTP
 ├── modal_app.py           # sidecar ML: MediaPipe/FLAME/FreeUV + POST /ml/*
-└── tests/                 # test_domain/store/api/pipeline/gnm (29 tests)
+└── tests/                 # test_domain/pipeline/gnm/modal_compat (ML y compute)
 ```
 
-`domain.py` expone `ImageBytes`, `JobId`, `JobStatus`, `Progress`, `Stage`, `TtlSecs`,
-`R2Key`/`R2Keys`, `EnqueueCommand`, `EnqueuedJob`, `Landmarks` 478,
-`FlawUv`/`CompleteUv`/`Heatmap` (`UV_LEN`), `BaseUrl`, `FlamePayload`, `CompareResult`.
+```
+edge/
+├── contract.ts            # fuente unica del contrato HTTP (brands, Result, hitos)
+├── worker.ts              # gateway prod (fino: valida + R2 + queue + DO)
+├── worker.dev.ts          # entrada dev: envuelve prod + 2 rutas dev + consumer
+├── progress-do.ts         # Durable Object de progreso (TTL + WS vivo)
+├── worker.http.test.ts    # suite pool: port 1:1 del contrato HTTP en runtime
+└── contract.test.ts       # unit del contrato
+```
+
+`domain.py` expone `ImageBytes`, `JobId`, `Progress`, `Stage`,
+`Landmarks` 478, `FlawUv`/`CompleteUv`/`Heatmap` (`UV_LEN`), `BaseUrl`, `FlamePayload`, `CompareResult`.
+El ciclo de vida del job (queue, status, TTL) vive solo en `edge/`; Python no lo duplica.
 Ningún otro módulo importa `torch/diffusers/mediapipe` salvo `modal_app.py`.
 
 ## 4. Docker (solo dev local, no CI ni prod)
@@ -66,9 +79,10 @@ Modal solo reusa `backend/Dockerfile.gpu` como receta de build vía `modal.Image
 docker compose up --build
 ```
 
-Levanta `api` en 8000, `ml-sidecar` en 8081 y `frontend` en 4321 (sin `redis`; `Store` en memoria).
-`/tmp` está montado como `tmpfs` para stateless.
-En prod este stack se reemplaza por `Cloudflare Workers + Queues + R2 + Modal`. El `Store` en `backend/store.py` (`MemoryQueue` local / `R2PointerQueue` prod) es idéntico, solo cambia el adapter (`EnqueuedJob.is_r2_pointer()`).
+Levanta `api` (worker runtime, misma entrada que prod) en 8000, `runner` en 8001, `ml-sidecar` en 8081 y `frontend` en 4321.
+`/tmp` está montado como `tmpfs` en runner y sidecar para stateless.
+En prod este stack se reemplaza por `Cloudflare Workers + Queues + R2 + Modal` con el mismo handler.
+El estado del worker dev persiste en el volumen `wrangler-state` (efimero en tests).
 
 ### 4.2 Workers GPU local
 
@@ -119,32 +133,36 @@ Islas React en `src/components`.
 
 ## 6. Queues y workers
 
-El contrato es `Store` compartido en `backend/store.py` (`dict` tras `RLock`):
+El contrato es el sink estrecho en `backend/pipeline_local.py` (`report`, `complete`, `fail`):
 
-- **Local/dev/test:** `MemoryQueue` (`enqueue(EnqueueCommand) -> EnqueuedJob{r2_keys None}`, `stored_lens` guarda `(len_a, len_b)`, `progress -> (Progress::zero(), Stage::Queued)`, `set_progress(Progress, Stage)` pasa a `Processing`) y `R2PointerQueue` (mismo `Store`, retorna `Some(R2Keys jobs/{id}/a|b)` para paridad prod, probada en `test_r2_pointer_queue_serves_same_seam`).
-- **Prod:** `Cloudflare Queues + R2` vía `wrangler.toml`. El Worker encola `{job_id, r2_keys}` (Queues <128KB, bytes en R2, `R2Key` sin `..` max 1024). Modal consume vía `HTTP Pull Consumer` (`modal_app.py`: `mediapipe_worker`, `flame_worker`, `freeuv_worker`, `queue_pull_consumer`; `gnm_bake_worker` deprecated). Progreso vía `Durable Objects WS` con `Stage` enum.
+- **Local/dev/test:** el runner (`backend/local_runner.py`) recibe el mensaje dev por webhook, trae los blobs por las rutas dev del gateway, corre `run_pair` contra el sidecar y reporta por HTTP. Los tests inyectan el sink en memoria.
+- **Prod:** los workers GPU consumen vía `HTTP Pull Consumer`, reportan progreso al mismo seam `POST /v1/jobs/{id}/progress` y escriben `result.zip` a R2. El progreso va por `Durable Objects WS` con `Stage` enum.
 
-El código de negocio no conoce la infra; solo el adapter (`MemoryQueue` vs `R2PointerQueue`) decide.
-`AppState::new(impl Queue)` inyecta cualquiera tras `Arc<dyn Queue>`.
+El pipeline no conoce la infra; solo el sink (`InMemorySink` vs `HttpProgressSink`) decide.
 
 ## 7. Testing
 
 ### 7.1 Backend
 
 ```bash
-cd backend
 pytest backend/tests -q
-pytest backend/tests/test_api.py -q
+pytest backend/tests/test_pipeline.py -q
 pytest backend/tests/test_domain.py -q
 pytest backend/tests/test_gnm.py -q
 ```
 
-56 tests en verde (`16 api: 2 config + 11 seam1 + 3 ws, 37 core: 32 unit + 5 edge_parity, 3 workers_cpu`).
-Seam 1 con `TestClient` real (`202 {job_id, status queued}`, `GET` queued, paridad `R2PointerQueue`, `400` imagen / faltante / uuid, `404` desconocido, `409` pre-done) mas WS real con cliente websocket (snapshot `queued`, `processing/flame` tras `set_progress`, handshake falla en desconocido).
-Seam 2 con `MemoryQueue` / `R2PointerQueue` (`stored_lens`, `progress`, `NotFound`).
-Seam 3 con golden `UV_LEN = 786432` (`black_heatmap`, `[10,200] vs [4,210] -> [6,10]`, `wrong_uv_length_rejected_at_parse`) + `Landmarks` 478 rechaza stubs.
-Goldens literales a mano para `Progress`, `TtlSecs 1..=3600`, `R2Key`, heatmap y bake.
-No mockees `fit_flame` interno.
+```bash
+cd frontend
+npx vitest run ../edge/contract.test.ts --root ..
+npx vitest run --config vitest.pool.config.ts
+```
+
+La suite es una sola: contrato TS (fuente unica) + pool HTTP en runtime worker + ML/compute Python.
+Seam 1 con suite pool real (`202 {job_id, status queued}`, `400` imagen / faltante / uuid, `404` desconocido, `409` pre-done, `health` con `gateway:"worker"`) mas WS real (snapshot `queued`, handshake falla en desconocido) y negativo del backdoor dev (`404` con vars prod).
+Seam 2 con sink en memoria (`report` ordenado `landmarks/flame/freeuv/bake`, `complete` guarda, `fail` marca).
+Seam 3 con golden `UV_LEN = 786432` (`[10,200] vs [4,210] -> [6,10]`, `GLB magic`) + `Landmarks` 478 rechaza stubs.
+Goldens literales a mano para `Progress`, `JobId`, heatmap y bake.
+No mockees el pipeline interno.
 Valor esperado es literal golden, no recomputado.
 
 ### 7.2 Frontend E2E
@@ -161,11 +179,10 @@ E2E stack en CI: `docker compose up -d` + `bash scripts/smoke-fase0.sh` (health 
 ### 7.3 Stateless check
 
 ```bash
-pytest backend/tests/test_store.py -q
+pytest backend/tests/test_pipeline.py -q
 ```
 
-Verifica `stored_lens == (64,64)` en fixture, `NotFound` en job desconocido y `tmpfs` vacío.
-TTL canónico `TtlSecs::default() == 60` (`parse(0)` y `parse(3601)` fallan).
+Verifica `tmpfs` vacío tras cada par (`job_dir` no existe) y TTL canónico en el DO (`ttl_secs == 60` en `/health`).
 
 ## 8. GPU sin hardware local
 
@@ -177,8 +194,7 @@ En prod usa `Modal`: `modal run backend/modal_app.py::test_vultus --gpu T4` ejec
 ## 9. Lint y formato
 
 ```bash
-cd backend
-mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/store.py backend/gnm.py backend/pipeline_local.py backend/app.py
+mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py
 ruff check backend/
 pytest backend/tests -q
 ```
@@ -196,11 +212,12 @@ Abre PR y verifica `docker compose up` + `pytest backend/tests -q` pasan E2E.
 
 ## 11. Troubleshooting
 
-`docker build` falla: reintenta `docker compose build api` (imagen Python, sin `target/` Rust).
-`redis connection refused`: doc vieja, ya no aplica. El código usa `MemoryQueue` / `R2PointerQueue` en memoria (`Store`), sin `Redis`. Verifica `stored_lens` y `TtlSecs`.
+`docker build` falla: reintenta `docker compose build api runner` (gateway worker + runner Python).
+`redis connection refused`: doc vieja, ya no aplica. Nunca hubo `Redis`: el estado vive en el DO/R2 (prod) o emulado (dev). Verifica `/health` y `ttl_secs`.
 `wrangler deploy` falla (prod): verifica `wrangler.toml` bindings de Queues/R2 y `CLOUDFLARE_API_TOKEN`.
 `modal deploy` falla: verifica `modal token` y `modal_app.py` image con `nvidia/cuda:12.6-runtime`.
 `CUDA out of memory` (local o Modal): baja `concurrency_limit` a 1 en `freeuv_worker` / `flame_worker` (`modal_app.py`).
 `Ml::Decode` en `landmarks/flame/freeuv`: el sidecar aún retorna stubs `{"todo":...}` (Fase 1 pendiente), verifica `FlamePayload` y `UV_LEN`.
-`WS no conecta`: verifica `VITE_API_URL` en `frontend/.env` y `Durable Objects` binding en `wrangler.toml` (prod).
-`Queues 128KB exceeded`: no encoles bytes, usa `EnqueueCommand` + `R2Keys jobs/{id}/a|b` vía `R2PointerQueue`.
+`WS no conecta`: verifica `VITE_API_URL` en `frontend/.env` y `Durable Objects` binding en `wrangler.toml` (prod) o `wrangler.dev.toml` (local).
+`Queues 128KB exceeded`: no encoles bytes, el worker solo manda `{job_id, r2_keys jobs/{id}/a|b}`.
+`Pool suite aislada falla en WS`: corre con la config commiteada (`isolatedStorage:false`), el DO retiene storage con timers vivos.

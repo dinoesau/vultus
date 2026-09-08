@@ -1,9 +1,9 @@
 # CONTEXT - Vultus Vocabulario de Dominio
 
-> Estado objetivo sin Rust: vocabulario Python+TS.
-> Python: value objects frozen en `backend/domain.py` con `Result`, errores estratificados.
-> TS: branded types en `edge/contract.ts` como unica fuente del contrato HTTP.
-> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `pytest backend/tests/test_domain.py -q`.
+> Estado objetivo sin Rust ni API Python: vocabulario TS + Python ML.
+> Python: value objects frozen en `backend/domain.py` (solo lado ML/compute) con `Result`, errores estratificados.
+> TS: gateway unico en `edge/` (contrato + worker + DO) como unica fuente del ciclo de vida HTTP.
+> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `pytest backend/tests -q`, pool suite desde `frontend/`.
 
 Este documento define el lenguaje ubicuo del proyecto.
 Todo código, tests y ADRs deben usar estos términos.
@@ -16,10 +16,9 @@ No es identificación biométrica.
 Es apoyo visual.
 
 - **job**: trabajo asíncrono en queue con TTL de 60 segundos.
-Tiene `job_id` branded (`JobId::new` / `JobId::parse` con `trim`, error `InvalidJobId`) y estados `queued`, `processing`, `done`, `failed`, `expired` (`JobStatus::as_str` / `Display`).
-El ciclo de vida tipado es `Job<Queued> -> Job<Processing> -> Job<Done|Failed|Expired>` (`start`, `set_progress`, `complete` / `fail` / `expire`).
-Transiciones ilegales no compilan.
-TTL es `TtlSecs` (`1..=3600`, default `60`).
+Tiene `job_id` branded (`parseJobId` con `trim`, error `InvalidJobId`) y estados `queued`, `processing`, `done`, `failed`, `expired` (`parseJobStatus`, terminales en `TERMINAL_STATUSES`).
+El ciclo vive en el DO (`ProgressDO`): `init`, `progress`, `status`, alarmas TTL que marcan `expired` y purgan a 2xTTL.
+TTL es `TtlSecs` (`1..=3600`, default `60`, clamp total `parseTtlSecs`).
 
 - **image**: foto de entrada en `bytes` JPEG o PNG.
 Debe contener una sola cara frontal o semi-frontal.
@@ -58,27 +57,24 @@ Convierte UV de topología BFM a UV de GNM sin reentrenar.
 Firma `bake_bfm_to_gnm(&FlawUv) -> CompleteUv` (infallible, copia preserva `UV_LEN`; matriz real precomputada llega en Fase 2).
 
 - **stateless**: propiedad de no persistir nada tras entrega.
-Local: `Store` TTL 60s (`TtlSecs`) con reaper que purga a 2xTTL y `/tmp` se limpia. Prod: R2 `lifecycle 60s` + Queues 24h retención (TTL lógico 60s) y `/tmp` tmpfs en Modal.
+Local: DO TTL 60s con purga a 2xTTL y `/tmp` tmpfs en runner. Prod: R2 `lifecycle 60s` + Queues 24h retención (TTL lógico 60s) y `/tmp` tmpfs en Modal.
 
-- **r2key**: clave `R2Key::parse(String)` no vacía, `trim`, max 1024 chars, sin `..` (`InvalidR2Key`).
-Par `R2Keys::new(R2Key, R2Key)` con campos privados y accesores `image_a()` / `image_b()`.
-Solo `Some` en prod (patrón `R2 pointer` por límite 128KB de Queues).
+- **r2key**: clave `jobs/{id}/a|b` no vacía, sin `..`.
+Solo `Some` en prod (patrón `R2 pointer` por límite 128KB de Queues); en dev el worker la escribe al R2 emulado.
 
-- **enqueue-command**: par de imágenes ya probadas `EnqueueCommand::new(ImageBytes, ImageBytes)`.
-Evita soltar `Vec<u8>` en el adapter y hace el seam testeable (`into_pair`, `stored_lens`).
+- **enqueue-command**: par de imágenes ya probadas en el borde del worker.
+Nunca bytes sueltos cruzando el seam HTTP.
 
-- **enqueued-job**: recibo `EnqueuedJob::new(JobId, Option<R2Keys>)` con campos privados.
-Accesores `job_id()`, `r2_keys()`, `is_r2_pointer()`.
-`None` en local (`MemoryQueue`), `Some(jobs/{id}/a|b)` en prod (`R2PointerQueue`).
+- **enqueued-job**: recibo `{job_id, r2_keys}` en la queue.
+El consumer dev lo reenvia al webhook del runner; en prod lo consume el `HTTP Pull Consumer` de Modal.
 
 - **report**: PDF con imágenes originales, UVs, heatmap y tabla de distancias antropométricas.
 Incluye disclaimer de no identificación automática.
 
 ## Verbos
 
-- **enqueue**: poner un job en la queue vía `Queue::enqueue(EnqueueCommand) -> EnqueueCommand`.
-Local `MemoryQueue` guarda longitudes (`stored_lens`).
-Prod `R2PointerQueue` retorna `Some(R2Keys)`.
+- **enqueue**: poner un job en la queue vía el worker (`POST /v1/compare` -> `{job_id, r2_keys}`).
+Local el consumer dev lo reenvia al runner; prod lo consume Modal.
 
 - **consume**: worker toma un job de la queue (local `Store` en memoria / HTTP Pull Consumer desde Modal en prod).
 Estado vía `status(&JobId)`, `progress(&JobId) -> (Progress, Stage)`, `set_progress(&JobId, Progress, Stage)`.
@@ -104,30 +100,27 @@ Paridad Rust-Python en un solo módulo.
 Usada como normalizador para otras distancias.
 
 - **progress**: valor `Progress::parse(f32)` en `0.0..=1.0` no-NaN (`InvalidProgress`), `Progress::zero()`, `value()`.
-Emitido por worker vía `Queue::set_progress` con `Stage`.
-Mapeo HTTP: dominio `InvalidImage | InvalidJobId | InvalidProgress | InvalidR2Key | InvalidBaseUrl | Empty -> 400`, `NotFound -> 404`, `Queue | Ml | Invariant -> 500` (`AppError` en `vultus-api`, cuerpo `{"detail":...}`).
+Emitido por el pipeline vía `sink.report` con `Stage`; hitos `0.15/0.40/0.75/0.95/1.0` en `edge/contract.ts`.
+Mapeo HTTP: `400` validación, `404` desconocido, `500` infra (`{"detail":...}`).
 
 ## Errores
 
-- `CoreError` es taxonomía `Clone + PartialEq + Eq`: `InvalidImage(ImageError)`, `InvalidJobId`, `InvalidProgress`, `InvalidR2Key`, `InvalidBaseUrl(BaseUrlError)`, `Empty`, `Queue(QueueError::Backend)`, `Ml(MlError::{Transport, BadStatus, Decode, Empty})`, `NotFound(String)`, `Invariant(&'static str)`.
-Helpers `not_found`, `queue_backend`, `ml_transport`.
+- `DomainError` es taxonomía ML/compute: `InvalidImage(ImageError)`, `InvalidJobId`, `InvalidProgress`, `InvalidBaseUrl(BaseUrlError)`, `EmptyPayload`, `Ml(MlError::{Transport, BadStatus, Decode, Empty})`, `NotFound`, `Invariant`.
+Helpers `domain_to_status` / `domain_to_message`.
 `ImageError::{SizeOutOfRange, UnsupportedFormat}`, `BaseUrlError::{BadScheme, Empty}`.
-`app.py` usa lifespan con reaper y sirve `:8000` vía `uvicorn`.
-Nunca `unwrap` en request path; multipart inválido es `AppError::BadRequest`.
+El runner sirve `:8001` con `http.server` stdlib; el gateway sirve `:8000` vía worker runtime.
+Nunca `unwrap` en request path; multipart inválido es `400`.
 
 ## Boundaries
 
-- **Seam 1 API**: `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events` (FastAPI local / Cloudflare Workers + Durable Objects prod).
-`AppState(Arc<dyn Queue>)` genérico vía `AppState::new(impl Queue)`, respuestas tipadas `CompareResponse{job_id, status:"queued"}` (`202`) y `JobResponse{job_id, status: JobStatus::as_str}` (`200`).
+- **Seam 1 API**: `POST /v1/compare`, `GET /v1/jobs/{id}`, `WS /v1/jobs/{id}/events` (misma entrada Worker en prod y dev).
 `GET` con uuid inválido es `400`, job desconocido es `404`.
 
-- **Seam 2 Queue**: contrato `enqueue(EnqueueCommand)`, `status`, `progress`, `set_progress(Progress, Stage)`, `stored_lens` agnóstico a infra vía `backend/store.py`.
-Local: `MemoryQueue` (bytes directos, `r2_keys None`).
-Prod: `R2PointerQueue` (patrón `R2 pointer` por límite 128KB, `r2_keys Some(jobs/{id}/a|b)`) + `HTTP Pull Consumer` en Modal.
-Estado compartido `Store { HashMap<JobId, MemoryEntry> }` tras ambos adapters.
-Paridad probada: `test_r2_pointer_queue_serves_same_seam`.
+- **Seam 2 Sink**: contrato `report(Progress, Stage)`, `complete(CompareResult)`, `fail()` en `backend/pipeline_local.py`.
+Local: `HttpProgressSink` en el runner (mismo seam HTTP que prod) e `InMemorySink` en tests.
+Prod: workers GPU al mismo seam HTTP + R2 directo.
 
-- **Seam 3 Worker**: contrato tipado `&ImageBytes -> Landmarks -> FlawUv -> CompleteUv -> Heatmap` (local CPU Rust o Modal GPU containers vía `MlSidecarClient` + `BaseUrl` + `FlamePayload`).
+- **Seam 3 Worker**: contrato tipado `&ImageBytes -> Landmarks -> FlawUv -> CompleteUv -> Heatmap` (local CPU vía `MlSidecarClient` + `BaseUrl` + `FlamePayload`, prod GPU vía Modal).
 UVs exigen `UV_LEN`, `Landmarks` exige 478 JSON.
 
 Fuera de seams: `fit_flame`, `bake`, `project_uv`.
@@ -139,6 +132,6 @@ Nombre de test describe WHAT no HOW.
 Ejemplo bueno: `test_frontal_face_produces_512_uv`.
 Ejemplo malo: `test_worker_calls_freeuv`.
 Valor esperado viene de literal golden verificado manualmente, no de recomputar con misma función.
-Golden UV es `vec![fill; UV_LEN]` con cabeza literal (`[10, 200]` vs `[4, 210]` -> `[6, 10]`).
-Goldens literales para rangos `Progress` / `TtlSecs`, `R2Key` trim / `..`, JPEG/PNG con filler.
-Seam 1 tiene 6 tests `TestClient` + WS real (`backend/tests/test_api.py`: snapshot `queued`, `processing/flame` tras `set_progress`, handshake falla en desconocido).
+Golden UV es cabeza literal (`[10, 200]` vs `[4, 210]` -> `[6, 10]`).
+Goldens literales para `Progress`, `JobId`, JPEG/PNG con filler.
+Seam 1 tiene 6 tests pool en runtime (`edge/worker.http.test.ts`: snapshot `queued`, handshake falla en desconocido, backdoor dev `404` con vars prod).

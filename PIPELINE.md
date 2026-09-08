@@ -1,36 +1,36 @@
 # PIPELINE - Flujo Completo Vultus
 
-> Estado objetivo sin Rust: orquestador local Python en `backend/pipeline_local.py`
-> (paralelismo por cara, timeouts 5s/10s/30s/total 60s=TTL), bake CPU en `backend/gnm.py`.
+> Estado objetivo sin Rust ni API Python: gateway unico TS en `edge/`
+> (prod `wrangler.toml`, dev `wrangler.dev.toml`), runner local Python en `backend/local_runner.py`
+> (sink HTTP + timeouts 5s/10s/30s/total 60s=TTL), bake CPU en `backend/gnm.py`.
 > Comandos nuevos: `pytest backend/tests/test_pipeline.py -q`, `bash scripts/smoke-fase0.sh`.
 
 ## 1. Resumen
 
 Este documento describe el flujo end-to-end desde que el usuario sube 2 caras hasta que descarga el resultado.
 El pipeline es asíncrono, stateless y sin persistencia.
-En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` vía `HTTP Pull Consumer`; en dev local/test consume de `MemoryQueue` o `R2PointerQueue` vía el mismo `Store` compartido en `backend/store.py`.
+En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` vía `HTTP Pull Consumer`; en dev el runner local consume la queue emulada vía webhook del consumer dev.
 
 ## 2. Diagrama de pipeline
 
-> Infra prod: Cloudflare Pages + Workers + Queues + R2 + Durable Objects + Modal. Dev local: `Store` en memoria (`MemoryQueue` / `R2PointerQueue`) equivalente vía adapter, sin `Redis`.
+> Infra prod: Cloudflare Pages + Workers + Queues + R2 + Durable Objects + Modal. Dev local: mismo worker con R2/Queue/DO emulados (`wrangler.dev.toml`) + runner webhook, sin `Redis`.
 
 ```mermaid
 graph TD
-    A[Cliente Astro - Cloudflare Pages Upload 2 jpgs] --> B[Cloudflare Worker POST /v1/compare]
+    A[Cliente Astro - Cloudflare Pages Upload 2 jpgs] --> B[Worker POST /v1/compare (prod y dev)]
     B --> C{Validacion + R2 PutObject}
-    C -->|ok| D["Enqueue {job_id, r2_keys} a Cloudflare Queues"]
+    C -->|ok| D["Enqueue {job_id, r2_keys} a Queues"]
     C -->|fail| E[400 Bad Request]
-    D --> F[Modal Worker 1 - MediaPipe 478 landmarks CPU]
-    F --> G[Modal Worker 2 - FLAME Fitting GPU]
-    G --> H[Modal Worker 3 - FreeUV UV completo GPU]
-    H --> I[Modal Worker 4 - GNM Bake + Heatmap + Report]
-    I --> J[Result bytes en R2 TTL 60s lifecycle]
-    J --> K[Cloudflare Worker StreamingResponse zip]
+    D --> F[Runner local via webhook dev / Modal Worker 1 - MediaPipe 478 landmarks]
+    F --> G[FLAME Fitting GPU]
+    G --> H[FreeUV UV completo GPU]
+    H --> I[GNM Bake + Heatmap + Report]
+    I --> J[Result bytes TTL 60s (R2 prod / PUT dev local)]
+    J --> K[Worker StreamingResponse zip]
     K --> L[Cliente descarga - UV_A UV_B heatmap mesh PDF]
     J -. lifecycle 60s .-> M[Olvido total - tmpfs wipe + R2 DEL + Queue 24h]
     D -. progress .-> N[Durable Objects WS /v1/jobs/id/events]
     N --> A
-    D -. local dev .-> D2[Store en memoria local (MemoryQueue)]
 ```
 
 ## 3. Secuencia de modelos
@@ -120,12 +120,12 @@ sequenceDiagram
 
     FE->>CF: POST /v1/compare multipart 2 images
     CF->>CF: Validar tipo, tamaño, una cara por imagen
-    CF->>R2: PutObject r2_keys (images, local: stored_lens en memoria)
-    CF->>Q: enqueue compare_job job_id=uuid r2_keys (local: MemoryQueue en memoria)
+    CF->>R2: PutObject r2_keys (emulado en dev)
+    CF->>Q: enqueue compare_job job_id=uuid r2_keys
     CF-->>FE: 202 Accepted {job_id, status: queued}
     FE->>DO: WS /v1/jobs/{id}/events subscribe
-    Q->>MO: HTTP Pull Consumer job_id
-    MO->>W1: consume job_id + R2 GetObject
+    Q->>MO: HTTP Pull Consumer en prod, webhook al runner en dev
+    MO->>W1: consume job_id + R2 GetObject (blobs por ruta dev en local)
     W1->>DO: progress 0.15 landmarks done
     W1->>W2: landmarks + images
     W2->>DO: progress 0.40 FLAME mesh done
@@ -133,15 +133,15 @@ sequenceDiagram
     W3->>DO: progress 0.75 UV complete done
     W3->>W4: UV_A UV_B
     W4->>DO: progress 0.95 heatmap + bake done
-    W4->>R2: PutObject result.zip keep 60s (local Fase 0: sin result, solo status en Store)
+    W4->>R2: PutObject result.zip keep 60s (local: PUT /dev/results)
     R2->>CF: result ready
     CF->>DO: progress 1.0 done
     DO-->>FE: WS event done
     FE->>CF: GET /v1/jobs/{id}/result
-    CF->>R2: fetch result bytes (local Fase 0: n/a, solo Store status/progress)
+    CF->>R2: fetch result bytes
     CF-->>FE: 200 StreamingResponse zip
-    R2->>R2: lifecycle 60s DEL (local: EXPIRE 60s)
-    W1->>W1: unlink /tmp/job_id/* (Modal tmpfs)
+    R2->>R2: lifecycle 60s DEL (local: purga DO a 2xTTL)
+    W1->>W1: unlink /tmp/job_id/* (Modal tmpfs / runner tmpfs)
 ```
 
 ## 5. Etapas
@@ -149,18 +149,17 @@ sequenceDiagram
 ### 5.1 Entrada - POST /v1/compare
 
 El cliente envía `multipart/form-data` con `image_a` y `image_b`.
-Cada imagen debe ser JPEG o PNG menor a 8MB (`ImageBytes::parse` + `ImageBytesRef`, errores `SizeOutOfRange | UnsupportedFormat`).
-Faltante o multipart roto es `400 {"detail":...}` vía `AppError::BadRequest`.
-Imagen inválida es `400` vía `AppError::Domain(InvalidImage)` sin encolar.
-Si pasa, construye `EnqueueCommand::new(a, b)`, encola en `Queue` y retorna `202 {job_id, status:"queued"}` (`CompareResponse`).
-`GET /v1/jobs/{id}` valida `JobId::parse(trim)` y retorna `200 {job_id, status: JobStatus::as_str}`; uuid roto es `400`, desconocido es `404`. En edge (ADR-007) el `GET` lee el `ProgressDO /status` como fuente de verdad, no dummy.
+Cada imagen debe ser JPEG o PNG menor a 8MB (errores `SizeOutOfRange | UnsupportedFormat`).
+Faltante o multipart roto es `400 {"detail":...}` sin encolar.
+Si pasa, el worker encola `{job_id, r2_keys}` y retorna `202 {job_id, status:"queued"}`.
+`GET /v1/jobs/{id}` valida uuid con `trim` y retorna `200 {job_id, status}`; uuid roto es `400`, desconocido es `404`. El `GET` lee el `ProgressDO /status` como fuente de verdad.
 
-### 5.2 Queue - Cloudflare Queues + R2 (prod) / MemoryQueue + R2PointerQueue (local/test)
+### 5.2 Queue - Cloudflare Queues + R2 (prod) / emulados (local)
 
-El contrato es `Queue::{enqueue(EnqueueCommand), status, progress, set_progress(Progress, Stage), stored_lens}` agnóstico a la infra con `Store` compartido.
-
-- **Prod (Cloudflare):** El Worker hace `R2 PutObject` con `image_a/b` y serializa solo `compare_job(job_id, r2_keys jobs/{id}/a|b)` a `Cloudflare Queues` (límite 128KB/mensaje, no caben 2x8MB). `Cloudflare Queues` cobra `10k ops/día free` (write/read/delete = 3 ops por job -> ~3.333 jobs/día free), retención `24h` en free pero `TTL lógico 60s` (`TtlSecs` default 60) vía `Durable Object alarm` + `R2 lifecycle 60s`. Modal consume vía `HTTP Pull Consumer`. El progreso va por `Durable Objects WS` con `Stage::{queued, landmarks, flame, freeuv, bake, done}`.
-- **Local/dev/test:** `MemoryQueue` (adapter en memoria, `r2_keys None`, guarda `stored_lens` para probar flujo) y `R2PointerQueue` (simula prod con `Some(R2Keys)`, misma `Store`). Progreso vía `set_progress(Progress::zero() -> parse(0.0..=1.0), Stage)`; `status` pasa a `Processing` al avanzar.
+El worker hace `R2 PutObject` con `image_a/b` y serializa solo `compare_job(job_id, r2_keys jobs/{id}/a|b)` (límite 128KB/mensaje, no caben 2x8MB).
+`Cloudflare Queues` cobra `10k ops/día free` (write/read/delete = 3 ops por job -> ~3.333 jobs/día free), retención `24h` en free pero `TTL lógico 60s` (`TtlSecs` default 60) vía `Durable Object alarm` + `R2 lifecycle 60s`.
+En local la misma entrada dev (`wrangler.dev.toml`) emula R2/Queue/DO y el consumer dev reenvia al webhook del runner.
+Modal consume vía `HTTP Pull Consumer`. El progreso va por `Durable Objects WS` con `Stage::{queued, landmarks, flame, freeuv, bake, done}`.
 
 No hay Postgres ni MinIO persistente. En prod el egress de R2 es free.
 
@@ -205,27 +204,26 @@ Sin dep `image`; tipos `FlawUv` / `CompleteUv` / `Heatmap` cruzan el seam.
 
 ### 5.7 Entrega - GET /v1/jobs/{id}/result
 
-El frontend pide el resultado tras recibir `WS done` (Durable Objects en prod).
-En prod (Fase 1+) el Worker hace `R2 GetObject(job_id/result.zip)` y en local el API leerá del `Store`; en Fase 0 no hay `GET /result`, solo `GET status` + `WS events`. Cuando exista, armará un `StreamingResponse` con `Content-Type: application/zip` y `Content-Disposition: attachment`.
-El zip contiene `uv_a.png, uv_b.png, heatmap.png, mesh_gnm.glb, report.pdf` en memoria, sin escribir a disco.
-Tras el stream, en prod `R2 lifecycle 60s` borra solo y en local el reaper purga el `Store` a 2xTTL si aún existe.
+El frontend pide el resultado tras recibir `WS done` (Durable Objects en prod y dev).
+El Worker hace `R2 GetObject(job_id/result.zip)` y arma un `StreamingResponse` con `Content-Type: application/zip` y `Content-Disposition: attachment`.
+El zip contiene `uv_a.png, uv_b.png, heatmap.png, mesh_a.glb, mesh_b.glb` en memoria, sin escribir a disco.
+Tras el stream, en prod `R2 lifecycle 60s` borra solo y en local el DO purga a 2xTTL.
 El frontend crea `URL.createObjectURL` para descarga y ofrece re-descarga local desde memoria sin volver al servidor.
 
 ### 5.8 Limpieza stateless
 
-Cada worker (local Docker o Modal container) hace `unlink` de `/tmp/{job_id}/*` al terminar, éxito o fallo.
-Local: `Store` TTL 60s (`TtlSecs`) + reaper que purga a 2xTTL automático. Prod: `R2 lifecycle 60s` + `Queue retención 24h` pero `TTL lógico 60s` vía `Durable Object alarm`.
+Cada worker hace `unlink` de `/tmp/{job_id}/*` al terminar, éxito o fallo.
+Local: pipeline con `cleanup_job_dir` + DO TTL 60s con purga a 2xTTL automático. Prod: `R2 lifecycle 60s` + `Queue retención 24h` pero `TTL lógico 60s` vía `Durable Object alarm`.
 Logs no contienen bytes de imagen, solo `job_id` y `duration_ms`.
-Verificación TDD Fase 0: `test_job_expires_after_ttl_and_lens_gone` + `test_expired_job_is_purged_after_double_ttl` comprueban `status Expired` y `stored_lens NotFound`, y `test_cleanup_removes_dir` comprueba `tmpfs` vacío. Sin `redis.exists`.
+Verificación: el pipeline inexorablemente limpia `tmpfs` (tests) y el DO expone `expired` visible antes de purgar. Sin `redis.exists`.
 
 ## 6. Contratos de datos
 
-Job enqueue: `EnqueueCommand::new(ImageBytes, ImageBytes)` en local; `EnqueuedJob{job_id, Some(R2Keys jobs/{id}/a|b)}` en prod (adapter traduce). Límite Queues 128KB obliga a `R2 pointer` en prod.
-`stored_lens(job_id) -> (len_a, len_b)` prueba que los bytes fluyen.
+Job enqueue: `{job_id, r2_keys jobs/{id}/a|b}` en la queue (patrón `R2 pointer`, límite Queues 128KB).
 Worker return tipado: `Landmarks -> FlawUv -> CompleteUv -> Heatmap` (cada `parse` exige forma, `Ml::Decode` si no).
-`FlamePayload` es `u32 BE len + landmarks_json + image_bytes` para paridad Rust-Python.
-Progress events WS: `{job_id, progress: Progress 0.0-1.0, stage: Stage queued|landmarks|flame|freeuv|bake|done}` vía `Store` local o `Durable Objects` prod.
-Error HTTP: `400` validación (`InvalidImage | InvalidJobId | InvalidProgress | InvalidR2Key | InvalidBaseUrl | Empty` + multipart), `404` (`NotFound`), `500` (`Queue::Backend | Ml::{Transport,BadStatus,Decode,Empty} | Invariant`) con `{"detail":...}`.
+`FlamePayload` es `u32 BE len + landmarks_json + image_bytes` para paridad.
+Progress events WS: `{job_id, progress: Progress 0.0-1.0, stage: Stage queued|landmarks|flame|freeuv|bake|done}` vía `Durable Objects` en prod y dev.
+Error HTTP: `400` validación (imagen, uuid, progreso, multipart), `404` desconocido, `500` infra con `{"detail":...}`.
 
 ## 7. Manejo de errores
 

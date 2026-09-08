@@ -106,10 +106,14 @@ Modal escala `0 -> 100` GPUs, paga por segundo. Ver `ARCHITECTURE.md` ADR-004.
 ### 4.4 Edge en Cloudflare (prod)
 
 ```bash
-npx wrangler dev     # Workers API + Queues + R2 + Durable Objects local
-npx wrangler deploy  # Pages (Astro) + Workers prod
+npx wrangler dev -c wrangler.dev.toml  # Workers API + Queues + R2 + DO local
+npx --yes wrangler@4 deploy --env production  # Worker prod (CD lo hace solo)
+API_URL=https://api.vultus.esau.com.mx bash scripts/smoke-prod.sh
 ```
 
+CD en `.github/workflows/cd.yml`: PR `main` -> `production` y el merge despliega Worker `--env production` + Pages `vultus`, humo edge, luego `modal deploy`, humo final.
+`main` es integracion y solo corre CI.
+Preview usa `--env preview` con bucket y queue aislados, sin dominio custom.
 Config en `wrangler.toml`. Queues `10k ops/día free`, R2 `10GB free`, Pages free.
 
 ### 4.5 Rebuild rápido local

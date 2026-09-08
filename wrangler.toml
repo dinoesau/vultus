@@ -1,8 +1,8 @@
 name = "vultus-api"
-# Hibrido: el Worker edge es gateway fino (validar + R2 PutObject +
-# enqueue {job_id, r2_keys}). La API local vive en Python FastAPI
-# (backend/app.py) y el ML GPU en Python Modal (backend/modal_app.py).
-# main apunta al entry TS; se eliminó `python_workers`.
+# Gateway unico TS: Worker fino (validar + R2 PutObject +
+# enqueue {job_id, r2_keys}). Mismo handler en prod y dev
+# (dev envuelve prod en edge/worker.dev.ts). GPU en Modal
+# via HTTP Pull Consumer (backend/modal_app.py).
 main = "edge/worker.ts"
 compatibility_date = "2026-09-03"
 # workers.dev como fallback hasta hardening (Fase 4 apaga con `false`).
@@ -38,8 +38,50 @@ new_sqlite_classes = ["ProgressDO"]
 [vars]
 QUEUE_DRIVER = "cloudflare"
 R2_TTL_SECONDS = "60"
+VULTUS_API_URL = "https://api.vultus.esau.com.mx"
+ALLOW_DEV_ROUTES = "0"
 
-# Custom Domain: Cloudflare crea el DNS + certificado solo en `deploy`.
-[[routes]]
+# Preview por PR: mismo codigo, recursos aislados, sin dominio custom.
+[env.preview]
+[[env.preview.queues.producers]]
+queue = "vultus-jobs-preview"
+binding = "VULTUS_QUEUE"
+
+[[env.preview.r2_buckets]]
+binding = "VULTUS_BUCKET"
+bucket_name = "vultus-jobs-preview"
+
+[[env.preview.durable_objects.bindings]]
+name = "VULTUS_PROGRESS"
+class_name = "ProgressDO"
+
+[env.preview.vars]
+QUEUE_DRIVER = "cloudflare"
+R2_TTL_SECONDS = "60"
+VULTUS_API_URL = ""
+ALLOW_DEV_ROUTES = "0"
+
+# Produccion: recursos reales, dominio custom solo en `deploy --env production`.
+[env.production]
+[[env.production.queues.producers]]
+queue = "vultus-jobs"
+binding = "VULTUS_QUEUE"
+
+[[env.production.r2_buckets]]
+binding = "VULTUS_BUCKET"
+bucket_name = "vultus-jobs"
+
+[[env.production.durable_objects.bindings]]
+name = "VULTUS_PROGRESS"
+class_name = "ProgressDO"
+
+[env.production.vars]
+QUEUE_DRIVER = "cloudflare"
+R2_TTL_SECONDS = "60"
+VULTUS_API_URL = "https://api.vultus.esau.com.mx"
+ALLOW_DEV_ROUTES = "0"
+
+# Custom Domain: solo prod reclama el dominio (preview usa workers.dev).
+[[env.production.routes]]
 pattern = "api.vultus.esau.com.mx"
 custom_domain = true

@@ -34,8 +34,19 @@ def _image(marker: int):
     return parsed.value
 
 
-def _landmarks():
-    pts = [[0.1, 0.2, 0.3]] * 478
+def _landmarks(marker: int):
+    # Identidad geometrica por marker: proyecta coefs conocidos a los 68
+    # del mapa para que el fit real produzca mallas distintas por identidad
+    # (la imagen sola ya no mueve la geometria desde el fit real S5).
+    from backend.gnm_head import MP_68_MAP, eval_landmarks68
+
+    sign = 1.0 if marker == 0xA1 else -1.0
+    coefs = [0.0] * 253
+    coefs[0] = sign * 2.0
+    projected = eval_landmarks68(tuple(coefs))
+    pts = [[0.5, 0.5, 0.0] for _ in range(478)]
+    for k, mp_idx in enumerate(MP_68_MAP):
+        pts[mp_idx] = [3.0 * projected[k][0] + 0.5, 3.0 * projected[k][1] + 0.1, 0.0]
     raw = json.dumps(pts).encode("utf-8")
     parsed = parse_landmarks(raw)
     assert isinstance(parsed, Ok)
@@ -44,7 +55,7 @@ def _landmarks():
 
 def _fit_and_albedo(marker: int):
     image = _image(marker)
-    landmarks = _landmarks()
+    landmarks = _landmarks(marker)
     fit = fit_gnm(image, landmarks)
     assert isinstance(fit, Ok)
     albedo = build_albedo(image, fit.value, landmarks)
@@ -54,15 +65,19 @@ def _fit_and_albedo(marker: int):
 
 def test_five_islands_cover_full_uv_without_overlap() -> None:
     assert ISLAND_COUNT == 5
-    assert ISLAND_LAYOUT_VERSION == 1
+    assert ISLAND_LAYOUT_VERSION == 2
     _, albedo = _fit_and_albedo(0xA1)
     parts = assemble_islands(albedo)
     assert sorted(parts.keys()) == [1, 2, 3, 4, 5]
     total = sum(len(v) for v in parts.values())
     assert total == UV_LEN
+    prev_end = 0
     for island in range(1, 6):
         start, end = island_bounds(island)
         assert end > start
+        assert start == prev_end
+        prev_end = end
+    assert prev_end == 512
     joined = albedo_from_islands(parts)
     assert isinstance(joined, Ok)
     assert joined.value.as_bytes() == albedo.as_bytes()
@@ -103,6 +118,28 @@ def test_personalized_mesh_differs_per_identity() -> None:
     assert ma.value.as_bytes() != mb.value.as_bytes()
 
 
+def test_personalized_glb_reports_real_counts() -> None:
+    import struct
+
+    from backend.domain import TEMPLATE_TRIS, TEMPLATE_VERTS, UV_LEN
+
+    fit, albedo = _fit_and_albedo(0xA1)
+    out = build_personalized_glb(fit, albedo)
+    assert isinstance(out, Ok)
+    data = out.value.as_bytes()
+    json_len = struct.unpack("<I", data[12:16])[0]
+    doc = json.loads(data[20 : 20 + json_len].decode("utf-8"))
+    assert doc["accessors"][0]["count"] == TEMPLATE_VERTS == 17821
+    assert doc["accessors"][1]["count"] == TEMPLATE_VERTS == 17821
+    assert doc["accessors"][2]["count"] == TEMPLATE_TRIS * 3
+    assert doc["extras"]["verts"] == TEMPLATE_VERTS == 17821
+    assert doc["extras"]["tris"] == TEMPLATE_TRIS == 35324
+    assert doc["extras"]["layout"] == ISLAND_LAYOUT_VERSION == 2
+    pbr = pbr_from_albedo(albedo)
+    assert isinstance(pbr, Ok)
+    assert len(pbr.value) == UV_LEN
+
+
 def test_full_zip_lists_island_and_pbr_names() -> None:
     fit_a, albedo_a = _fit_and_albedo(0xA1)
     fit_b, albedo_b = _fit_and_albedo(0xB2)
@@ -126,6 +163,7 @@ def test_full_zip_lists_island_and_pbr_names() -> None:
     )
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
         names = sorted(z.namelist())
+    assert len(names) == 7
     assert names == [
         "heatmap.png",
         "mesh_a.glb",

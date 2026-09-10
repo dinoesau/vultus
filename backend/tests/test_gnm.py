@@ -45,9 +45,9 @@ def test_template_con_cuentas_canonicas() -> None:
     from backend.domain import TEMPLATE_TRIS, TEMPLATE_VERTS
 
     positions, uvs, indices = load_template()
-    assert len(positions) == TEMPLATE_VERTS == 4225
+    assert len(positions) == TEMPLATE_VERTS == 17821
     assert len(uvs) == TEMPLATE_VERTS
-    assert len(indices) == TEMPLATE_TRIS == 8192
+    assert len(indices) == TEMPLATE_TRIS == 35324
 
 
 def test_zip_con_5_nombres_exactos() -> None:

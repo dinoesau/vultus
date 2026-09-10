@@ -2,7 +2,7 @@
 
 > Estado objetivo sin Rust ni API Python (plan-single-gateway-ts): un solo dueno por seam.
 > TypeScript es fuente de verdad del contrato HTTP y dueno del gateway (`edge/worker.ts`, entrada dev `edge/worker.dev.ts`).
-> Python es dueno del runner local (`backend/local_runner.py`), el orquestador (`backend/pipeline_local.py`) y el bake CPU (`backend/gnm.py`).
+> Python es dueno del runner local (`backend/local_runner.py`), el orquestador (`backend/pipeline_local.py`) y el assemble CPU (`backend/gnm_assemble.py`).
 > Comandos nuevos: `pip install -r backend/requirements-api.txt`, `mypy --strict backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py`,
 > `pytest backend/tests -q`, `npx vitest run edge/contract.test.ts`, pool suite `npx vitest run --config vitest.pool.config.ts` (desde `frontend/`).
 
@@ -43,12 +43,12 @@ No se testea Queues/R2 interno de Cloudflare.
 
 ### Seam 3 - Worker Contract
 
-`&ImageBytes -> Landmarks (478 JSON) -> FlawUv (UV_LEN) -> CompleteUv (UV_LEN) -> Heatmap (UV_LEN)` vía `MlSidecarClient { landmarks, flame, freeuv }` + `BaseUrl` + `FlamePayload (u32 BE len + landmarks_json + image_bytes)`.
+`&ImageBytes + &Landmarks -> FitResult (253 coefs + camara) -> CompleteUv (UV_LEN) -> Heatmap (UV_LEN)` vía `MlSidecarClient { landmarks, fit, texture }` + `BaseUrl` + wire `FitRequest`/`TextureRequest` espejado en `pipeline_local.py` y `modal_app.py`.
 Cada worker es caja negra.
 Input imagen golden (`ImageBytes::parse`), output `UV_LEN = 512x512x3 = 786432` verificable.
-No se mockean `MediaPipe` ni `FreeUV` entre sí.
+No se mockean `fit` ni `texture` entre sí.
 
-No son seams: `fit_flame`, `bake_bfm_to_gnm`, `project_uv`, `compute_heatmap`.
+No son seams: `coeff_distance`, `project_uv`, islas y PBR internos, `compute_heatmap`.
 Se cubren indirectamente vía Seam 3.
 
 ## 4. Módulos
@@ -63,9 +63,9 @@ graph TD
     RN[runner local<br/>thin, webhook + sink HTTP]
     MO[Modal GPU containers<br/>prod workers]
     W1[workers/mediapipe<br/>deep, 478 landmarks]
-    W2[workers/flame<br/>deep, fitting 3D]
-    W3[workers/freeuv<br/>deep, SD1.5 inpainting]
-    W4[workers/gnm<br/>deep, bake + report]
+    W2[workers/fit<br/>deep, GNM 253 coefs + camara]
+    W3[workers/texture<br/>deep, albedo solo ocluidas]
+    W4[workers/gnm<br/>deep, assemble + report]
     MODELS[models - wrappers<br/>adaptadores a libs externas]
     DO[Durable Objects WS<br/>progress]
 
@@ -102,15 +102,15 @@ Deps compute local: `httpx/Pillow/numpy` (ver `backend/requirements-api.txt`).
 ### 4.3 workers
 
 Cada worker es módulo deep con una sola responsabilidad.
-`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|flame|freeuv` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FlawUv`, `-> CompleteUv`).
-`Worker 4 CPU` (`bake`, `heatmap`, `report`) vive en `backend/gnm.py` con firmas `compute_heatmap` y `bake_bfm_to_gnm` (sin dep `torch/diffusers/mediapipe`).
+`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|fit|texture` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FitResult`, `-> CompleteUv`).
+`Worker 4 CPU` (`assemble`, `heatmap`, `report`) vive en `backend/gnm_assemble.py` con firmas `build_personalized_glb`, `pbr_from_albedo` y `compute_heatmap` en `backend/gnm.py` (sin dep `torch/diffusers/mediapipe`).
 Reciben tipos ya probados, escriben a `/tmp/{job_id}` en tmpfs, retornan tipos con `UV_LEN`.
 No conocen HTTP ni frontend.
 
 ### 4.4 models
 
 Adaptadores a librerías externas.
-Python: sidecar `backend/modal_app.py` (`/ml/landmarks|flame|freeuv`) y bake CPU `backend/gnm.py` (`compute_heatmap`, `bake_bfm_to_gnm`, `build_result_zip`).
+Python: sidecar `backend/modal_app.py` (`/ml/landmarks|fit|texture`, delegados a `backend/gnm_fit.py` y `backend/gnm_texture.py`) y assemble CPU `backend/gnm_assemble.py` (`build_personalized_glb`, `pbr_from_albedo`, `build_full_zip` de 7 nombres).
 Son los únicos lugares donde viven esas dependencias.
 
 ### 4.5 frontend
@@ -145,11 +145,19 @@ Al mover la API a Rust, `ARQ` (Python-only) dejó de aplicar.
 El contrato actual es trait `Queue` con `MemoryQueue` / `R2PointerQueue` + `Store`, sin Redis ni Celery en código.
 Se conserva por contexto, no como decisión vigente.
 
-### ADR-002 FLAME para extracción, GNM para render
+### ADR-002 Fit GNM directo (supera a FLAME-para-extracción)
 
-FLAME ya tiene fitting y FreeUV entrenado en BFM.
-GNM no trae encoder imagen a params.
-Usar FLAME para extraer `flaw-uv` y GNM solo para render vía bake evita reentrenar FreeUV.
+**Decisión (plan-gnm-fit-texture-pbr):** fit GNM directo (253 coefs + camara),
+proyeccion foto + warp TPS, inpaint solo de ocluidas, 5 islas + PBR + assemble.
+
+**Contexto (histórico, superado):** antes FLAME extraía `flaw-uv` y GNM solo
+renderizaba vía bake para evitar reentrenar FreeUV. La malla resultante era un
+template estatico con textura lavada: los parametros de forma se descartaban.
+
+**Consecuencias:**
+- Se retiran: `FlawUv`, `FlamePayload`, endpoints `/ml/flame|freeuv`, LUT v2,
+  `bake_bfm_to_gnm` y el GLB neutro.
+- Compare = distancia de coefs + diferencia de albedo; el heatmap sobrevive.
 
 ### ADR-003 Stateless sin Postgres ni S3
 
@@ -178,21 +186,21 @@ Se pierde cache y re-descarga desde servidor, pero se gana privacidad y simplici
 
 ### ADR-005 Híbrido Rust + Python sidecar ML (supera a ADR-001 en API)
 
-**Decisión (histórico Rust, superado):** antes `Seam 1 API + Seam 2 queue + Worker 4 CPU` en Rust (`Axum + tokio`, `backend/crates/`, borrado). Hoy Python es dueno (`backend/app.py`, `backend/store.py`, `backend/gnm.py`) y `Worker 1/2/3 ML GPU` siguen en Python (`backend/modal_app.py`) tras `POST /ml/landmarks|flame|freeuv`.
+**Decisión (histórico Rust, superado):** antes `Seam 1 API + Seam 2 queue + Worker 4 CPU` en Rust (`Axum + tokio`, `backend/crates/`, borrado). Hoy Python es dueno (`backend/pipeline_local.py`, `backend/gnm_assemble.py`) y `Worker 1/2/3 ML GPU` siguen en Python (`backend/modal_app.py`) tras `POST /ml/landmarks|fit|texture`.
 
-**Contexto:** ADR-001 elegía `ARQ` por ser asyncio nativo. Al mover la API a Rust, `ARQ` (Python-only) y `Modal SDK` (Python-only) no son portables. Reescribir `MediaPipe/FLAME/FreeUV` a `ort/candle/burn` costaría meses y rompería fidelidad forense (golden `sha256(uv)`).
+**Contexto:** ADR-001 elegía `ARQ` por ser asyncio nativo. Al mover la API a Rust, `ARQ` (Python-only) y `Modal SDK` (Python-only) no son portables. Reescribir el fitting a `ort/candle/burn` costaría meses y rompería fidelidad forense.
 
 **Consecuencias:**
-- Rust nunca importa `torch/diffusers/mediapipe`. Frontera: tipos probados por HTTP + `X-Job-Id` vía `BaseUrl::join` y `FlamePayload`.
-- `gnm_bake_worker` Python queda deprecated (`NotImplementedError`); `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` + `bake_bfm_to_gnm(&FlawUv) -> CompleteUv` viven en `vultus-workers-cpu` (infallibles, tests `black_heatmap` con `UV_LEN`) sin dep `image`.
+- Rust nunca importa `torch/diffusers/mediapipe`. Frontera: tipos probados por HTTP + `X-Job-Id` vía `BaseUrl::join`, `FitRequest` y `TextureRequest`.
+- `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` + `build_personalized_glb(&FitResult, &CompleteUv)` viven en CPU (infallibles salvo assets corruptos, tests con `UV_LEN`) sin dep `image`.
 - `wrangler.toml` sin `python_workers`; edge es gateway fino, API pesada en Rust.
 - `Dockerfile` compila binario Rust; `Dockerfile.gpu` solo sidecar Python.
 
 ### ADR-006 Parse-don-t-validate con tipos probados + goldens
 
-**Decisión:** Dominio con tipos probados que prueban en `parse` (`ImageBytes`, `JobId` trim, `R2Key`, `Landmarks` 478 JSON, `FlawUv` / `CompleteUv` / `Heatmap` con `UV_LEN`, `BaseUrl`, `TtlSecs`) y ciclo con estados separados.
-Errores taxonómicos `CoreError` (+ `ImageError`, `BaseUrlError`, `MlError`, `QueueError`) con mapeo fijo `AppError -> 400|404|500`.
-Goldens literales a mano (`Progress`, `TtlSecs`, `R2Key`, heatmap `[6,10]`, bake `[10,176,7]`), relojes manuales sin sleeps.
+**Decisión:** Dominio con tipos probados que prueban en `parse` (`ImageBytes`, `JobId` trim, `R2Key`, `Landmarks` 478 JSON, `GnmCoeffs` 253 finitos, `CameraParams` 12 finitos, `UvRegion` 1-5, `CompleteUv` / `Heatmap` con `UV_LEN`, `BaseUrl`, `TtlSecs`) y ciclo con estados separados.
+Errores taxonómicos `CoreError` (+ `ImageError`, `BaseUrlError`, `MlError`, `QueueError`, `InvalidCoeffs`, `InvalidCamera`, `FitFailed`) con mapeo fijo `AppError -> 400|404|500`.
+Goldens literales a mano (`Progress`, `TtlSecs`, `R2Key`, heatmap `[6,10]`, albedo `[116, 118, 70, 200]`), relojes manuales sin sleeps.
 
 **Contexto:** El diff mostraba `Vec<u8>` y `&str` sueltos cruzando seams (`enqueue(a,b)`, `stage: &str`, `job.status String`, `base_url String`).
 Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
@@ -200,7 +208,7 @@ Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
 **Consecuencias:**
 - `Queue` recibe `EnqueueCommand`, no bytes sueltos; `set_progress` exige `Stage`, no `&str`.
 - `EnqueuedJob` / `R2Keys` con campos privados y `is_r2_pointer()`.
-- `MlSidecarClient` devuelve `Landmarks` / `FlawUv` / `CompleteUv`, no `Vec<u8>`.
+- `MlSidecarClient` devuelve `Landmarks` / `FitResult` / `CompleteUv`, no `Vec<u8>`.
 - `workers_cpu` es infallible porque la prueba ya ocurrió en el borde.
 
 ### ADR-007 Edge GET lee Durable Object (no dummy)
@@ -226,7 +234,7 @@ Ningún artefacto se guarda en S3/Postgres persistente. `R2 lifecycle 60s` garan
 
 Local: `worker-cpu` y `worker-gpu` escalan independiente vía `docker compose --scale`.
 Prod: `Cloudflare Workers` autoescala edge a 0, `Modal` autoescala GPU `0 -> 100` con `10 GPU concurrency` en Starter free y `50` en Team, `1-2s` cold start.
-`FreeUV` es cuello de botella y debe tener `concurrency=1` por GPU para no OOM.
+`texture` es cuello de botella y debe tener `concurrency=1` por GPU para no OOM.
 `MediaPipe` puede tener `concurrency=4` en CPU.
 R2 y Queues escalan sin gestión (queues `10k ops/día free`, luego `$0.40/M ops`).
 

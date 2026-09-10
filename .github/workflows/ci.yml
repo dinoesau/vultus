@@ -55,8 +55,9 @@ jobs:
         run: ruff check backend/
       - name: python tests
         run: pytest backend/tests -q
-      - name: asset checks
-        run: python3 scripts/compute_bfm_to_gnm.py --check
+      # S9 retiro la LUT BFM (`bfm_to_gnm_v2.bin` borrado): el gate de assets
+      # via `compute_bfm_to_gnm.py --check` moria con `missing asset`.
+      # El template GNM lo cubre `test_template_con_cuentas_canonicas`.
 
       - uses: actions/setup-node@v4
         with:

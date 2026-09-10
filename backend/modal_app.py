@@ -3,18 +3,15 @@ Modal GPU workers para Vultus (Python + TypeScript).
 
 Arquitectura (sin Rust):
 - Python FastAPI es dueno de API local + cola en memoria + orquestador local
-  + Worker CPU (GNM bake, heatmap, report) via `backend/gnm.py` compartido.
-- Python aqui es sidecar ML GPU: MediaPipe / FLAME / FreeUV.
+  + Worker CPU (GNM assemble, heatmap, report) via `backend/gnm_assemble.py`.
+- Python aqui es sidecar ML GPU: MediaPipe / fit GNM / textura GNM.
   La API nunca importa torch/diffusers/mediapipe; los consume vía HTTP:
-  `MlSidecarClient { landmarks, flame, freeuv }` -> `POST /ml/*`.
+  `MlSidecarClient { landmarks, fit, texture }` -> `POST /ml/*`.
 
-Cadena real (deploy-real-models):
+Cadena GNM (plan-gnm-fit-texture-pbr):
 - landmarks: MediaPipe Tasks `face_landmarker.task`, 478 puntos.
-- flame: DECA encode/decode + `flame2023_Open.pkl` -> `uv_texture_gt`
-  256 (oclusiones visibles) redimensionada a 512 en este sidecar.
-- freeuv: SD v1-5 (`from_pretrained` + `subfolder="unet"`,
-  `safety_checker=None`) + `flaw_tolerant_facial_detail_extractor.bin`
-  + `uv_structure_aligner.bin` -> `complete-uv` 512 fotorrealista.
+- fit: fitter GNM directo -> 253 coefs + camara 3x4 (1060 bytes).
+- texture: proyeccion foto + warp TPS + inpaint solo ocluidas -> albedo 512.
 - Sin CUDA ni pesos, los dobles deterministas siguen respondiendo el
   mismo contrato para regresión rápida local (CPU).
 
@@ -39,6 +36,8 @@ import threading
 import time
 
 logger = logging.getLogger("vultus-ml-sidecar")
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
 
 # Canónicas: LANDMARKS_LEN 478, UV 512x512x3, UV_LEN 786432 (ver edge/contract.ts).
 # No duplicar literales 478 / 786432 en el código: usar estas consts.
@@ -47,22 +46,15 @@ UV_WIDTH = 512
 UV_HEIGHT = 512
 UV_CHANNELS = 3
 UV_LEN = UV_WIDTH * UV_HEIGHT * UV_CHANNELS  # 786432
-# FreeUV trabaja internamente a 256 (data-process config UV_SIZE);
-# el redimensionado a 512 vive en este sidecar antes de responder.
-FLAME_UV_SIZE = 256
-
 # Env con defaults seguros, nada hardcodeado.
 ML_PORT = int(os.environ.get("ML_PORT", "8081"))
 WEIGHTS_DIR = os.environ.get("WEIGHTS_DIR", "/weights")
-# Ruta de assets GNM (solo config nueva): LUT v2 + template en Volume.
-# Espejo de Rust include_bytes! (repo) para paridad local.
+# Ruta de assets GNM: template + islas en Volume.
 GNM_ASSETS_DIR = os.environ.get("GNM_ASSETS_DIR", os.path.join(WEIGHTS_DIR, "gnm"))
 # VULTUS_REAL_ML: 1 fuerza real, 0 fuerza dobles, auto decide por pesos+deps.
 REAL_MODE = os.environ.get("VULTUS_REAL_ML", "auto").lower()
-DECA_CODE_DIR = os.environ.get("DECA_CODE_DIR", os.path.join(WEIGHTS_DIR, "deca-code"))
-FREEUV_CODE_DIR = os.environ.get("FREEUV_CODE_DIR", os.path.join(WEIGHTS_DIR, "freeuv-code"))
 
-# Nombres exactos del bundle Fase 2 (contrato con Rust/UI).
+# Nombres del bundle (contrato con edge/contract.ts ZIP_MANIFEST).
 ZIP_UV_A = "uv_a.png"
 ZIP_UV_B = "uv_b.png"
 ZIP_HEATMAP = "heatmap.png"
@@ -75,16 +67,6 @@ try:
     logger.info("weights dir ready path=%s", WEIGHTS_DIR)
 except OSError as e:
     logger.warning("weights dir not writable path=%s err=%s", WEIGHTS_DIR, e)
-
-# Transform leve determinista para /ml/freeuv (eco +1 por byte, a nivel C).
-_FREEUV_TABLE = bytes((i + 1) % 256 for i in range(256))
-
-# Paso pesado sidecar: paridad local con max_containers=1.
-# En prod la serialización la impone Modal por réplica (web endpoint sin
-# @modal.concurrent = 1 input por container); aquí el semáforo
-# local evita OOM concurrente en Docker CPU. No usar semáforo en Rust.
-_FREEUV_SEMAPHORE = asyncio.Semaphore(1)
-
 
 def _is_jpeg(b: bytes) -> bool:
     return len(b) >= 3 and b[0] == 0xFF and b[1] == 0xD8 and b[2] == 0xFF
@@ -124,36 +106,7 @@ def _check_landmarks_json(raw: bytes) -> None:
                 raise ValueError("non-finite landmark")
 
 
-def _split_flame_payload(payload: bytes) -> tuple:
-    """Paridad con Rust FlamePayload::decode: u32 BE len + landmarks_json + image_bytes."""
-    if len(payload) < 4:
-        raise ValueError("flame payload <4 bytes")
-    n = int.from_bytes(payload[0:4], "big")
-    if len(payload) < 4 + n:
-        raise ValueError("flame payload truncated")
-    return payload[4 : 4 + n], payload[4 + n :]
-
-
-def _check_image_bytes(img: bytes) -> None:
-    if not img:
-        raise ValueError("empty image in flame payload")
-    if not (_is_jpeg(img) or _is_png(img)):
-        raise ValueError("unsupported image format, expected JPEG or PNG")
-
-
-def _deterministic_uv(seed: bytes) -> bytes:
-    """Doble determinista: expansión de sha256(seed) hasta UV_LEN bytes raw."""
-    digest = hashlib.sha256(seed).digest()
-    reps = UV_LEN // len(digest) + 1
-    return (digest * reps)[:UV_LEN]
-
-
-def _inpaint_uv(flaw: bytes) -> bytes:
-    """Eco con transform leve: simula inpaint manteniendo UV_LEN."""
-    return flaw.translate(_FREEUV_TABLE)
-
-
-# --- Inferencia real: MediaPipe + DECA + FreeUV tras el mismo contrato ---
+# --- Inferencia real: MediaPipe tras el mismo contrato ---
 # Todo import pesado es lazy dentro de los singletons: sin CUDA ni pesos el
 # módulo importa igual y sirve dobles. En prod el fallo es ruidoso (500 con
 # causa) en vez de devolver un doble silencioso: Error Hiding prohibido.
@@ -162,10 +115,6 @@ def _inpaint_uv(flaw: bytes) -> bytes:
 def _weights_present() -> bool:
     need = [
         os.path.join(WEIGHTS_DIR, "mediapipe", "face_landmarker.task"),
-        os.path.join(WEIGHTS_DIR, "flame", "flame2023_Open.pkl"),
-        os.path.join(WEIGHTS_DIR, "freeuv-checkpoints", "flaw_tolerant_facial_detail_extractor.bin"),
-        os.path.join(WEIGHTS_DIR, "freeuv-checkpoints", "uv_structure_aligner.bin"),
-        os.path.join(WEIGHTS_DIR, "sdv1-5", "model_index.json"),
     ]
     return all(os.path.exists(p) for p in need)
 
@@ -239,179 +188,6 @@ def _real_landmarks(image: bytes) -> bytes:
     return json.dumps(pts).encode("utf-8")
 
 
-_DECA_LOCK = threading.Lock()
-_DECA = None
-
-
-def _numpy_compat_shim():
-    """DECA es era numpy<1.24: restaura alias eliminados si faltan. Solo shim, sin lógica."""
-    import numpy as np
-
-    for old, new in (("float", "float64"), ("int", "int64"), ("bool", "bool_")):
-        if not hasattr(np, old) and hasattr(np, new):
-            setattr(np, old, getattr(np, new))
-
-
-def _deca_model():
-    """Singleton DECA en CUDA con FLAME 2023 Open. Lanza RuntimeError con causa."""
-    global _DECA
-    if _DECA is not None:
-        return _DECA
-    with _DECA_LOCK:
-        if _DECA is not None:
-            return _DECA
-        _numpy_compat_shim()
-        if DECA_CODE_DIR not in sys.path:
-            sys.path.insert(0, DECA_CODE_DIR)
-        if FREEUV_CODE_DIR not in sys.path:
-            sys.path.insert(0, FREEUV_CODE_DIR)
-        try:
-            import torch
-        except ImportError as e:
-            raise RuntimeError(f"torch missing: {e}") from e
-        if not torch.cuda.is_available():
-            raise RuntimeError("cuda unavailable, real flame needs GPU")
-        try:
-            from decalib.deca import DECA
-            from decalib.utils import config as deca_config
-        except ImportError as e:
-            raise RuntimeError(f"deca code missing in {DECA_CODE_DIR}: {e}") from e
-        flame_pkl = os.path.join(WEIGHTS_DIR, "flame", "flame2023_Open.pkl")
-        if not os.path.exists(flame_pkl):
-            raise RuntimeError(f"flame model missing: {flame_pkl}")
-        cfg = deca_config.cfg.clone()
-        cfg.deca_dir = DECA_CODE_DIR
-        cfg.model.flame_model_path = flame_pkl
-        # Sin modelo de textura (FLAME_albedo_from_BFM ausente del bundle):
-        # flaw-uv = remuestreo de la foto al UV 256 via geometria DECA+FLAME,
-        # con oclusiones visibles. El fitting sigue siendo DECA + Open.
-        cfg.model.use_tex = False
-        cfg.model.extract_tex = False
-        cfg.pretrained_modelpath = os.path.join(WEIGHTS_DIR, "deca", "deca_model.tar")
-        try:
-            _DECA = DECA(config=cfg, device="cuda")
-            _DECA.eval()
-        except Exception as e:
-            raise RuntimeError(f"deca init failed: {e}") from e
-        return _DECA
-
-
-def _real_flaw_uv(payload: bytes) -> bytes:
-    """flaw-uv real 512 RGB crudo con oclusiones. ValueError = 400, otro = 500."""
-    import numpy as np
-    import torch
-    from PIL import Image
-
-    lm_raw, img_raw = _split_flame_payload(payload)
-    _check_landmarks_json(lm_raw)
-    _check_image_bytes(img_raw)
-    pil = _pil_from_image_bytes(img_raw).resize((224, 224), Image.BILINEAR)
-    arr = (np.asarray(pil).astype(np.float32) / 255.0 - 0.5) / 0.5
-    ten = torch.from_numpy(arr.transpose(2, 0, 1)[None]).float().cuda()
-    deca = _deca_model()
-    with torch.no_grad():
-        codedict = deca.encode(ten)
-        codedict["images"] = ten
-        opdict, _vis = deca.decode(codedict)
-        if "uv_texture_gt" not in opdict:
-            raise RuntimeError(f"deca decode sin uv_texture_gt, claves={sorted(opdict.keys())}")
-        uv = opdict["uv_texture_gt"][0].clamp(0, 1)
-    out = Image.fromarray((uv.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8))
-    out = out.resize((UV_WIDTH, UV_HEIGHT), Image.BILINEAR).convert("RGB")
-    raw = out.tobytes()
-    assert len(raw) == UV_LEN, f"flaw-uv len {len(raw)} != {UV_LEN}"
-    return raw
-
-
-_PIPE_LOCK = threading.Lock()
-_PIPE = None
-
-
-def _freeuv_pipe():
-    """Singleton SD v1-5 + ControlNet + detail_encoder en CUDA. Lanza RuntimeError."""
-    global _PIPE
-    if _PIPE is not None:
-        return _PIPE
-    with _PIPE_LOCK:
-        if _PIPE is not None:
-            return _PIPE
-        if FREEUV_CODE_DIR not in sys.path:
-            sys.path.insert(0, FREEUV_CODE_DIR)
-        try:
-            import torch
-        except ImportError as e:
-            raise RuntimeError(f"torch missing: {e}") from e
-        if not torch.cuda.is_available():
-            raise RuntimeError("cuda unavailable, real freeuv needs GPU")
-        sdv = os.path.join(WEIGHTS_DIR, "sdv1-5")
-        enc = os.path.join(WEIGHTS_DIR, "image_encoder_l")
-        det = os.path.join(WEIGHTS_DIR, "freeuv-checkpoints", "flaw_tolerant_facial_detail_extractor.bin")
-        ali = os.path.join(WEIGHTS_DIR, "freeuv-checkpoints", "uv_structure_aligner.bin")
-        for p in (sdv, enc, det, ali):
-            if not os.path.exists(p):
-                raise RuntimeError(f"freeuv weight missing: {p}")
-        try:
-            from detail_encoder.encoder_freeuv import detail_encoder
-            from diffusers import ControlNetModel, DDIMScheduler
-            from diffusers import UNet2DConditionModel as UNet
-            from pipeline_sd15 import StableDiffusionControlNetPipeline
-        except ImportError as e:
-            raise RuntimeError(f"freeuv code missing in {FREEUV_CODE_DIR}: {e}") from e
-        try:
-            unet = UNet.from_pretrained(sdv, subfolder="unet").to("cuda")
-            aligner = ControlNetModel.from_unet(unet)
-            encoder = detail_encoder(unet, enc + "/", "cuda", dtype=torch.float32)
-            # torch>=2.6 usa weights_only=True por defecto: estos .bin son
-            # checkpoints propios (no solo tensores), forzar False como en 2.4.
-            aligner.load_state_dict(torch.load(ali, map_location="cpu", weights_only=False), strict=False)
-            encoder.load_state_dict(torch.load(det, map_location="cpu", weights_only=False), strict=False)
-            aligner.to("cuda")
-            encoder.to("cuda")
-            pipe = StableDiffusionControlNetPipeline.from_pretrained(
-                sdv, safety_checker=None, unet=unet, controlnet=aligner, torch_dtype=torch.float32
-            ).to("cuda")
-            pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-        except Exception as e:
-            raise RuntimeError(f"freeuv init failed: {e}") from e
-        _PIPE = (pipe, encoder)
-        return _PIPE
-
-
-def _real_complete_uv(flaw: bytes) -> bytes:
-    """complete-uv real 512 RGB. ValueError = 400 (longitud), otro = 500."""
-    import io as _io
-
-    import torch
-    from PIL import Image
-
-    if len(flaw) != UV_LEN:
-        raise ValueError(f"expected {UV_LEN} uv bytes, got {len(flaw)}")
-    pipe, encoder = _freeuv_pipe()
-    flaw_img = Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), flaw)
-    uv_template = os.path.join(WEIGHTS_DIR, "freeuv-resources", "uv.jpg")
-    if os.path.exists(uv_template):
-        uv_img = Image.open(uv_template).convert("RGB").resize((UV_WIDTH, UV_HEIGHT), Image.BILINEAR)
-    else:
-        uv_img = flaw_img
-    with torch.no_grad():
-        # 12 pasos: ~16s en T4 warm frente a ~26s con 20. El SLO warm (<20s
-        # p95 par) y el timeout Rust de 30s por cara lo exigen; la revision
-        # a ojo del golden congela la calidad a este valor.
-        out = encoder.generate(
-            uv_structure_image=uv_img,
-            flaw_uv_image=flaw_img,
-            pipe=pipe,
-            guidance_scale=1.4,
-            num_inference_steps=12,
-        )
-    if not isinstance(out, Image.Image):
-        out = Image.open(_io.BytesIO(bytes(out)))
-    out = out.resize((UV_WIDTH, UV_HEIGHT), Image.BILINEAR).convert("RGB")
-    raw = out.tobytes()
-    assert len(raw) == UV_LEN, f"complete-uv len {len(raw)} != {UV_LEN}"
-    return raw
-
-
 def _impl_landmarks(body: bytes) -> bytes:
     if not body:
         raise ValueError("empty body")
@@ -422,23 +198,56 @@ def _impl_landmarks(body: bytes) -> bytes:
     return _deterministic_landmarks(body)
 
 
-def _impl_flame(payload: bytes) -> bytes:
-    if _use_real():
-        return _real_flaw_uv(payload)
-    lm_raw, img_raw = _split_flame_payload(payload)
-    _check_landmarks_json(lm_raw)
-    _check_image_bytes(img_raw)
-    out = _deterministic_uv(payload)
-    assert len(out) == UV_LEN
-    return out
+def _impl_fit(payload: bytes) -> bytes:
+    """Delega al modulo `gnm_fit`: fit-request -> 1060 bytes (253f + 12f LE)."""
+    try:
+        from backend.domain import Err as _Err
+        from backend.domain import FitFailed as _FitFailed
+        from backend.domain import domain_to_message as _msg
+        from backend.gnm_fit import fit_gnm_from_request
+        from backend.pipeline_local import encode_fit_result
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _Err  # type: ignore[no-redef]
+        from domain import FitFailed as _FitFailed  # type: ignore[no-redef]
+        from domain import domain_to_message as _msg  # type: ignore[no-redef]
+        from gnm_fit import fit_gnm_from_request  # type: ignore[no-redef]
+        from pipeline_local import encode_fit_result  # type: ignore[no-redef]
+
+    result = fit_gnm_from_request(payload)
+    if isinstance(result, _Err):
+        if isinstance(result.error, _FitFailed):
+            raise RuntimeError(_msg(result.error))
+        raise ValueError(_msg(result.error))
+    return encode_fit_result(result.value)
 
 
-def _impl_freeuv(body: bytes) -> bytes:
-    if _use_real():
-        return _real_complete_uv(body)
-    if len(body) != UV_LEN:
-        raise ValueError(f"expected {UV_LEN} uv bytes, got {len(body)}")
-    out = _inpaint_uv(body)
+def _impl_texture(payload: bytes) -> bytes:
+    """Delega a `gnm_texture.build_albedo`: texture-request -> UV_LEN bytes."""
+    try:
+        from backend.domain import Err as _Err2
+        from backend.domain import FitFailed as _FitFailed2
+        from backend.domain import MlFailed as _MlFailed2
+        from backend.domain import domain_to_message as _msgT
+        from backend.gnm_texture import build_albedo
+        from backend.pipeline_local import decode_texture_request
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _Err2  # type: ignore[no-redef]
+        from domain import FitFailed as _FitFailed2  # type: ignore[no-redef]
+        from domain import MlFailed as _MlFailed2  # type: ignore[no-redef]
+        from domain import domain_to_message as _msgT  # type: ignore[no-redef]
+        from gnm_texture import build_albedo  # type: ignore[no-redef]
+        from pipeline_local import decode_texture_request  # type: ignore[no-redef]
+
+    decoded = decode_texture_request(payload)
+    if isinstance(decoded, _Err2):
+        raise ValueError(_msgT(decoded.error))
+    image, fit, landmarks = decoded.value
+    result = build_albedo(image, fit, landmarks)
+    if isinstance(result, _Err2):
+        if isinstance(result.error, (_FitFailed2, _MlFailed2)):
+            raise RuntimeError(_msgT(result.error))
+        raise ValueError(_msgT(result.error))
+    out = result.value.as_bytes()
     assert len(out) == UV_LEN
     return out
 
@@ -459,8 +268,8 @@ if HAVE_MODAL:
     # no reconstruyen nada (<60s). Solo cambian la imagen los cambios a esta
     # receta o a requirements.txt. Paridad con Dockerfile.gpu (uso local):
     # misma base devel, mismos paquetes, mismo orden torch primero.
-    # Base devel (no runtime): pytorch3d se compila desde source y sin nvcc
-    # queda solo-CPU -> `_C.rasterize_meshes` falla sin GPU en /ml/flame.
+    # Base devel (no runtime): el rasterizador CUDA se compila desde source;
+    # sin nvcc quedaria solo-CPU.
     # Deploys estrictamente secuenciales: dos builds concurrentes no comparten
     # cache y ambos pagan el build completo.
     image = (
@@ -484,13 +293,13 @@ if HAVE_MODAL:
         )
         # Codigo compartido en la imagen: Modal solo monta `modal_app.py`;
         # sin esto el consumer muere con ModuleNotFoundError al importar
-        # `backend.domain` / `backend.gnm` en bake/heatmap/GLB/zip.
+        # `backend.domain` / `backend.gnm_assemble` en heatmap/GLB/zip.
         # Solo .py (los .bin viven en el Volume). Al final para no
         # invalidar las capas pesadas de torch.
         .add_local_python_source("backend")
     )
 
-    # Volume para cachear pesos FreeUV / FLAME / GNM (evita re-descarga en cold start)
+    # Volume para cachear pesos MediaPipe / GNM (evita re-descarga en cold start)
     weights = modal.Volume.from_name("vultus-weights", create_if_missing=True)
 else:
     app = None  # type: ignore
@@ -499,20 +308,20 @@ else:
 
 # Secrets: Cloudflare R2 + Queues creds
 # modal secret create vultus-cloudflare CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... CLOUDFLARE_QUEUE_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=vultus-jobs VULTUS_API_URL=https://api.vultus.esau.com.mx
-# Timeouts espejo de PipelineConfig Rust (5+10+30+60=TTL). Sin magic numbers sueltos.
+# Timeouts espejo de PipelineConfig S10 (5+10+30 dentro de TTL 60).
+# Base: fit doble p95 local <1s; T4 real pendiente Step 4, el total no se mueve.
 LANDMARKS_TIMEOUT_SECS = 5
-FLAME_TIMEOUT_SECS = 10
-FREEUV_TIMEOUT_SECS = 30
+FIT_TIMEOUT_SECS = 10
+TEXTURE_TIMEOUT_SECS = 30
 TOTAL_TIMEOUT_SECS = 60
 # Visibilidad del mensaje en cola: cubre la cadena fria (~90-120s) para que
 # un job frio no se reentregue y se procese duplicado. Espejo del consumer
 # HTTP pull de la cola (visibility_timeout_ms 180000, batch 2, retries 2).
 QUEUE_VISIBILITY_TIMEOUT_SECS = 180
-# Progreso canonico espejo de pipeline.rs run_pair_inner.
-PROGRESS_LANDMARKS = 0.15
-PROGRESS_FLAME = 0.40
-PROGRESS_FREEUV = 0.75
-PROGRESS_BAKE = 0.95
+# Progreso canonico espejo de pipeline run_pair (etapas GNM).
+PROGRESS_FIT = 0.40
+PROGRESS_TEXTURE = 0.75
+PROGRESS_ASSEMBLE = 0.95
 PROGRESS_DONE = 1.0
 
 
@@ -634,101 +443,6 @@ def _heatmap_abs_diff(uv_a: bytes, uv_b: bytes) -> bytes:
 
 
 
-def _repo_assets_dir() -> str:
-    try:
-        from backend import gnm as _gnm
-    except ImportError:
-        import gnm as _gnm  # type: ignore[no-redef]
-    return _gnm._assets_dir()
-
-
-def _resolve_asset(name: str) -> str:
-    try:
-        from backend import gnm as _gnm2
-    except ImportError:
-        import gnm as _gnm2  # type: ignore[no-redef]
-    return _gnm2._resolve_asset(name)
-
-
-_TEMPLATE_VERTS = 4225
-_TEMPLATE_TRIS = 8192
-_LUT_V2_LEN = 512 * 512 * 16
-_TEMPLATE_CACHE = None
-_LUT_V2_CACHE = None
-_BAKE_CACHE = None
-
-
-def _load_template():
-    try:
-        from backend import gnm as _gnm3
-    except ImportError:
-        import gnm as _gnm3  # type: ignore[no-redef]
-    return _gnm3.load_template()
-
-
-def _load_lut_v2() -> bytes:
-    try:
-        from backend import gnm as _gnm4
-    except ImportError:
-        import gnm as _gnm4  # type: ignore[no-redef]
-    return _gnm4.load_lut_v2()
-
-
-def _bake_tables():
-    try:
-        from backend import gnm as _gnm5
-    except ImportError:
-        import gnm as _gnm5  # type: ignore[no-redef]
-    return _gnm5._bake_tables()
-
-
-def _bake_bfm_to_gnm(uv_bfm: bytes) -> bytes:
-    """Delega al modulo CPU compartido `gnm` (unica fuente, sin duplicar)."""
-    if len(uv_bfm) != UV_LEN:
-        raise ValueError(f"bake needs {UV_LEN} bytes, got {len(uv_bfm)}")
-    try:
-        from backend.domain import Ok as _Ok2
-        from backend.domain import parse_complete_uv as _parse_uv2
-        from backend.gnm import bake_bfm_to_gnm as _shared_bake
-    except ImportError:
-        from domain import Ok as _Ok2  # type: ignore[no-redef]
-        from domain import parse_complete_uv as _parse_uv2  # type: ignore[no-redef]
-        from gnm import bake_bfm_to_gnm as _shared_bake  # type: ignore[no-redef]
-    parsed = _parse_uv2(bytes(uv_bfm))
-    assert isinstance(parsed, _Ok2)
-    return bytes(_shared_bake(parsed.value).as_bytes())
-
-def _build_gnm_glb(baked: bytes) -> bytes:
-    """Delega al modulo CPU compartido `gnm` (unica fuente, sin duplicar)."""
-    if len(baked) != UV_LEN:
-        raise ValueError(f"glb needs {UV_LEN} baked bytes, got {len(baked)}")
-    try:
-        from backend.domain import Ok as _Ok3
-        from backend.domain import parse_complete_uv as _parse_uv3
-        from backend.gnm import build_gnm_glb as _shared_glb
-    except ImportError:
-        from domain import Ok as _Ok3  # type: ignore[no-redef]
-        from domain import parse_complete_uv as _parse_uv3  # type: ignore[no-redef]
-        from gnm import build_gnm_glb as _shared_glb  # type: ignore[no-redef]
-    parsed3 = _parse_uv3(bytes(baked))
-    assert isinstance(parsed3, _Ok3)
-    return bytes(_shared_glb(parsed3.value).as_bytes())
-
-def _png_from_uv_raw(raw: bytes):
-    from PIL import Image
-
-    if len(raw) != UV_LEN:
-        raise ValueError(f"expected {UV_LEN} uv bytes, got {len(raw)}")
-    return Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), raw)
-
-
-def _build_result_zip(uv_a_png: bytes, uv_b_png: bytes, heat_png: bytes, mesh_a: bytes, mesh_b: bytes) -> bytes:
-    """Delega al modulo CPU compartido `gnm` (unica fuente, sin duplicar)."""
-    try:
-        from backend.gnm import build_result_zip as _shared_zip
-    except ImportError:
-        from gnm import build_result_zip as _shared_zip  # type: ignore[no-redef]
-    return bytes(_shared_zip(bytes(uv_a_png), bytes(uv_b_png), bytes(heat_png), bytes(mesh_a), bytes(mesh_b)))
 
 
 def mediapipe_infer(job_id: str, image: bytes) -> bytes:
@@ -740,39 +454,61 @@ def mediapipe_infer(job_id: str, image: bytes) -> bytes:
     return out
 
 
-def flame_infer(job_id: str, image: bytes, landmarks_json: bytes) -> bytes:
-    """Nucleo fitting real: payload u32 BE + landmarks + imagen -> flaw-uv 512."""
+def fit_infer(job_id: str, payload: bytes) -> bytes:
+    """Nucleo fit GNM: fit-request -> 1060 bytes (253 coefs + 12 camara)."""
     t0 = time.perf_counter()
+    out = _impl_fit(payload)
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("fit ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
+    return out
+
+
+def texture_infer(job_id: str, payload: bytes) -> bytes:
+    """Nucleo textura GNM: texture-request -> albedo UV_LEN."""
+    t0 = time.perf_counter()
+    out = _impl_texture(payload)
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("texture ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
+    return out
+
+
+def fit_worker(job_id: str, r2_key: str, landmarks_json: bytes):
+    """Worker fit - GNM fitting directo (GPU, 1 input por GPU). Lee imagen de R2."""
+    t0 = time.perf_counter()
+    bucket = _r2_bucket()
+    image = _fetch_r2_bytes(bucket, r2_key)
     n = len(landmarks_json)
     payload = n.to_bytes(4, "big") + landmarks_json + image
-    out = _real_flaw_uv(payload)
+    out = fit_infer(job_id, payload)
     dt = int((time.perf_counter() - t0) * 1000)
-    logger.info("flame ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
+    logger.info("fit_worker ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
     return out
-
-
-def freeuv_infer(job_id: str, flaw_uv: bytes) -> bytes:
-    """Nucleo inpainting real: flaw-uv -> complete-uv 512."""
-    t0 = time.perf_counter()
-    out = _real_complete_uv(flaw_uv)
-    dt = int((time.perf_counter() - t0) * 1000)
-    logger.info("freeuv ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
-    return out
-
-
-def freeuv_worker(job_id: str, flaw_uv: bytes):
-    """
-    Worker 3 - FreeUV SD1.5 inpainting (GPU, estrictamente 1 input por GPU).
-    Entrada: flaw-uv 786432 bytes. Salida: complete-uv 786432 bytes.
-    Pool de 2 contenedores para paralelizar cara A/B del mismo job;
-    cada container procesa 1 input (sin @modal.concurrent = sin OOM).
-    Llama inferencia real, nunca doble silencioso.
-    """
-    return freeuv_infer(job_id, flaw_uv)
 
 
 if HAVE_MODAL:
-    freeuv_worker = app.function(
+    fit_worker = app.function(
+        image=image,
+        gpu="T4",
+        cpu=4,
+        memory=32768,
+        volumes={"/weights": weights},
+        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU
+        timeout=60,
+    )(fit_worker)
+
+
+def texture_worker(job_id: str, payload: bytes):
+    """
+    Worker textura - proyeccion + warp + inpaint solo ocluidas (GPU).
+    Entrada: texture-request. Salida: albedo UV_LEN bytes.
+    Pool de 2 contenedores para paralelizar cara A/B del mismo job.
+    """
+    return texture_infer(job_id, payload)
+
+
+if HAVE_MODAL:
+    texture_worker = app.function(
         image=image,
         gpu="T4",
         cpu=2,
@@ -782,31 +518,7 @@ if HAVE_MODAL:
         max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU (anti-OOM)
         timeout=60,
         min_containers=0,
-    )(freeuv_worker)
-
-
-def flame_worker(job_id: str, r2_key: str, landmarks_json: bytes):
-    """Worker 2 - FLAME fitting DECA+Open (GPU, 1 input por GPU). Lee imagen de R2."""
-    t0 = time.perf_counter()
-    bucket = _r2_bucket()
-    image = _fetch_r2_bytes(bucket, r2_key)
-    out = flame_infer(job_id, image, landmarks_json)
-    dt = int((time.perf_counter() - t0) * 1000)
-    logger.info("flame_worker ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
-    return out
-
-
-if HAVE_MODAL:
-    flame_worker = app.function(
-        image=image,
-        gpu="T4",
-        cpu=4,
-        memory=32768,
-        volumes={"/weights": weights},
-        secrets=[modal.Secret.from_name("vultus-cloudflare")],
-        max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU
-        timeout=60,
-    )(flame_worker)
+    )(texture_worker)
 
 
 def mediapipe_worker(job_id: str, r2_key: str):
@@ -920,7 +632,7 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
     if not _job_alive(job_id):
         logger.info("job ya terminal antes de empezar job=%s, se omite", job_id)
         return
-    _report_progress(job_id, PROGRESS_LANDMARKS, "landmarks")
+    _report_progress(job_id, PROGRESS_FIT, "fit")
     r2 = _r2_client()
     img_a = r2.get_object(Bucket=bucket, Key=r2_a)["Body"].read()
     img_b = r2.get_object(Bucket=bucket, Key=r2_b)["Body"].read()
@@ -948,57 +660,97 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
     _check_landmarks_json(lm_b)
     if not _job_alive(job_id):
         raise _ExpiredAbort(f"job expiro durante landmarks job={job_id}")
-    _report_progress(job_id, PROGRESS_FLAME, "flame")
+    _report_progress(job_id, PROGRESS_FIT, "fit")
 
-    if _is_modal_function(flame_worker):
+    def _fit_payload(image: bytes, landmarks_json: bytes) -> bytes:
+        n = len(landmarks_json)
+        return n.to_bytes(4, "big") + landmarks_json + image
+
+    if _is_modal_function(fit_worker):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(flame_worker.remote, job_id, r2_a, lm_a)
-            fut_b = ex.submit(flame_worker.remote, job_id, r2_b, lm_b)
-            flaw_a = fut_a.result(timeout=FLAME_TIMEOUT_SECS + 50)
-            flaw_b = fut_b.result(timeout=FLAME_TIMEOUT_SECS + 50)
+            fut_a = ex.submit(fit_worker.remote, job_id, r2_a, lm_a)
+            fut_b = ex.submit(fit_worker.remote, job_id, r2_b, lm_b)
+            fit_a = fut_a.result(timeout=FIT_TIMEOUT_SECS + 50)
+            fit_b = fut_b.result(timeout=FIT_TIMEOUT_SECS + 50)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(flame_infer, job_id, img_a, lm_a)
-            fut_b = ex.submit(flame_infer, job_id, img_b, lm_b)
-            flaw_a = fut_a.result(timeout=FLAME_TIMEOUT_SECS + 50)
-            flaw_b = fut_b.result(timeout=FLAME_TIMEOUT_SECS + 50)
-    if len(flaw_a) != UV_LEN or len(flaw_b) != UV_LEN:
-        raise ValueError("flaw-uv bad length")
+            fut_a = ex.submit(fit_infer, job_id, _fit_payload(img_a, lm_a))
+            fut_b = ex.submit(fit_infer, job_id, _fit_payload(img_b, lm_b))
+            fit_a = fut_a.result(timeout=FIT_TIMEOUT_SECS + 50)
+            fit_b = fut_b.result(timeout=FIT_TIMEOUT_SECS + 50)
+    try:
+        from backend.pipeline_local import FIT_RESULT_LEN
+    except ImportError:
+        FIT_RESULT_LEN = 1060
+    if len(fit_a) != FIT_RESULT_LEN or len(fit_b) != FIT_RESULT_LEN:
+        raise ValueError("fit result bad length")
     if not _job_alive(job_id):
-        raise _ExpiredAbort(f"job expiro durante flame job={job_id}")
-    _report_progress(job_id, PROGRESS_FREEUV, "freeuv")
+        raise _ExpiredAbort(f"job expiro durante fit job={job_id}")
+    _report_progress(job_id, PROGRESS_TEXTURE, "texture")
 
-    if _is_modal_function(freeuv_worker):
+    pay_a = _fit_payload(img_a, lm_a)
+    pay_b = _fit_payload(img_b, lm_b)
+    tex_a = len(pay_a).to_bytes(4, "big") + pay_a + bytes(fit_a)
+    tex_b = len(pay_b).to_bytes(4, "big") + pay_b + bytes(fit_b)
+    if _is_modal_function(texture_worker):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(freeuv_worker.remote, job_id, flaw_a)
-            fut_b = ex.submit(freeuv_worker.remote, job_id, flaw_b)
-            uv_a = fut_a.result(timeout=FREEUV_TIMEOUT_SECS + 30)
-            uv_b = fut_b.result(timeout=FREEUV_TIMEOUT_SECS + 30)
+            fut_a = ex.submit(texture_worker.remote, job_id, tex_a)
+            fut_b = ex.submit(texture_worker.remote, job_id, tex_b)
+            uv_a = fut_a.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
+            uv_b = fut_b.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(freeuv_infer, job_id, flaw_a)
-            fut_b = ex.submit(freeuv_infer, job_id, flaw_b)
-            uv_a = fut_a.result(timeout=FREEUV_TIMEOUT_SECS + 30)
-            uv_b = fut_b.result(timeout=FREEUV_TIMEOUT_SECS + 30)
+            fut_a = ex.submit(texture_infer, job_id, tex_a)
+            fut_b = ex.submit(texture_infer, job_id, tex_b)
+            uv_a = fut_a.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
+            uv_b = fut_b.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
     if len(uv_a) != UV_LEN or len(uv_b) != UV_LEN:
-        raise ValueError("complete-uv bad length")
-    _report_progress(job_id, PROGRESS_BAKE, "bake")
+        raise ValueError("albedo bad length")
+    _report_progress(job_id, PROGRESS_ASSEMBLE, "assemble")
 
-    t_bake = time.perf_counter()
+    t_assemble = time.perf_counter()
+    try:
+        from backend.domain import Ok as _OkA
+        from backend.domain import parse_complete_uv as _parse_uv_a
+        from backend.gnm_assemble import build_full_zip as _full_zip
+        from backend.gnm_assemble import build_personalized_glb as _glb
+        from backend.gnm_assemble import pbr_from_albedo as _pbr
+        from backend.pipeline_local import parse_fit_result as _parse_fit
+    except ImportError:
+        from domain import Ok as _OkA  # type: ignore[no-redef]
+        from domain import parse_complete_uv as _parse_uv_a  # type: ignore[no-redef]
+        from gnm_assemble import build_full_zip as _full_zip  # type: ignore[no-redef]
+        from gnm_assemble import (
+            build_personalized_glb as _glb,  # type: ignore[no-redef]
+        )
+        from gnm_assemble import pbr_from_albedo as _pbr  # type: ignore[no-redef]
+        from pipeline_local import (
+            parse_fit_result as _parse_fit,  # type: ignore[no-redef]
+        )
+    ra_fit = _parse_fit(bytes(fit_a))
+    rb_fit = _parse_fit(bytes(fit_b))
+    ra_uv = _parse_uv_a(bytes(uv_a))
+    rb_uv = _parse_uv_a(bytes(uv_b))
+    assert isinstance(ra_fit, _OkA) and isinstance(rb_fit, _OkA)
+    assert isinstance(ra_uv, _OkA) and isinstance(rb_uv, _OkA)
     heat = _heatmap_abs_diff(bytes(uv_a), bytes(uv_b))
-    baked_a = _bake_bfm_to_gnm(bytes(uv_a))
-    baked_b = _bake_bfm_to_gnm(bytes(uv_b))
-    mesh_a = _build_gnm_glb(baked_a)
-    mesh_b = _build_gnm_glb(baked_b)
-    bake_ms = int((time.perf_counter() - t_bake) * 1000)
+    r_mesh_a = _glb(ra_fit.value, ra_uv.value)
+    r_mesh_b = _glb(rb_fit.value, rb_uv.value)
+    r_pbr_a = _pbr(ra_uv.value)
+    r_pbr_b = _pbr(rb_uv.value)
+    assert isinstance(r_mesh_a, _OkA) and isinstance(r_mesh_b, _OkA)
+    assert isinstance(r_pbr_a, _OkA) and isinstance(r_pbr_b, _OkA)
+    mesh_a = bytes(r_mesh_a.value.as_bytes())
+    mesh_b = bytes(r_mesh_b.value.as_bytes())
+    assemble_ms = int((time.perf_counter() - t_assemble) * 1000)
     logger.info(
-        "bake gnm done job=%s bake_ms=%d mesh_a_len=%d mesh_b_len=%d",
+        "assemble gnm done job=%s assemble_ms=%d mesh_a_len=%d mesh_b_len=%d",
         job_id,
-        bake_ms,
+        assemble_ms,
         len(mesh_a),
         len(mesh_b),
     )
-    # PNG + zip en memoria, sin disco. Nombres exactos del contrato (5 archivos).
+    # PNG + zip en memoria, sin disco. Nombres del manifiesto versionado (7 archivos).
     import io as _io
 
     from PIL import Image
@@ -1009,7 +761,15 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
         img.save(buf, format="PNG")
         return buf.getvalue()
 
-    zip_bytes = _build_result_zip(_to_png(uv_a), _to_png(uv_b), _to_png(heat), mesh_a, mesh_b)
+    zip_bytes = _full_zip(
+        _to_png(uv_a),
+        _to_png(uv_b),
+        _to_png(heat),
+        mesh_a,
+        mesh_b,
+        _to_png(r_pbr_a.value),
+        _to_png(r_pbr_b.value),
+    )
     r2.put_object(Bucket=bucket, Key=f"jobs/{job_id}/result.zip", Body=zip_bytes, ContentType="application/zip")
     _report_progress(job_id, PROGRESS_DONE, "done")
     dt = int((time.perf_counter() - t0) * 1000)
@@ -1085,9 +845,9 @@ if HAVE_MODAL:
     )(queue_pull_consumer)
 
 
-# --- Sidecar HTTP consumido por Rust (MlSidecarClient) ---
+# --- Sidecar HTTP consumido por el pipeline (MlSidecarClient) ---
 # Mismo contrato en Modal (@app.function con web_endpoint) y en local
-# (`python modal_app.py --serve`). Rust envía bytes, recibe bytes.
+# (`python modal_app.py --serve`). El pipeline envía bytes, recibe bytes.
 # Nunca se expone fuera del VPC/prod interno; sin auth externa.
 # Endpoints delgados: delegan a _impl_* (dobles o inferencia real según
 # pesos+env). El ML pesado corre en hilo para no bloquear el loop.
@@ -1118,34 +878,18 @@ try:
         job_id = request.headers.get("X-Job-Id", "unknown")
         return await _run_impl(job_id, "landmarks", _impl_landmarks, body)
 
-    @sidecar.post("/ml/flame")
-    async def http_flame(request: Request):
+    @sidecar.post("/ml/fit")
+    async def http_fit(request: Request):
         payload = await request.body()
         job_id = request.headers.get("X-Job-Id", "unknown")
-        return await _run_impl(job_id, "flame", _impl_flame, payload)
+        return await _run_impl(job_id, "fit", _impl_fit, payload)
 
-    @sidecar.post("/ml/freeuv")
-    async def http_freeuv(request: Request):
-        body = await request.body()
+    @sidecar.post("/ml/texture")
+    async def http_texture(request: Request):
+        payload = await request.body()
         job_id = request.headers.get("X-Job-Id", "unknown")
-        if not _use_real() and len(body) != UV_LEN:
-            return JSONResponse(
-                status_code=400,
-                content={"detail": f"expected {UV_LEN} uv bytes, got {len(body)}"},
-            )
-        if _use_real():
-            return await _run_impl(job_id, "freeuv", _impl_freeuv, body)
-        try:
-            async with _FREEUV_SEMAPHORE:
-                out = await asyncio.to_thread(_impl_freeuv, body)
-        except ValueError as e:
-            return JSONResponse(status_code=400, content={"detail": str(e)})
-        except Exception as e:
-            logger.exception("freeuv failed job=%s", job_id)
-            return JSONResponse(status_code=500, content={"detail": str(e)})
-        assert len(out) == UV_LEN
-        logger.info("freeuv ok job=%s in_len=%d out_len=%d", job_id, len(body), len(out))
-        return Response(content=out, media_type="application/octet-stream")
+        return await _run_impl(job_id, "texture", _impl_texture, payload)
+
 except ImportError:  # Entorno sin fastapi: solo dobles vía _impl_* (tests unitarios)
     sidecar = None  # type: ignore
 
@@ -1161,7 +905,7 @@ if HAVE_MODAL:
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
         # Sin @modal.concurrent: 1 input por container = una inferencia
         # pesada por GPU, sin OOM. max_containers=10 (Starter).
-        # buffer_containers=1 absorbe la rafaga A/B de Rust en paralelo.
+        # buffer_containers=1 absorbe la rafaga A/B del pipeline en paralelo.
         max_containers=10,
         buffer_containers=1,
         timeout=600,  # red amplia: la primera llamada paga cold + carga de pesos
@@ -1170,14 +914,13 @@ if HAVE_MODAL:
     class MlSidecar:
         @modal.enter()
         def warm(self):
-            # Precalienta los tres modelos al arrancar el container para que
-            # el primer request ya este en warm (el timeout Rust de 5s en
-            # landmarks no perdona la carga lazy de TFLite/CUDA).
-            # Sin fastapi aqui: importa pesado lazy igual que en remoto.
+            # Precalienta MediaPipe al arrancar el container para que
+            # el primer request ya este en warm (el timeout de 5s en
+            # landmarks no perdona la carga lazy de TFLite).
+            # El fitter GNM real se cablea en Step 4 (dobles hasta entonces).
             _landmarker()
-            _deca_model()
-            _freeuv_pipe()
-            logger.info("sidecar warm: mediapipe+deca+freeuv cargados")
+            logger.info("sidecar warm: mediapipe cargado")
+
 
         @modal.asgi_app()
         def app(self):

@@ -14,10 +14,9 @@ export const TTL_MAX_SECS = 3600;
 
 export const STAGES = [
   "queued",
-  "landmarks",
-  "flame",
-  "freeuv",
-  "bake",
+  "fit",
+  "texture",
+  "assemble",
   "done",
 ] as const;
 export type StageName = (typeof STAGES)[number];
@@ -29,13 +28,39 @@ export const STATUSES = ["queued", "processing", "done", "failed", "expired"] as
 export type JobStatus = (typeof STATUSES)[number];
 export type JobStatusError = { readonly kind: "InvalidStatus" };
 
-// Hitos de progreso del pipeline (espejo de backend/domain.py).
+// Hitos de progreso del pipeline GNM (espejo de backend/domain.py).
 // Fuente TS unica: el pipeline Python los importa como literales del contrato.
-export const PROGRESS_LANDMARKS = 0.15;
-export const PROGRESS_FLAME = 0.4;
-export const PROGRESS_FREEUV = 0.75;
-export const PROGRESS_BAKE = 0.95;
+export const PROGRESS_FIT = 0.4;
+export const PROGRESS_TEXTURE = 0.75;
+export const PROGRESS_ASSEMBLE = 0.95;
 export const PROGRESS_DONE = 1.0;
+
+// Islas UV GNM publicas (1-5). Mas alla es investigacion fuera de alcance.
+export const GNM_ISLANDS = [1, 2, 3, 4, 5] as const;
+export type GnmIsland = (typeof GNM_ISLANDS)[number];
+
+// Manifiesto zip versionado: fuente unica que Python espeja.
+// Albedo/mesh/heatmap conservan nombre salvo conflicto; PBR viaja en el zip.
+export const ZIP_MANIFEST = {
+  uvA: "uv_a.png",
+  uvB: "uv_b.png",
+  heat: "heatmap.png",
+  meshA: "mesh_a.glb",
+  meshB: "mesh_b.glb",
+  pbrA: "pbr_a.png",
+  pbrB: "pbr_b.png",
+} as const;
+
+export const ZIP_NAMES = [
+  ZIP_MANIFEST.uvA,
+  ZIP_MANIFEST.uvB,
+  ZIP_MANIFEST.heat,
+  ZIP_MANIFEST.meshA,
+  ZIP_MANIFEST.meshB,
+  ZIP_MANIFEST.pbrA,
+  ZIP_MANIFEST.pbrB,
+] as const;
+export type ZipName = (typeof ZIP_NAMES)[number];
 
 export type Result<T, E> =
   | { readonly ok: true; readonly value: T }

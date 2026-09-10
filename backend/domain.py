@@ -59,24 +59,32 @@ ZIP_MESH_B = "mesh_b.glb"
 
 ZIP_NAMES = (ZIP_UV_A, ZIP_UV_B, ZIP_HEATMAP, ZIP_MESH_A, ZIP_MESH_B)
 
-PROGRESS_LANDMARKS = 0.15
-PROGRESS_FLAME = 0.40
-PROGRESS_FREEUV = 0.75
-PROGRESS_BAKE = 0.95
+# GNM fit directo: 253 coeficientes finitos + camara 3x4 (12 finitos).
+GNM_COEFFS_LEN = 253
+CAMERA_PARAMS_LEN = 12
+
+# Islas UV GNM publicas (1-5). Mas alla es investigacion fuera de alcance.
+UV_ISLAND_MIN = 1
+UV_ISLAND_MAX = 5
+
 PROGRESS_DONE = 1.0
 
+# Hitos GNM (espejo de edge/contract.ts): fit, texture, assemble.
+PROGRESS_FIT = 0.40
+PROGRESS_TEXTURE = 0.75
+PROGRESS_ASSEMBLE = 0.95
+
 LANDMARKS_TIMEOUT_SECS = 5
-FLAME_TIMEOUT_SECS = 10
-FREEUV_TIMEOUT_SECS = 30
+FIT_TIMEOUT_SECS = 10
+TEXTURE_TIMEOUT_SECS = 30
 TOTAL_TIMEOUT_SECS = 60
 
 
 class Stage(str, Enum):
     QUEUED = "queued"
-    LANDMARKS = "landmarks"
-    FLAME = "flame"
-    FREEUV = "freeuv"
-    BAKE = "bake"
+    FIT = "fit"
+    TEXTURE = "texture"
+    ASSEMBLE = "assemble"
     DONE = "done"
 
     def as_str(self) -> str:
@@ -195,6 +203,21 @@ class InvalidBaseUrl:
 
 
 @dataclass(frozen=True, slots=True)
+class InvalidCoeffs:
+    detail: str = "invalid gnm coeffs"
+
+
+@dataclass(frozen=True, slots=True)
+class InvalidCamera:
+    detail: str = "invalid camera params"
+
+
+@dataclass(frozen=True, slots=True)
+class FitFailed:
+    detail: MlError
+
+
+@dataclass(frozen=True, slots=True)
 class EmptyPayload:
     detail: str = "empty payload"
 
@@ -219,19 +242,22 @@ DomainError: TypeAlias = (
     | InvalidJobId
     | InvalidProgress
     | InvalidBaseUrl
+    | InvalidCoeffs
+    | InvalidCamera
     | EmptyPayload
     | MlFailed
+    | FitFailed
     | NotFound
     | Invariant
 )
 
 
 def domain_to_status(error: DomainError) -> int:
-    if isinstance(error, (InvalidImage, InvalidJobId, InvalidProgress, InvalidBaseUrl, EmptyPayload)):
+    if isinstance(error, (InvalidImage, InvalidJobId, InvalidProgress, InvalidBaseUrl, EmptyPayload, InvalidCoeffs, InvalidCamera)):
         return 400
     if isinstance(error, NotFound):
         return 404
-    if isinstance(error, (MlFailed, Invariant)):
+    if isinstance(error, (MlFailed, FitFailed, Invariant)):
         return 500
     assert_never(error)
 
@@ -248,11 +274,15 @@ def domain_to_message(error: DomainError) -> str:
         return "invalid progress"
     if isinstance(error, InvalidBaseUrl):
         return f"invalid base_url: {error.detail.detail}"
+    if isinstance(error, InvalidCoeffs):
+        return "invalid gnm coeffs"
+    if isinstance(error, InvalidCamera):
+        return "invalid camera params"
     if isinstance(error, EmptyPayload):
         return "empty payload"
     if isinstance(error, NotFound):
         return f"not found: {error.job_id}"
-    if isinstance(error, (MlFailed, Invariant)):
+    if isinstance(error, (MlFailed, FitFailed, Invariant)):
         return "internal error"
     assert_never(error)
 
@@ -432,26 +462,6 @@ def _parse_uv_bytes(raw: object, label: str) -> Result[bytes, DomainError]:
 
 
 @dataclass(frozen=True, slots=True)
-class FlawUv:
-    """Solo via parse_flaw_uv."""
-
-    _value: bytes
-
-    def as_bytes(self) -> bytes:
-        return self._value
-
-    def __len__(self) -> int:
-        return len(self._value)
-
-
-def parse_flaw_uv(raw: object) -> Result[FlawUv, DomainError]:
-    result = _parse_uv_bytes(raw, "flaw")
-    if isinstance(result, Err):
-        return result
-    return Ok(FlawUv(_value=result.value))
-
-
-@dataclass(frozen=True, slots=True)
 class CompleteUv:
     """Solo via parse_complete_uv."""
 
@@ -527,21 +537,110 @@ class CompareResult:
     mesh_b: GnmMesh
 
 
-def encode_flame_payload(landmarks: Landmarks, image: ImageBytes) -> bytes:
+# --- GNM fit directo: tipos probados en el borde del fitter ---
+
+
+def _parse_finite_floats(raw: object, expect: int) -> Result[tuple[float, ...], None]:
+    if not isinstance(raw, (list, tuple)):
+        return Err(None)
+    if len(raw) != expect:
+        return Err(None)
+    out: list[float] = []
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return Err(None)
+        number = float(value)
+        if not math.isfinite(number):
+            return Err(None)
+        out.append(number)
+    return Ok(tuple(out))
+
+
+@dataclass(frozen=True, slots=True)
+class GnmCoeffs:
+    """Solo via parse_gnm_coeffs. 253 floats finitos."""
+
+    _value: tuple[float, ...]
+
+    def as_tuple(self) -> tuple[float, ...]:
+        return self._value
+
+    def __len__(self) -> int:
+        return len(self._value)
+
+
+def parse_gnm_coeffs(raw: object) -> Result[GnmCoeffs, DomainError]:
+    result = _parse_finite_floats(raw, GNM_COEFFS_LEN)
+    if isinstance(result, Err):
+        return Err(InvalidCoeffs())
+    return Ok(GnmCoeffs(_value=result.value))
+
+
+@dataclass(frozen=True, slots=True)
+class CameraParams:
+    """Solo via parse_camera_params. Matriz 3x4 aplanada, 12 finitos."""
+
+    _value: tuple[float, ...]
+
+    def as_tuple(self) -> tuple[float, ...]:
+        return self._value
+
+
+def parse_camera_params(raw: object) -> Result[CameraParams, DomainError]:
+    result = _parse_finite_floats(raw, CAMERA_PARAMS_LEN)
+    if isinstance(result, Err):
+        return Err(InvalidCamera())
+    return Ok(CameraParams(_value=result.value))
+
+
+@dataclass(frozen=True, slots=True)
+class UvRegion:
+    """Solo via parse_uv_region. Isla GNM 1-5."""
+
+    _value: int
+
+    def island(self) -> int:
+        return self._value
+
+
+def parse_uv_region(raw: object) -> Result[UvRegion, DomainError]:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return Err(InvalidProgress())
+    if raw < UV_ISLAND_MIN or raw > UV_ISLAND_MAX:
+        return Err(InvalidProgress())
+    return Ok(UvRegion(_value=raw))
+
+
+@dataclass(frozen=True, slots=True)
+class FitResult:
+    """Seam fit->texture: coefs + camara ya probados."""
+
+    coeffs: GnmCoeffs
+    camera: CameraParams
+
+
+@dataclass(frozen=True, slots=True)
+class FittedMesh:
+    """Geometria personalizada derivada de un FitResult."""
+
+    fit: FitResult
+
+
+def encode_fit_request(image: ImageBytes, landmarks: Landmarks) -> bytes:
     lm = landmarks.as_bytes()
     img = image.as_bytes()
     return len(lm).to_bytes(4, "big") + lm + img
 
 
-def decode_flame_payload(raw: object) -> Result[tuple[Landmarks, ImageBytes], DomainError]:
+def decode_fit_request(raw: object) -> Result[tuple[Landmarks, ImageBytes], DomainError]:
     if not isinstance(raw, (bytes, bytearray, memoryview)):
-        return Err(MlFailed(detail=MlDecode(details="flame payload <4 bytes")))
+        return Err(FitFailed(detail=MlDecode(details="fit payload <4 bytes")))
     data = bytes(raw)
     if len(data) < 4:
-        return Err(MlFailed(detail=MlDecode(details="flame payload <4 bytes")))
+        return Err(FitFailed(detail=MlDecode(details="fit payload <4 bytes")))
     size = int.from_bytes(data[0:4], "big")
     if len(data) < 4 + size:
-        return Err(MlFailed(detail=MlDecode(details="flame payload truncated")))
+        return Err(FitFailed(detail=MlDecode(details="fit payload truncated")))
     lm_raw = data[4 : 4 + size]
     img_raw = data[4 + size :]
     lm_result = parse_landmarks(lm_raw)
@@ -550,5 +649,5 @@ def decode_flame_payload(raw: object) -> Result[tuple[Landmarks, ImageBytes], Do
     img_result = parse_image_bytes(img_raw)
     if isinstance(img_result, Err):
         detail = domain_to_message(img_result.error)
-        return Err(MlFailed(detail=MlDecode(details=detail)))
+        return Err(FitFailed(detail=MlDecode(details=detail)))
     return Ok((lm_result.value, img_result.value))

@@ -12,10 +12,13 @@ from backend.domain import (
     Err,
     Ok,
     Stage,
+    decode_fit_request,
+    encode_fit_request,
     new_job_id,
     parse_base_url,
+    parse_camera_params,
     parse_complete_uv,
-    parse_flaw_uv,
+    parse_gnm_coeffs,
     parse_gnm_mesh,
     parse_heatmap,
     parse_image_bytes,
@@ -23,6 +26,7 @@ from backend.domain import (
     parse_landmarks,
     parse_progress,
     parse_stage,
+    parse_uv_region,
     zero_progress,
 )
 
@@ -90,7 +94,6 @@ def test_landmarks_accepts_478_and_rejects_stub() -> None:
 def test_uv_lengths_exact_canonical() -> None:
     assert isinstance(parse_complete_uv(bytes(UV_LEN)), Ok)
     assert isinstance(parse_complete_uv(bytes(UV_LEN - 1)), Err)
-    assert isinstance(parse_flaw_uv(bytes(UV_LEN)), Ok)
     assert isinstance(parse_heatmap(bytes(UV_LEN)), Ok)
     assert isinstance(parse_heatmap(b'{"todo":"x"}'), Err)
 
@@ -106,3 +109,84 @@ def test_base_url_trims_slash_and_rejects_scheme() -> None:
 def test_gnm_mesh_rejects_truncated_and_bad_magic() -> None:
     assert isinstance(parse_gnm_mesh(b""), Err)
     assert isinstance(parse_gnm_mesh(bytes([1, 2, 3])), Err)
+
+
+def test_gnm_coeffs_accepts_253_finite_rejects_other_lengths() -> None:
+    from backend.domain import GNM_COEFFS_LEN
+
+    assert GNM_COEFFS_LEN == 253
+    assert isinstance(parse_gnm_coeffs([0.0] * 253), Ok)
+    assert isinstance(parse_gnm_coeffs([0.0] * 252), Err)
+    assert isinstance(parse_gnm_coeffs([0.0] * 254), Err)
+    bad = [0.0] * 252 + [float("nan")]
+    assert isinstance(parse_gnm_coeffs(bad), Err)
+    bad_inf = [0.0] * 252 + [float("inf")]
+    assert isinstance(parse_gnm_coeffs(bad_inf), Err)
+    assert isinstance(parse_gnm_coeffs("nope"), Err)
+
+
+def test_camera_params_accepts_12_finite_rejects_bad() -> None:
+    assert isinstance(parse_camera_params([0.0] * 12), Ok)
+    assert isinstance(parse_camera_params([0.0] * 11), Err)
+    assert isinstance(parse_camera_params([0.0] * 11 + [float("nan")]), Err)
+    assert isinstance(parse_camera_params("nope"), Err)
+
+
+def test_uv_region_only_islands_1_to_5() -> None:
+    from backend.domain import UvRegion
+
+    for island in (1, 2, 3, 4, 5):
+        parsed = parse_uv_region(island)
+        assert isinstance(parsed, Ok)
+        assert isinstance(parsed.value, UvRegion)
+        assert parsed.value.island() == island
+    assert isinstance(parse_uv_region(0), Err)
+    assert isinstance(parse_uv_region(6), Err)
+    assert isinstance(parse_uv_region("1"), Err)
+
+
+def test_fit_request_codec_roundtrips_landmarks_and_image() -> None:
+    import json as _json
+
+    from backend.domain import LANDMARKS_LEN
+
+    pts = [[0.0, 1.0, 2.0]] * LANDMARKS_LEN
+    lm_raw = _json.dumps(pts).encode("utf-8")
+    lm = parse_landmarks(lm_raw)
+    assert isinstance(lm, Ok)
+    img_raw = bytes([0xFF, 0xD8, 0xFF, 0x00]) + bytes(60)
+    img = parse_image_bytes(img_raw)
+    assert isinstance(img, Ok)
+    blob = encode_fit_request(img.value, lm.value)
+    back = decode_fit_request(blob)
+    assert isinstance(back, Ok)
+    back_lm, back_img = back.value
+    assert back_lm.as_bytes() == lm.value.as_bytes()
+    assert back_img.as_bytes() == img.value.as_bytes()
+    assert isinstance(decode_fit_request(b"\x00\x01"), Err)
+
+
+def test_fit_failed_maps_to_500_and_invalid_coeffs_to_400() -> None:
+    from backend.domain import (
+        FitFailed,
+        InvalidCamera,
+        InvalidCoeffs,
+        MlTransport,
+        domain_to_status,
+    )
+
+    assert domain_to_status(FitFailed(detail=MlTransport(details="x"))) == 500
+    assert domain_to_status(InvalidCoeffs()) == 400
+    assert domain_to_status(InvalidCamera()) == 400
+
+
+def test_new_stages_parse_and_old_stages_rejected() -> None:
+    assert isinstance(parse_stage("fit"), Ok)
+    assert isinstance(parse_stage("texture"), Ok)
+    assert isinstance(parse_stage("assemble"), Ok)
+    assert parse_stage("fit") == Ok(Stage.FIT)
+    # Via anterior retirada en S9: solo fit/texture/assemble son stages validos.
+    assert isinstance(parse_stage("landmarks"), Err)
+    assert isinstance(parse_stage("flame"), Err)
+    assert isinstance(parse_stage("freeuv"), Err)
+    assert isinstance(parse_stage("bake"), Err)

@@ -4,7 +4,7 @@
 # Modal USA la receta en backend/modal_app.py (from_registry + mounts), no
 # este Dockerfile: asi los deploys de solo-codigo no reconstruyen la imagen.
 # Mantener en paridad: misma base devel, mismo orden torch-cu126 primero.
-# Rust llama a este contenedor vía ML_SIDECAR_URL (POST /ml/landmarks|flame|freeuv).
+# Rust llama a este contenedor vía ML_SIDECAR_URL (POST /ml/landmarks|fit|texture).
 # Base devel (no runtime): pytorch3d se compila desde source y sin nvcc queda
 # solo-CPU -> `_C.rasterize_meshes` falla "Not compiled with GPU support" en
 # /ml/flame. Con devel el build tarda mas pero el rasterizador CUDA funciona.
@@ -24,6 +24,7 @@ COPY requirements.txt ./
 #   freeuv-checkpoints (2 .bin), deca (tar+resnet50), flame (Open+pkl+masks+npz),
 #   mediapipe (face_landmarker.task), freeuv-resources (uv.jpg),
 #   deca-code (decalib+data), freeuv-code (detail_encoder+pipeline_sd15).
+#   gnm-fitter (pesos + licencia pendientes Step 4; hasta entonces dobles).
 # Fase deploy-real-models: torch/diffusers reales pineados arriba; el build
 # instala primero torch cu126 y luego el resto desde PyPI.
 # Cache mount BuildKit en vez de --no-cache-dir (no queda en la imagen).
@@ -44,9 +45,19 @@ RUN --mount=type=cache,target=/root/.cache/pip pip3 install -r requirements.txt
 # hadolint ignore=DL3042,DL3013
 RUN --mount=type=cache,target=/root/.cache/pip pip3 install fvcore iopath; pip3 install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git || echo "pytorch3d opcional omitido: sin wheel torch2.13/cu126 (deuda prod-GPU)"
 # Codigo al final: los cambios de codigo no invalidan las capas pesadas de pip.
-COPY modal_app.py ./
+# Layout paquete (paridad con Dockerfile.runner): los delegados /ml/fit|texture
+# importan backend.domain/gnm_fit/gnm_texture/pipeline_local; en plano
+# moririan con ModuleNotFoundError aunque local pasen.
+COPY backend/__init__.py ./backend/__init__.py
+COPY backend/domain.py ./backend/domain.py
+COPY backend/gnm.py ./backend/gnm.py
+COPY backend/gnm_fit.py ./backend/gnm_fit.py
+COPY backend/gnm_texture.py ./backend/gnm_texture.py
+COPY backend/gnm_assemble.py ./backend/gnm_assemble.py
+COPY backend/pipeline_local.py ./backend/pipeline_local.py
+COPY backend/modal_app.py ./backend/modal_app.py
 ENV ML_PORT=8081 WEIGHTS_DIR=/weights
 EXPOSE 8081
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
   CMD python3 -c "import os,urllib.request; p=os.environ.get('ML_PORT','8081'); urllib.request.urlopen(f'http://localhost:{p}/docs')" || exit 1
-CMD ["sh", "-c", "python3 modal_app.py --serve :${ML_PORT:-8081}"]
+CMD ["sh", "-c", "python3 -m backend.modal_app --serve :${ML_PORT:-8081}"]

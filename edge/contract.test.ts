@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  GNM_ISLANDS,
   MAX_IMAGE_BYTES,
-  PROGRESS_BAKE,
+  PROGRESS_ASSEMBLE,
   PROGRESS_DONE,
-  PROGRESS_FLAME,
-  PROGRESS_FREEUV,
-  PROGRESS_LANDMARKS,
+  PROGRESS_FIT,
+  PROGRESS_TEXTURE,
   RESULT_TTL_SECONDS,
   STAGES,
   STATUSES,
   TERMINAL_STATUSES,
+  ZIP_MANIFEST,
+  ZIP_NAMES,
   hasSupportedMagic,
   isJobStatus,
   isUuid,
@@ -60,13 +62,16 @@ describe("contrato edge como fuente de verdad", () => {
     expect(isValidProgress(0.4)).toBe(true);
   });
 
-  it("stage con Result y orden canonico", () => {
-    expect([...STAGES]).toEqual(["queued", "landmarks", "flame", "freeuv", "bake", "done"]);
-    const ok = parseStage("flame");
+  it("stage con Result y orden canonico GNM", () => {
+    expect([...STAGES]).toEqual(["queued", "fit", "texture", "assemble", "done"]);
+    const ok = parseStage("fit");
     expect(ok.ok).toBe(true);
-    if (ok.ok) expect(ok.value).toBe("flame");
+    if (ok.ok) expect(ok.value).toBe("fit");
     expect(parseStage("nope").ok).toBe(false);
-    expect(isValidStage("bake")).toBe(true);
+    expect(parseStage("flame").ok).toBe(false);
+    expect(parseStage("freeuv").ok).toBe(false);
+    expect(parseStage("bake").ok).toBe(false);
+    expect(isValidStage("assemble")).toBe(true);
   });
 
   it("magics JPEG PNG y limite 8MB", () => {
@@ -92,11 +97,30 @@ describe("contrato edge como fuente de verdad", () => {
     expect(isJobStatus("bogus")).toBe(false);
   });
 
-  it("hitos de progreso espejan pipeline 0.15/0.40/0.75/0.95/1.0", () => {
-    expect(PROGRESS_LANDMARKS).toBeCloseTo(0.15);
-    expect(PROGRESS_FLAME).toBeCloseTo(0.4);
-    expect(PROGRESS_FREEUV).toBeCloseTo(0.75);
-    expect(PROGRESS_BAKE).toBeCloseTo(0.95);
+  it("hitos de progreso espejan pipeline fit/texture/assemble", () => {
+    expect(PROGRESS_FIT).toBeCloseTo(0.4);
+    expect(PROGRESS_TEXTURE).toBeCloseTo(0.75);
+    expect(PROGRESS_ASSEMBLE).toBeCloseTo(0.95);
     expect(PROGRESS_DONE).toBe(1.0);
+  });
+
+  it("manifiesto zip versiona islas y PBR sin renombrar albedo", () => {
+    expect([...GNM_ISLANDS]).toEqual([1, 2, 3, 4, 5]);
+    expect(ZIP_MANIFEST.uvA).toBe("uv_a.png");
+    expect(ZIP_MANIFEST.uvB).toBe("uv_b.png");
+    expect(ZIP_MANIFEST.heat).toBe("heatmap.png");
+    expect(ZIP_MANIFEST.meshA).toBe("mesh_a.glb");
+    expect(ZIP_MANIFEST.meshB).toBe("mesh_b.glb");
+    expect(ZIP_MANIFEST.pbrA).toBe("pbr_a.png");
+    expect(ZIP_MANIFEST.pbrB).toBe("pbr_b.png");
+    expect([...ZIP_NAMES]).toEqual([
+      "uv_a.png",
+      "uv_b.png",
+      "heatmap.png",
+      "mesh_a.glb",
+      "mesh_b.glb",
+      "pbr_a.png",
+      "pbr_b.png",
+    ]);
   });
 });

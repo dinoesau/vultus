@@ -44,11 +44,14 @@ backend/
 ├── Dockerfile.runner      # runner local (webhook + pipeline contra sidecar)
 ├── Dockerfile.gpu         # sidecar Python ML (torch/diffusers)
 ├── domain.py              # tipos probados ML + Result + errores (sin mitad gateway)
-├── gnm.py                 # bake + heatmap + GLB + zip CPU compartido
+├── gnm.py                 # template + heatmap + PNG + zip CPU compartido
+├── gnm_fit.py             # fit GNM 253 coefs + camara (doble determinista)
+├── gnm_texture.py         # proyeccion + warp + inpaint solo ocluidas
+├── gnm_assemble.py        # 5 islas + PBR + GLB personalizado + zip 7 nombres
 ├── pipeline_local.py      # orquestador local con sink (report/complete/fail) + timeouts
 ├── local_runner.py        # webhook de queue, blobs por rutas dev, sink HTTP
-├── modal_app.py           # sidecar ML: MediaPipe/FLAME/FreeUV + POST /ml/*
-└── tests/                 # test_domain/pipeline/gnm/modal_compat (ML y compute)
+├── modal_app.py           # sidecar ML: MediaPipe/fit/textura + POST /ml/*
+└── tests/                 # test_domain/pipeline/gnm(_fit|_texture|_assemble)/modal_compat
 ```
 
 ```
@@ -62,7 +65,8 @@ edge/
 ```
 
 `domain.py` expone `ImageBytes`, `JobId`, `Progress`, `Stage`,
-`Landmarks` 478, `FlawUv`/`CompleteUv`/`Heatmap` (`UV_LEN`), `BaseUrl`, `FlamePayload`, `CompareResult`.
+`Landmarks` 478, `GnmCoeffs` 253, `CameraParams` 12, `UvRegion` 1-5, `FitResult`,
+`CompleteUv`/`Heatmap` (`UV_LEN`), `BaseUrl`, `CompareResult`.
 El ciclo de vida del job (queue, status, TTL) vive solo en `edge/`; Python no lo duplica.
 Ningún otro módulo importa `torch/diffusers/mediapipe` salvo `modal_app.py`.
 
@@ -97,7 +101,7 @@ En prod los workers GPU corren en `Modal` (`modal deploy backend/modal_app.py`) 
 ### 4.3 Workers GPU en Modal (prod)
 
 ```bash
-modal deploy backend/modal_app.py   # despliega MediaPipe/FLAME/FreeUV/GNM en Modal
+modal deploy backend/modal_app.py   # despliega MediaPipe/fit/textura/assemble en Modal
 modal app logs vultus-workers        # logs GPU
 ```
 
@@ -163,9 +167,9 @@ npx vitest run --config vitest.pool.config.ts
 
 La suite es una sola: contrato TS (fuente unica) + pool HTTP en runtime worker + ML/compute Python.
 Seam 1 con suite pool real (`202 {job_id, status queued}`, `400` imagen / faltante / uuid, `404` desconocido, `409` pre-done, `health` con `gateway:"worker"`) mas WS real (snapshot `queued`, handshake falla en desconocido) y negativo del backdoor dev (`404` con vars prod).
-Seam 2 con sink en memoria (`report` ordenado `landmarks/flame/freeuv/bake`, `complete` guarda, `fail` marca).
-Seam 3 con golden `UV_LEN = 786432` (`[10,200] vs [4,210] -> [6,10]`, `GLB magic`) + `Landmarks` 478 rechaza stubs.
-Goldens literales a mano para `Progress`, `JobId`, heatmap y bake.
+Seam 2 con sink en memoria (`report` ordenado `fit/texture/assemble`, `complete` guarda, `fail` marca).
+Seam 3 con golden `UV_LEN = 786432` (`[10,200] vs [4,210] -> [6,10]`, `GLB magic` personalizado) + `Landmarks` 478 rechaza stubs.
+Goldens literales a mano para `Progress`, `JobId`, heatmap, albedo y coefs.
 No mockees el pipeline interno.
 Valor esperado es literal golden, no recomputado.
 
@@ -193,12 +197,12 @@ Verifica `tmpfs` vacío tras cada par (`job_dir` no existe) y TTL canónico en e
 Si no tienes GPU local, corre `pytest backend/tests -q` (CPU puro con dobles deterministas).
 Inyecta `MlSidecarClient::new(BaseUrl::parse("http://localhost:8081"))` fake que retorna `CompleteUv` golden sin cargar `torch`.
 En CI los workers GPU corren solo en runner con GPU o se skippean.
-En prod usa `Modal`: `modal run backend/modal_app.py::test_vultus --gpu T4` ejecuta FreeUV real sin GPU local y consume tus `$30/mes free` (~50h T4).
+En prod usa `Modal` para fit/textura GPU sin hardware local y consume tus `$30/mes free` (~50h T4).
 
 ## 9. Lint y formato
 
 ```bash
-mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py
+mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py backend/gnm_fit.py backend/gnm_texture.py backend/gnm_assemble.py
 ruff check backend/
 pytest backend/tests -q
 ```
@@ -220,8 +224,8 @@ Abre PR y verifica `docker compose up` + `pytest backend/tests -q` pasan E2E.
 `redis connection refused`: doc vieja, ya no aplica. Nunca hubo `Redis`: el estado vive en el DO/R2 (prod) o emulado (dev). Verifica `/health` y `ttl_secs`.
 `wrangler deploy` falla (prod): verifica `wrangler.toml` bindings de Queues/R2 y `CLOUDFLARE_API_TOKEN`.
 `modal deploy` falla: verifica `modal token` y `modal_app.py` image con `nvidia/cuda:12.6-runtime`.
-`CUDA out of memory` (local o Modal): baja `concurrency_limit` a 1 en `freeuv_worker` / `flame_worker` (`modal_app.py`).
-`Ml::Decode` en `landmarks/flame/freeuv`: el sidecar aún retorna stubs `{"todo":...}` (Fase 1 pendiente), verifica `FlamePayload` y `UV_LEN`.
+`CUDA out of memory` (local o Modal): baja `concurrency_limit` a 1 en `texture_worker` / `fit_worker` (`modal_app.py`).
+`Ml::Decode` en `landmarks/fit/texture`: verifica `FitRequest`/`TextureRequest` y `UV_LEN`.
 `WS no conecta`: verifica `VITE_API_URL` en `frontend/.env` y `Durable Objects` binding en `wrangler.toml` (prod) o `wrangler.dev.toml` (local).
 `Queues 128KB exceeded`: no encoles bytes, el worker solo manda `{job_id, r2_keys jobs/{id}/a|b}`.
 `Pool suite aislada falla en WS`: corre con la config commiteada (`isolatedStorage:false`), el DO retiene storage con timers vivos.

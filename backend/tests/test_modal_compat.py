@@ -9,7 +9,7 @@ pase en local 3.12+. Regresion real vista en publish post-merge.
 import ast
 import os
 
-_MODAL_SHIPPED = ("domain.py", "gnm.py")
+_MODAL_SHIPPED = ("domain.py", "gnm.py", "gnm_head.py")
 
 
 def test_modal_shipped_modules_parse_on_py310_grammar():

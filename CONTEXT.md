@@ -32,7 +32,10 @@ Rechaza stubs `{"todo":...}` y bytes aleatorios con `Ml::Decode`.
 Producido solo por `MlSidecarClient::landmarks(&JobId, &ImageBytes) -> Landmarks`.
 
 - **mesh**: malla 3D de cabeza humana personalizada por fit GNM.
-Ya no hay template compartido: cada cara deforma el template con sus coefs.
+Template real `17821` verts / `35324` tris (`TEMPLATE_VERTS/TRIS`).
+Cada cara deforma el template con identidad `253` + camara `12`.
+Expresion es neutra fija.
+`383` expresivos quedan fuera de alcance.
 
 - **uv**: textura canónica desplegada de 512x512.
 Espacio donde ocurre la comparación.
@@ -45,6 +48,9 @@ Tipos `GnmCoeffs` (`parse` exige 253 floats finitos, error `InvalidCoeffs`) y
 Producido por `MlSidecarClient::fit(&JobId, &ImageBytes, &Landmarks) -> FitResult`
 vía `FitRequest` (`u32 BE len + landmarks_json + image_bytes`) sobre `POST /ml/fit`;
 respuesta `253 f32 LE + 12 f32 LE` (fallo ruidoso `FitFailed`).
+Fit real es ridge identidad + camara con expresion neutra.
+Seam `fit_gnm` sin cambios.
+Dobles sha256 solo como fallback local sin pesos.
 
 - **complete-uv**: albedo tras proyeccion, warp TPS e inpaint solo de ocluidas.
 Tipo `CompleteUv::parse` exige exactamente `UV_LEN` bytes.
@@ -57,7 +63,8 @@ Tipo `Heatmap::parse` exige `UV_LEN` bytes.
 Producida solo por `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` (infallible, longitudes ya probadas).
 
 - **assemble**: ensamblaje CPU de 5 islas GNM + PBR + GLB personalizado.
-Islas `UvRegion` 1-5 (layout v1, bandas horizontales); PBR se deriva del albedo.
+Islas reales `UvRegion` 1-5 (`skin/left_eye/right_eye/teeth/tongue`, layout v2).
+PBR se deriva del albedo.
 Firma `build_personalized_glb(&FitResult, &CompleteUv) -> GnmMesh` y
 `build_full_zip` con 7 nombres del manifiesto (`edge/contract.ts` fuente unica).
 

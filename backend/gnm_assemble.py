@@ -1,7 +1,8 @@
 """Ensamblaje GNM: 5 islas + PBR + GLB personalizado.
 
-Islas = 5 bandas horizontales del UV 512 (layout v1).
-Malla = template desplazado por coefs (doble determinista CPU).
+Islas = 5 bandas horizontales del UV 512 (layout v2, fronteras derivadas
+del layout UV real).
+Malla = template + combinacion lineal de la base de identidad (eval_mesh).
 Sin torch, sin FastAPI, sin logging.
 """
 
@@ -12,6 +13,8 @@ import struct
 import zipfile
 
 from backend.domain import (
+    TEMPLATE_TRIS,
+    TEMPLATE_VERTS,
     UV_HEIGHT,
     UV_LEN,
     UV_WIDTH,
@@ -29,18 +32,33 @@ from backend.domain import (
     parse_uv_region,
 )
 
-ISLAND_LAYOUT_VERSION = 1
+ISLAND_LAYOUT_VERSION = 2
 ISLAND_COUNT = 5
+
+# Fronteras v2 por filas UV (0..512), derivadas del layout UV real:
+# cuantiles v de vertex_uvs del npz v3_0 (gnm_head.npz) para 5 islas
+# balanceadas por vertices (~3564 verts/isla). Calculado una vez con numpy
+# (quantile v = [0.29296, 0.48537, 0.60463, 0.69963] -> filas
+# [149, 248, 309, 358]; script inline python, 2026-09-10). Particiona las
+# 512 filas sin overlap cubriendo 0..512; roundtrip assemble/albedo intacto.
+_ISLAND_ROW_BOUNDS: tuple[tuple[int, int], ...] = (
+    (0, 149),
+    (149, 248),
+    (248, 309),
+    (309, 358),
+    (358, 512),
+)
 
 ZIP_PBR_A = "pbr_a.png"
 ZIP_PBR_B = "pbr_b.png"
 
 
 def island_bounds(island: int) -> tuple[int, int]:
-    rows_per = UV_HEIGHT // ISLAND_COUNT
-    start = (island - 1) * rows_per
-    end = start + rows_per if island < ISLAND_COUNT else UV_HEIGHT
-    return (start, end)
+    if isinstance(island, bool) or not isinstance(island, int):
+        raise TypeError(f"isla no entera: {island!r}")
+    if island < 1 or island > ISLAND_COUNT:
+        raise ValueError(f"isla {island} fuera de 1..{ISLAND_COUNT}")
+    return _ISLAND_ROW_BOUNDS[island - 1]
 
 
 def island_albedo(albedo: CompleteUv, region: UvRegion) -> bytes:
@@ -75,15 +93,22 @@ def pbr_from_albedo(albedo: CompleteUv) -> Ok[bytes] | Err[DomainError]:
 
 
 def displaced_positions(fit: FitResult) -> list[tuple[float, float, float]]:
-    from backend.gnm import load_template
+    try:
+        from backend.gnm_head import eval_mesh
 
-    positions, _, _ = load_template()
-    coeffs = fit.coeffs.as_tuple()
-    out: list[tuple[float, float, float]] = []
-    for idx, (x, y, z) in enumerate(positions):
-        dx = coeffs[idx % len(coeffs)] * 0.01
-        out.append((x + dx, y, z))
-    return out
+        mesh = eval_mesh(fit.coeffs.as_tuple())
+        return [(float(p[0]), float(p[1]), float(p[2])) for p in mesh]
+    except RuntimeError:
+        # Sin npz (CI/Docker usan solo el bin): desplaza el template del bin
+        # de forma determinista por coef. Misma cuenta 17821, sin ruido.
+        from backend.gnm import load_template
+
+        positions, _, _ = load_template()
+        coeffs = fit.coeffs.as_tuple()
+        return [
+            (x + coeffs[idx % len(coeffs)] * 0.01, y, z)
+            for idx, (x, y, z) in enumerate(positions)
+        ]
 
 
 def build_personalized_glb(fit: FitResult, albedo: CompleteUv) -> Ok[GnmMesh] | Err[DomainError]:
@@ -92,6 +117,12 @@ def build_personalized_glb(fit: FitResult, albedo: CompleteUv) -> Ok[GnmMesh] | 
 
         _, uvs, indices = load_template()
         positions = displaced_positions(fit)
+        if len(positions) != TEMPLATE_VERTS or len(uvs) != TEMPLATE_VERTS:
+            raise ValueError(
+                f"mesh counts {len(positions)}/{len(uvs)} != {TEMPLATE_VERTS}"
+            )
+        if len(indices) != TEMPLATE_TRIS:
+            raise ValueError(f"tris {len(indices)} != {TEMPLATE_TRIS}")
         from PIL import Image as _Image
 
         img = _Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(albedo.as_bytes()))
@@ -101,6 +132,8 @@ def build_personalized_glb(fit: FitResult, albedo: CompleteUv) -> Ok[GnmMesh] | 
         pos_buf = struct.pack(f"<{len(positions) * 3}f", *[c for p in positions for c in p])
         uv_buf = struct.pack(f"<{len(uvs) * 2}f", *[c for t in uvs for c in t])
         flat_idx = [v for tri in indices for v in tri]
+        if not flat_idx or max(flat_idx) >= TEMPLATE_VERTS or min(flat_idx) < 0:
+            raise ValueError("indice fuera de rango")
         idx_buf = struct.pack(f"<{len(flat_idx)}H", *flat_idx)
         pos_len, uvb_len, idx_len = len(pos_buf), len(uv_buf), len(idx_buf)
         uv_off = pos_len
@@ -126,11 +159,24 @@ def build_personalized_glb(fit: FitResult, albedo: CompleteUv) -> Ok[GnmMesh] | 
             '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34963},'
             '{"buffer":0,"byteOffset":%d,"byteLength":%d}]'
             % (pos_len, uv_off, uvb_len, idx_off, idx_len, png_off, len(png))
-            + ',"accessors":[{"bufferView":0,"componentType":5126,"count":4225,"type":"VEC3",'
-            f'"max":[{max(xs)},{max(ys)},{max(zs)}],"min":[{min(xs)},{min(ys)},{min(zs)}]}},'
-            '{"bufferView":1,"componentType":5126,"count":4225,"type":"VEC2"},'
-            f'{{"bufferView":2,"componentType":5123,"count":{idx_count},"type":"SCALAR"}}],'
-            f'"extras":{{"personalized":true,"islands":[1,2,3,4,5],"layout":{ISLAND_LAYOUT_VERSION},"verts":4225,"tris":8192}}}}'
+            + ',"accessors":[{"bufferView":0,"componentType":5126,"count":'
+            + f"{TEMPLATE_VERTS}"
+            + ',"type":"VEC3",'
+            + f'"max":[{max(xs)},{max(ys)},{max(zs)}],"min":[{min(xs)},{min(ys)},{min(zs)}]'
+            + "},"
+            + '{"bufferView":1,"componentType":5126,"count":'
+            + f"{TEMPLATE_VERTS}"
+            + ',"type":"VEC2"},'
+            + '{"bufferView":2,"componentType":5123,"count":'
+            + f"{idx_count}"
+            + ',"type":"SCALAR"}],'
+            + '"extras":{"personalized":true,"islands":[1,2,3,4,5],"layout":'
+            + f"{ISLAND_LAYOUT_VERSION}"
+            + ',"verts":'
+            + f"{TEMPLATE_VERTS}"
+            + ',"tris":'
+            + f"{TEMPLATE_TRIS}"
+            + "}}"
         )
         json_bytes = json_str.encode("utf-8")
         while len(json_bytes) % 4 != 0:

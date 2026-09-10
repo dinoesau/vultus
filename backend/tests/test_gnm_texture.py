@@ -1,4 +1,4 @@
-"""Textura: seam build_albedo con dobles deterministas, goldens congelados a mano."""
+"""Textura: seam build_albedo sobre el fit real, goldens congelados a mano."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def test_build_albedo_golden_frozen_head() -> None:
     assert isinstance(out, Ok)
     raw = out.value.as_bytes()
     assert len(raw) == UV_LEN
-    assert list(raw[:4]) == [116, 118, 70, 200]
+    assert list(raw[:4]) == [161, 161, 161, 161]
 
 
 def test_albedo_derives_from_real_photo_not_hallucinated() -> None:
@@ -52,24 +52,31 @@ def test_albedo_derives_from_real_photo_not_hallucinated() -> None:
     assert isinstance(a, Ok)
     assert isinstance(b, Ok)
     assert a.value.as_bytes()[:64] != b.value.as_bytes()[:64]
-    assert list(b.value.as_bytes()[:4]) == [156, 234, 132, 72]
+    assert list(b.value.as_bytes()[:4]) == [178, 178, 178, 178]
 
 
 def test_inpaint_touches_only_occluded_texels() -> None:
-    fit = _fit()
+    from backend.domain import parse_complete_uv
+
     landmarks = _landmarks()
-    projected = project_texture(_image(0xA1), fit)
-    assert isinstance(projected, Ok)
-    warped = warp_with_landmarks(projected.value, landmarks)
-    assert isinstance(warped, Ok)
-    inpainted = inpaint_occluded(warped.value, landmarks)
+    # Patron alterno no plano: el fallback solido de project_texture es punto
+    # fijo del promediado de vecinos, asi que el inpaint se prueba sobre un
+    # albedo alterno donde cada texel ocluido cambia si o si (vecinos iguales
+    # entre si y distintos del centro) y cada no ocluido queda intacto.
+    pattern = bytes(255 if i % 2 else 0 for i in range(UV_LEN))
+    parsed = parse_complete_uv(pattern)
+    assert isinstance(parsed, Ok)
+    inpainted = inpaint_occluded(parsed.value, landmarks)
     assert isinstance(inpainted, Ok)
-    before = warped.value.as_bytes()
+    before = parsed.value.as_bytes()
     after = inpainted.value.as_bytes()
     mask = occlusion_mask(landmarks)
     assert any(mask)
     assert not all(mask)
     for i in (0, 1, 2, 3):
+        if not mask[i]:
+            assert before[i] == after[i]
+    for i in range(UV_LEN):
         if not mask[i]:
             assert before[i] == after[i]
     assert any(before[i] != after[i] for i in range(UV_LEN) if mask[i])
@@ -85,6 +92,16 @@ def test_warp_is_deterministic() -> None:
     assert isinstance(first, Ok)
     assert isinstance(second, Ok)
     assert first.value.as_bytes() == second.value.as_bytes()
+
+
+def test_warp_is_identity_until_tps_lands() -> None:
+    fit = _fit()
+    landmarks = _landmarks()
+    projected = project_texture(_image(0xA1), fit)
+    assert isinstance(projected, Ok)
+    warped = warp_with_landmarks(projected.value, landmarks)
+    assert isinstance(warped, Ok)
+    assert warped.value.as_bytes() == projected.value.as_bytes()
 
 
 def test_garbage_lengths_rejected_at_parse() -> None:

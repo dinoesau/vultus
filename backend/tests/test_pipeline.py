@@ -13,7 +13,7 @@ from backend.domain import (
     CompleteUv,
     DomainError,
     Err,
-    FlawUv,
+    FitResult,
     ImageBytes,
     JobId,
     Landmarks,
@@ -28,8 +28,6 @@ from backend.pipeline_local import run_pair as run_pair_real
 
 MARKER_A = 0xA1
 MARKER_B = 0xB2
-FLAW_A = 0x11
-FLAW_B = 0x22
 
 
 def _image(marker: int) -> ImageBytes:
@@ -77,33 +75,38 @@ class FakeMlOk:
 
         return parse_landmarks(_landmarks_bytes())
 
-    def flame(self, job_id: JobId, image: ImageBytes, landmarks: Landmarks) -> Ok[FlawUv] | Err[DomainError]:
-        from backend.domain import UV_LEN, parse_flaw_uv
+    def fit(self, job_id: JobId, image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[DomainError]:
+        from backend.gnm_fit import fit_gnm
 
-        flaw = FLAW_A if MARKER_A in image.as_bytes() else FLAW_B
-        return parse_flaw_uv(bytes([flaw]) * UV_LEN)
+        return fit_gnm(image, landmarks)
 
-    def freeuv(self, job_id: JobId, flaw: FlawUv) -> Ok[CompleteUv] | Err[DomainError]:
+    def texture(
+        self, job_id: JobId, image: ImageBytes, fit: FitResult, landmarks: Landmarks
+    ) -> Ok[CompleteUv] | Err[DomainError]:
         from backend.domain import parse_complete_uv
 
-        head = bytes([10, 200]) if flaw.as_bytes()[0] == FLAW_A else bytes([4, 210])
+        head = bytes([10, 200]) if MARKER_A in image.as_bytes() else bytes([4, 210])
         return parse_complete_uv(_golden_complete(head))
 
 
-class FakeMlFailLandmarks:
+class FakeMlFailFit:
     def landmarks(self, job_id: JobId, image: ImageBytes) -> Ok[Landmarks] | Err[DomainError]:
-        from backend.domain import MlBadStatus, MlFailed
+        from backend.domain import parse_landmarks
 
-        return Err(MlFailed(detail=MlBadStatus(status=500)))
+        return parse_landmarks(_landmarks_bytes())
 
-    def flame(self, job_id: JobId, image: ImageBytes, landmarks: Landmarks) -> Ok[FlawUv] | Err[DomainError]:
-        from backend.domain import UV_LEN, parse_flaw_uv
+    def fit(self, job_id: JobId, image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[DomainError]:
+        from backend.domain import FitFailed, MlBadStatus
 
-        return parse_flaw_uv(bytes([FLAW_A]) * UV_LEN)
+        _ = (job_id, image, landmarks)
+        return Err(FitFailed(detail=MlBadStatus(status=500)))
 
-    def freeuv(self, job_id: JobId, flaw: FlawUv) -> Ok[CompleteUv] | Err[DomainError]:
+    def texture(
+        self, job_id: JobId, image: ImageBytes, fit: FitResult, landmarks: Landmarks
+    ) -> Ok[CompleteUv] | Err[DomainError]:
         from backend.domain import parse_complete_uv
 
+        _ = (job_id, image, fit, landmarks)
         return parse_complete_uv(_golden_complete(bytes([10, 200])))
 
 
@@ -135,10 +138,9 @@ def test_pair_produces_canonical_uvs_and_golden_heatmap() -> None:
     done = parse_progress(1.0)
     assert isinstance(done, Ok)
     assert [(p.value(), s) for p, s in sink.reports] == [
-        (0.15, Stage.LANDMARKS),
-        (0.40, Stage.FLAME),
-        (0.75, Stage.FREEUV),
-        (0.95, Stage.BAKE),
+        (0.40, Stage.FIT),
+        (0.75, Stage.TEXTURE),
+        (0.95, Stage.ASSEMBLE),
     ]
     assert not job_dir(job_id).exists()
 
@@ -150,7 +152,7 @@ def test_sidecar_error_fails_job_and_cleans_tmp() -> None:
     image_a = _image(MARKER_A)
     image_b = _image(MARKER_B)
     job_id = new_job_id()
-    out = run_pair_real(sink, FakeMlFailLandmarks(), job_id, image_a, image_b, default_config())  # type: ignore[arg-type]
+    out = run_pair_real(sink, FakeMlFailFit(), job_id, image_a, image_b, default_config())  # type: ignore[arg-type]
     assert isinstance(out, Err)
     assert isinstance(sink, InMemorySink)
     assert sink.failed
@@ -161,6 +163,6 @@ def test_sidecar_error_fails_job_and_cleans_tmp() -> None:
 def test_pipeline_timeouts_match_decisions() -> None:
     cfg = default_config()
     assert cfg.landmarks_timeout_secs == 5.0
-    assert cfg.flame_timeout_secs == 10.0
-    assert cfg.freeuv_timeout_secs == 30.0
+    assert cfg.fit_timeout_secs == 10.0
+    assert cfg.texture_timeout_secs == 30.0
     assert cfg.total_timeout_secs == 60.0

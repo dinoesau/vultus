@@ -3,7 +3,13 @@
 # separado (Dockerfile.gpu y receta Modal en modal_app.py). Este archivo solo
 # trae PyPI puro para que `pip_install_from_requirements` de Modal lo consuma
 # sin flags especiales. Orden: torch primero, resto despues.
-# Pesos reales en Fase 1: mediapipe, torch, diffusers, DECA, FreeUV.
+# Pesos reales Fase 1: mediapipe, torch, diffusers, DECA, FreeUV.
+# GNM fit directo (plan-gnm-fit-texture-pbr S4): el fitter publico se asume
+# disponible en la imagen GPU; licencia y pesos GNM pendientes de verificacion
+# en Step 4 antes de cablear la inferencia real. Hasta entonces sirven los
+# dobles deterministas de backend/gnm_fit.py (sin dep extra que pinar).
+# httpx ya pineado arriba: backend/pipeline_local.py lo importa y los
+# delegados /ml/fit|texture de modal_app lo consumen en la misma imagen.
 fastapi==0.115.6
 uvicorn==0.34.0
 httpx==0.28.1

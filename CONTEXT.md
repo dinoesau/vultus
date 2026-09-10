@@ -31,30 +31,35 @@ Tipo `Landmarks::parse(Vec<u8>)` exige JSON `[[x,y,z], ...]` con `LANDMARKS_LEN 
 Rechaza stubs `{"todo":...}` y bytes aleatorios con `Ml::Decode`.
 Producido solo por `MlSidecarClient::landmarks(&JobId, &ImageBytes) -> Landmarks`.
 
-- **mesh**: malla 3D de cabeza humana.
-Puede ser `FLAME` para extracción o `GNM` para render.
+- **mesh**: malla 3D de cabeza humana personalizada por fit GNM.
+Ya no hay template compartido: cada cara deforma el template con sus coefs.
 
 - **uv**: textura canónica desplegada de 512x512.
 Espacio donde ocurre la comparación.
-Proveniente de FreeUV.
+Proveniente de la textura GNM (proyeccion foto + warp + inpaint ocluido).
 Dims canónicas `UV_WIDTH = 512`, `UV_HEIGHT = 512`, `UV_CHANNELS = 3`, `UV_LEN = 786432`.
 
-- **flaw-uv**: UV incompleta con oclusiones antes de inpainting.
-Tipo `FlawUv::parse` exige exactamente `UV_LEN` bytes, si no `Ml::Decode`.
-Producida por `MlSidecarClient::flame(&JobId, &ImageBytes, &Landmarks) -> FlawUv` vía `FlamePayload` (`u32 BE len + landmarks_json + image_bytes`).
+- **fit-result**: seam fit->texture `{ coeffs, camera }` ya probados.
+Tipos `GnmCoeffs` (`parse` exige 253 floats finitos, error `InvalidCoeffs`) y
+`CameraParams` (matriz 3x4 aplanada, 12 finitos, error `InvalidCamera`).
+Producido por `MlSidecarClient::fit(&JobId, &ImageBytes, &Landmarks) -> FitResult`
+vía `FitRequest` (`u32 BE len + landmarks_json + image_bytes`) sobre `POST /ml/fit`;
+respuesta `253 f32 LE + 12 f32 LE` (fallo ruidoso `FitFailed`).
 
-- **complete-uv**: UV completa tras diffusion inpainting.
+- **complete-uv**: albedo tras proyeccion, warp TPS e inpaint solo de ocluidas.
 Tipo `CompleteUv::parse` exige exactamente `UV_LEN` bytes.
-Producida por `MlSidecarClient::freeuv(&JobId, &FlawUv) -> CompleteUv`.
+Producida por `MlSidecarClient::texture(&JobId, &ImageBytes, &FitResult, &Landmarks) -> CompleteUv`
+sobre `POST /ml/texture`.
 
 - **heatmap**: imagen `|UV_A - UV_B|` por región.
 Visualiza diferencias de textura.
 Tipo `Heatmap::parse` exige `UV_LEN` bytes.
 Producida solo por `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` (infallible, longitudes ya probadas).
 
-- **bake**: transferencia baricéntrica de textura `BFM -> GNM`.
-Convierte UV de topología BFM a UV de GNM sin reentrenar.
-Firma `bake_bfm_to_gnm(&FlawUv) -> CompleteUv` (infallible, copia preserva `UV_LEN`; matriz real precomputada llega en Fase 2).
+- **assemble**: ensamblaje CPU de 5 islas GNM + PBR + GLB personalizado.
+Islas `UvRegion` 1-5 (layout v1, bandas horizontales); PBR se deriva del albedo.
+Firma `build_personalized_glb(&FitResult, &CompleteUv) -> GnmMesh` y
+`build_full_zip` con 7 nombres del manifiesto (`edge/contract.ts` fuente unica).
 
 - **stateless**: propiedad de no persistir nada tras entrega.
 Local: DO TTL 60s con purga a 2xTTL y `/tmp` tmpfs en runner. Prod: R2 `lifecycle 60s` + Queues 24h retención (TTL lógico 60s) y `/tmp` tmpfs en Modal.
@@ -79,18 +84,20 @@ Local el consumer dev lo reenvia al runner; prod lo consume Modal.
 - **consume**: worker toma un job de la queue (local `Store` en memoria / HTTP Pull Consumer desde Modal en prod).
 Estado vía `status(&JobId)`, `progress(&JobId) -> (Progress, Stage)`, `set_progress(&JobId, Progress, Stage)`.
 
-- **stage**: enum ordenado `Stage::{Queued, Landmarks, Flame, Freeuv, Bake, Done}` con `as_str` / `Display`.
+- **stage**: enum ordenado `Stage::{Queued, Fit, Texture, Assemble, Done}` con `as_str`.
 Prohibido `&str` suelto en `Queue::set_progress`.
 
 - **base-url**: `BaseUrl::parse(&str)` exige `http(s)://`, recorta `/` final (`BadScheme | Empty`).
 `MlSidecarClient::new(BaseUrl)` une con `join("/ml/...")` sin doble slash.
 
-- **flame-payload**: `FlamePayload::encode(&Landmarks, &ImageBytes) -> Vec<u8>` y `decode(Vec<u8>) -> (Landmarks, ImageBytes)` con formato `u32 BE len + landmarks_json + image_bytes`.
-Paridad Rust-Python en un solo módulo.
+- **fit-request**: `encode_fit_request(&ImageBytes, &Landmarks) -> Vec<u8>` y `decode_fit_request(Vec<u8>) -> (Landmarks, ImageBytes)` con formato `u32 BE len + landmarks_json + image_bytes`.
+Respuesta fit: `253 f32 LE + 12 f32 LE`.
+Request texture: `u32 BE len(fit_request) + fit_request + fit_result(1060)`.
+Contrato wire espejado en `pipeline_local.py` y `modal_app.py` (un solo contrato).
 
 - **unwrap**: proyectar textura de mesh a UV.
 
-- **inpaint**: completar UV incompleta con diffusion.
+- **inpaint**: completar solo texeles ocluidos (mascara de landmarks).
 
 - **normalize**: llevar cara a pose y expresión neutra canónica.
 
@@ -100,12 +107,12 @@ Paridad Rust-Python en un solo módulo.
 Usada como normalizador para otras distancias.
 
 - **progress**: valor `Progress::parse(f32)` en `0.0..=1.0` no-NaN (`InvalidProgress`), `Progress::zero()`, `value()`.
-Emitido por el pipeline vía `sink.report` con `Stage`; hitos `0.15/0.40/0.75/0.95/1.0` en `edge/contract.ts`.
+Emitido por el pipeline vía `sink.report` con `Stage`; hitos `0.40/0.75/0.95/1.0` en `edge/contract.ts`.
 Mapeo HTTP: `400` validación, `404` desconocido, `500` infra (`{"detail":...}`).
 
 ## Errores
 
-- `DomainError` es taxonomía ML/compute: `InvalidImage(ImageError)`, `InvalidJobId`, `InvalidProgress`, `InvalidBaseUrl(BaseUrlError)`, `EmptyPayload`, `Ml(MlError::{Transport, BadStatus, Decode, Empty})`, `NotFound`, `Invariant`.
+- `DomainError` es taxonomía ML/compute: `InvalidImage(ImageError)`, `InvalidJobId`, `InvalidProgress`, `InvalidBaseUrl(BaseUrlError)`, `InvalidCoeffs`, `InvalidCamera`, `EmptyPayload`, `Ml(MlError::{Transport, BadStatus, Decode, Empty})`, `FitFailed(MlError)`, `NotFound`, `Invariant`.
 Helpers `domain_to_status` / `domain_to_message`.
 `ImageError::{SizeOutOfRange, UnsupportedFormat}`, `BaseUrlError::{BadScheme, Empty}`.
 El runner sirve `:8001` con `http.server` stdlib; el gateway sirve `:8000` vía worker runtime.
@@ -120,17 +127,17 @@ Nunca `unwrap` en request path; multipart inválido es `400`.
 Local: `HttpProgressSink` en el runner (mismo seam HTTP que prod) e `InMemorySink` en tests.
 Prod: workers GPU al mismo seam HTTP + R2 directo.
 
-- **Seam 3 Worker**: contrato tipado `&ImageBytes -> Landmarks -> FlawUv -> CompleteUv -> Heatmap` (local CPU vía `MlSidecarClient` + `BaseUrl` + `FlamePayload`, prod GPU vía Modal).
-UVs exigen `UV_LEN`, `Landmarks` exige 478 JSON.
+- **Seam 3 Worker**: contrato tipado `&ImageBytes + &Landmarks -> FitResult -> CompleteUv -> Heatmap` (fit y textura vía `MlSidecarClient` + `BaseUrl` sobre `POST /ml/fit|texture`, assemble CPU local, prod GPU vía Modal).
+UVs exigen `UV_LEN`, `Landmarks` exige 478 JSON, coefs exigen 253 finitos.
 
-Fuera de seams: `fit_flame`, `bake`, `project_uv`.
+Fuera de seams: `coeff_distance`, `project_uv`, islas y PBR internos.
 No se testean directo.
 
 ## Convenciones de tests
 
 Nombre de test describe WHAT no HOW.
 Ejemplo bueno: `test_frontal_face_produces_512_uv`.
-Ejemplo malo: `test_worker_calls_freeuv`.
+Ejemplo malo: `test_worker_calls_texture`.
 Valor esperado viene de literal golden verificado manualmente, no de recomputar con misma función.
 Golden UV es cabeza literal (`[10, 200]` vs `[4, 210]` -> `[6, 10]`).
 Goldens literales para `Progress`, `JobId`, JPEG/PNG con filler.

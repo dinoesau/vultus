@@ -48,14 +48,14 @@ RUN --mount=type=cache,target=/root/.cache/pip pip3 install fvcore iopath; pip3 
 # Layout paquete (paridad con Dockerfile.runner): los delegados /ml/fit|texture
 # importan backend.domain/gnm_fit/gnm_texture/pipeline_local; en plano
 # moririan con ModuleNotFoundError aunque local pasen.
-COPY backend/__init__.py ./backend/__init__.py
-COPY backend/domain.py ./backend/domain.py
-COPY backend/gnm.py ./backend/gnm.py
-COPY backend/gnm_fit.py ./backend/gnm_fit.py
-COPY backend/gnm_texture.py ./backend/gnm_texture.py
-COPY backend/gnm_assemble.py ./backend/gnm_assemble.py
-COPY backend/pipeline_local.py ./backend/pipeline_local.py
-COPY backend/modal_app.py ./backend/modal_app.py
+COPY __init__.py ./backend/__init__.py
+COPY domain.py ./backend/domain.py
+COPY gnm.py ./backend/gnm.py
+COPY gnm_fit.py ./backend/gnm_fit.py
+COPY gnm_texture.py ./backend/gnm_texture.py
+COPY gnm_assemble.py ./backend/gnm_assemble.py
+COPY pipeline_local.py ./backend/pipeline_local.py
+COPY modal_app.py ./backend/modal_app.py
 ENV ML_PORT=8081 WEIGHTS_DIR=/weights
 EXPOSE 8081
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \

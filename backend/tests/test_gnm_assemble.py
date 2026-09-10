@@ -35,18 +35,17 @@ def _image(marker: int):
 
 
 def _landmarks(marker: int):
-    # Identidad geometrica por marker: proyecta coefs conocidos a los 68
-    # del mapa para que el fit real produzca mallas distintas por identidad
-    # (la imagen sola ya no mueve la geometria desde el fit real S5).
-    from backend.gnm_head import MP_68_MAP, eval_landmarks68
-
-    sign = 1.0 if marker == 0xA1 else -1.0
-    coefs = [0.0] * 253
-    coefs[0] = sign * 2.0
-    projected = eval_landmarks68(tuple(coefs))
-    pts = [[0.5, 0.5, 0.0] for _ in range(478)]
-    for k, mp_idx in enumerate(MP_68_MAP):
-        pts[mp_idx] = [3.0 * projected[k][0] + 0.5, 3.0 * projected[k][1] + 0.1, 0.0]
+    # Identidad geometrica por marker sin pesos: grilla con o sin warp
+    # no-lineal en x (la camara de similaridad no absorbe el warp, asi el
+    # fit real da mallas distintas; en CI el doble difiere por hash).
+    warped = marker != 0xA1
+    pts: list[list[float]] = []
+    for i in range(478):
+        gx = (i % 32) / 31.0
+        gy = ((i // 32) % 15) / 14.0
+        if warped:
+            gx = gx**1.5
+        pts.append([0.2 + 0.6 * gx, 0.2 + 0.6 * gy, 0.0])
     raw = json.dumps(pts).encode("utf-8")
     parsed = parse_landmarks(raw)
     assert isinstance(parsed, Ok)

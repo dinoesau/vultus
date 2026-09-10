@@ -24,7 +24,6 @@ from backend.gnm_fit import (
     fit_gnm,
     fit_gnm_from_request,
 )
-from backend.gnm_head import MP_68_MAP, eval_landmarks68
 
 
 def _image(marker: int) -> ImageBytes:
@@ -42,14 +41,20 @@ def _landmarks() -> Landmarks:
     return parsed.value
 
 
-def _landmarks_from_identity(coef_idx: int, coef_val: float, scale: float, tx: float, ty: float) -> Landmarks:
-    """478 sinteticos: proyecta coefs conocidos a los 68 del mapa, resto relleno."""
-    coefs = [0.0] * 253
-    coefs[coef_idx] = coef_val
-    projected = eval_landmarks68(tuple(coefs))
-    pts: list[list[float]] = [[0.5, 0.5, 0.0] for _ in range(478)]
-    for k, mp_idx in enumerate(MP_68_MAP):
-        pts[mp_idx] = [scale * projected[k][0] + tx, scale * projected[k][1] + ty, 0.0]
+def _landmarks_variant(warped: bool) -> Landmarks:
+    """478 sinteticos sin pesos: grilla con o sin warp no-lineal en x.
+
+    El warp (x^1.5) no lo absorbe la camara de similaridad del fit real,
+    asi que ambas variantes dan coefs distintos en modo real; en modo
+    doble (CI sin npz) difieren por hash. Sin dependencia del npz.
+    """
+    pts: list[list[float]] = []
+    for i in range(478):
+        gx = (i % 32) / 31.0
+        gy = ((i // 32) % 15) / 14.0
+        if warped:
+            gx = gx**1.5
+        pts.append([0.2 + 0.6 * gx, 0.2 + 0.6 * gy, 0.0])
     parsed = parse_landmarks(json.dumps(pts).encode("utf-8"))
     assert isinstance(parsed, Ok)
     return parsed.value
@@ -72,8 +77,8 @@ def test_fit_deterministic_real() -> None:
 
 def test_fit_differs_per_identity_and_distance_positive() -> None:
     image = _image(0xA1)
-    landmarks_a = _landmarks_from_identity(0, 2.0, 3.0, 0.5, 0.1)
-    landmarks_b = _landmarks_from_identity(0, -2.0, 3.0, 0.5, 0.1)
+    landmarks_a = _landmarks_variant(False)
+    landmarks_b = _landmarks_variant(True)
     ra = fit_gnm(image, landmarks_a)
     rb = fit_gnm(image, landmarks_b)
     assert isinstance(ra, Ok)
@@ -90,7 +95,7 @@ def test_fit_request_bad_payload_fails_loudly() -> None:
 
 def test_fit_p95_inside_fit_timeout() -> None:
     image = _image(0xA1)
-    landmarks = _landmarks_from_identity(0, 2.0, 3.0, 0.5, 0.1)
+    landmarks = _landmarks_variant(False)
     durations: list[float] = []
     for _ in range(21):
         start = time.perf_counter()
@@ -106,7 +111,7 @@ def test_fit_p95_inside_fit_timeout() -> None:
 def test_fit_uses_real_head_basis() -> None:
     if not _real_fit_available():
         pytest.skip("sin pesos GNM: no hay base real que verificar")
-    from backend.gnm_head import eval_mesh, load_gnm_head
+    from backend.gnm_head import eval_landmarks68, eval_mesh, load_gnm_head
 
     head = load_gnm_head()
     mesh = eval_mesh(tuple([0.0] * 253))
@@ -117,7 +122,7 @@ def test_fit_uses_real_head_basis() -> None:
             assert abs(float(vm) - float(vt)) < 1e-4
     zeros = eval_landmarks68(tuple([0.0] * 253))
     assert len(zeros) == 68
-    landmarks = _landmarks_from_identity(0, 2.0, 3.0, 0.5, 0.1)
+    landmarks = _landmarks_variant(False)
     out = fit_gnm(_image(0xA1), landmarks)
     assert isinstance(out, Ok)
     coefs = out.value.coeffs.as_tuple()

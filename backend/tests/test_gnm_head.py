@@ -11,6 +11,7 @@ import json
 import os
 
 import numpy as np
+import pytest
 
 from backend.gnm_head import (
     IDENTITY_DIM,
@@ -28,6 +29,15 @@ from backend.gnm_head import (
     teeth_mask,
     tongue_mask,
 )
+
+
+@pytest.fixture(autouse=True)
+def _require_weights() -> None:
+    """El npz (51 MB) nunca entra a git: en CI sin pesos se salta."""
+    try:
+        load_gnm_head()
+    except RuntimeError:
+        pytest.skip("sin pesos GNM (npz fuera de git): CI usa solo el bin")
 
 
 def test_loader_valida_una_vez_y_cachea() -> None:

@@ -45,8 +45,9 @@ backend/
 ├── Dockerfile.gpu         # sidecar Python ML (torch/diffusers)
 ├── domain.py              # tipos probados ML + Result + errores (sin mitad gateway)
 ├── gnm.py                 # template + heatmap + PNG + zip CPU compartido
-├── gnm_fit.py             # fit GNM 253 coefs + camara (doble determinista)
-├── gnm_texture.py         # proyeccion + warp + inpaint solo ocluidas
+├── gnm_head.py            # cabeza GNM real 17821/35324/253/68 + 5 islas reales
+├── gnm_fit.py             # fit real ridge identidad + camara, expresion neutra
+├── gnm_texture.py         # proyeccion foto resize 512 + warp + inpaint solo ocluidas
 ├── gnm_assemble.py        # 5 islas + PBR + GLB personalizado + zip 7 nombres
 ├── pipeline_local.py      # orquestador local con sink (report/complete/fail) + timeouts
 ├── local_runner.py        # webhook de queue, blobs por rutas dev, sink HTTP
@@ -172,6 +173,10 @@ Seam 3 con golden `UV_LEN = 786432` (`[10,200] vs [4,210] -> [6,10]`, `GLB magic
 Goldens literales a mano para `Progress`, `JobId`, heatmap, albedo y coefs.
 No mockees el pipeline interno.
 Valor esperado es literal golden, no recomputado.
+Regenerar bin: `python3 scripts/extract_gnm_template.py --check` (sin `--check` escribe el bin).
+Gate real: `python3 scripts/e2e-gnm-real.py` (LFW Bush misma/distinta con margen).
+Goldens LFW congelados por sha256.
+No commitear JPEGs LFW.
 
 ### 7.2 Frontend E2E
 

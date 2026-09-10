@@ -176,8 +176,9 @@ Escribe landmarks a `/tmp/{job_id}/landmarks.json` en tmpfs.
 Input: `&ImageBytes + &Landmarks`.
 Output: `FitResult` (253 coefs + camara 3x4 = 1060 bytes).
 Firma `MlSidecarClient::fit(&JobId, &ImageBytes, &Landmarks) -> FitResult` con `encode_fit_request` (`u32 BE len + landmarks_json + image_bytes`) sobre `POST /ml/fit`.
-Runtime GPU con el fitter GNM (dobles deterministas hasta Step 4).
+Fit real es ridge identidad + camara con expresion neutra (3 iters, clip `[-3, 3]`).
 Estima identidad y pose; sin cara falla ruidoso (`FitFailed`).
+Gate LFW Bush exige `d(A,A)=0 < d(A,B misma) < d(A,C distinta)` (`scripts/e2e-gnm-real.py`).
 
 ### 5.5 Worker 3 - Textura GNM
 
@@ -191,7 +192,7 @@ Es la etapa más costosa.
 ### 5.6 Worker 4 - Assemble, Heatmap y Report
 
 Input: `&FitResult + &CompleteUv` por cara (`UV_LEN` ya probado).
-Pasos: `assemble_islands` (5 islas layout v1), `pbr_from_albedo`, `build_personalized_glb(&FitResult, &CompleteUv) -> GnmMesh`, `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` (`|a-b|` por byte), cálculo de distancias antropométricas normalizadas por interpupilar en UV canónico, generación de `report.pdf` con imágenes originales, UVs, heatmap y tabla de métricas con disclaimer.
+Pasos: `assemble_islands` (5 islas layout v2, fronteras filas `[149, 248, 309, 358]`), `pbr_from_albedo`, `build_personalized_glb(&FitResult, &CompleteUv) -> GnmMesh`, `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` (`|a-b|` por byte), cálculo de distancias antropométricas normalizadas por interpupilar en UV canónico, generación de `report.pdf` con imágenes originales, UVs, heatmap y tabla de métricas con disclaimer.
 Output: `uv_a.png, uv_b.png, heatmap.png, mesh_a.glb, mesh_b.glb, pbr_a.png, pbr_b.png`.
 Runtime CPU 300-500ms.
 Todo se escribe a `/tmp/{job_id}/` y se retorna como dict de bytes.
@@ -230,11 +231,13 @@ No face / UV wrong / stub: `Ml::Decode` (500 infra, solo desde sidecar, nunca cl
 Sidecar caído / status no-2xx / vacío: `Ml::{Transport, BadStatus, Empty}` (500 `internal error` al cliente, detalle en logs con `job_id`).
 Invariante rota (`TtlSecs`, `assert_ok`): `Invariant` (500, pagina al dev).
 Timeout: landmarks `5s`, fit `10s`, texture `30s`, `max 60s` total (`TtlSecs` default 60, S10).
+Intactos tras el fit real.
 Cliente cierra pestaña: `Store` expira solo, sin leak.
 
 ## 8. Observabilidad
 
 Métricas por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms` (local `Store` / `Cloudflare Queues lag + Modal GPU util` prod).
+Fit real expone `iterations/loss/duration_ms` en logs (`_LAST_FIT_STATS`).
 Logs estructurados con `job_id` sin datos biométricos (Workers Logs 3 días free, Modal logs).
 `app.py` con lifespan (reaper TTL/2) y logs con `job_id` + `duration_ms`, sin bytes.
 Health: `GET /health` verifica `queue ping` (local `Store` / Queues health prod) y `gpu available` (local `nvidia-smi` / Modal `torch.cuda.is_available`). En prod `Cloudflare Analytics` + `OpenTelemetry` + `Sentry` si se configura.

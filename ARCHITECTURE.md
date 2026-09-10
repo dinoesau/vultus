@@ -104,6 +104,10 @@ Deps compute local: `httpx/Pillow/numpy` (ver `backend/requirements-api.txt`).
 Cada worker es módulo deep con una sola responsabilidad.
 `Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|fit|texture` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FitResult`, `-> CompleteUv`).
 `Worker 4 CPU` (`assemble`, `heatmap`, `report`) vive en `backend/gnm_assemble.py` con firmas `build_personalized_glb`, `pbr_from_albedo` y `compute_heatmap` en `backend/gnm.py` (sin dep `torch/diffusers/mediapipe`).
+`backend/gnm_head.py` es modulo profundo tras el seam (loader `17821/35324/253/68`, 5 islas reales `skin/left_eye/right_eye/teeth/tongue`).
+Extractor versionado `scripts/extract_gnm_template.py` congela `backend/assets/gnm_template.bin`.
+Layout UV es v2 (fronteras filas `[149, 248, 309, 358]`).
+Sin pesos el doble local sigue; con `VULTUS_REAL_ML=1` el fallo es ruidoso (`FitFailed`).
 Reciben tipos ya probados, escriben a `/tmp/{job_id}` en tmpfs, retornan tipos con `UV_LEN`.
 No conocen HTTP ni frontend.
 
@@ -250,7 +254,7 @@ Métricas expuestas para `OpenTelemetry`.
 
 Seam 1 con suite pool en runtime real (6 tests) + WS real.
 Seam 2 con sink en memoria (`report` ordenado, `complete`, `fail`).
-Seam 3 con golden `UV_LEN` (`[10,200] vs [4,210] -> [6,10]`, `GLB magic`) y `Landmarks` 478.
+Seam 3 con golden `UV_LEN` (`[10,200] vs [4,210] -> [6,10]`, `GLB magic` `17821/35324` layout v2) y `Landmarks` 478.
 Goldens literales y tipos probados en el borde.
 Nada de unit tests al pipeline interno.
 Ver `CONTEXT.md` y `PIPELINE.md` para contratos.

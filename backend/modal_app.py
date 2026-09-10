@@ -112,11 +112,34 @@ def _check_landmarks_json(raw: bytes) -> None:
 # causa) en vez de devolver un doble silencioso: Error Hiding prohibido.
 
 
+def _gnm_npz_present() -> bool:
+    """True si el npz GNM existe en alguna ruta candidata de `gnm_head`.
+
+    S7 prod-block: la misma lista de candidatos que `load_gnm_head`
+    (GNM_NPZ_PATH directo, GNM_ASSETS_DIR, WEIGHTS_DIR, raiz del repo).
+    Import lazy para no acoplar el import del modulo a numpy.
+    """
+    try:
+        from backend.gnm_head import _candidate_npz_paths as _cands
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        import gnm_head as _gh  # type: ignore[import-not-found]
+
+        _cands = _gh._candidate_npz_paths
+    try:
+        return any(os.path.isfile(p) for p in _cands())
+    except Exception:
+        return False
+
+
 def _weights_present() -> bool:
+    # S7: real exige MediaPipe task Y npz GNM. Sin npz no hay fit real
+    # (ver `gnm_fit._real_fit_available`) y auto debe seguir en dobles.
     need = [
         os.path.join(WEIGHTS_DIR, "mediapipe", "face_landmarker.task"),
     ]
-    return all(os.path.exists(p) for p in need)
+    if not all(os.path.exists(p) for p in need):
+        return False
+    return _gnm_npz_present()
 
 
 def _use_real() -> bool:
@@ -199,7 +222,12 @@ def _impl_landmarks(body: bytes) -> bytes:
 
 
 def _impl_fit(payload: bytes) -> bytes:
-    """Delega al modulo `gnm_fit`: fit-request -> 1060 bytes (253f + 12f LE)."""
+    """Delega al modulo `gnm_fit`: fit-request -> 1060 bytes (253f + 12f LE).
+
+    S7 prod-block: con `_use_real()` el doble esta prohibido. Si el fit
+    real no esta disponible (npz ausente) se falla ruidoso (RuntimeError
+    -> 500 con causa) antes de delegar, nunca doble silencioso.
+    """
     try:
         from backend.domain import Err as _Err
         from backend.domain import FitFailed as _FitFailed
@@ -212,6 +240,12 @@ def _impl_fit(payload: bytes) -> bytes:
         from domain import domain_to_message as _msg  # type: ignore[no-redef]
         from gnm_fit import fit_gnm_from_request  # type: ignore[no-redef]
         from pipeline_local import encode_fit_result  # type: ignore[no-redef]
+    if _use_real() and not _gnm_npz_present():
+        # Sin npz no hay fit real (`_real_fit_available` seria False y el
+        # seam caeria al doble): fallar ruidoso aqui, nunca doble
+        # silencioso. Casos resto (npz corrupto, landmarks ausentes) ya
+        # llegan como Err(FitFailed) -> RuntimeError abajo.
+        raise RuntimeError("real fit required but GNM head weights missing (npz ausente)")
 
     result = fit_gnm_from_request(payload)
     if isinstance(result, _Err):
@@ -310,6 +344,9 @@ else:
 # modal secret create vultus-cloudflare CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... CLOUDFLARE_QUEUE_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_BUCKET=vultus-jobs VULTUS_API_URL=https://api.vultus.esau.com.mx
 # Timeouts espejo de PipelineConfig S10 (5+10+30 dentro de TTL 60).
 # Base: fit doble p95 local <1s; T4 real pendiente Step 4, el total no se mueve.
+# S7: el fit real itera 3 outer fijos (<10s, ver test_fit_p95_inside_fit_timeout);
+# una optimizacion lenta no estira timeouts: fit_gnm devuelve Err(FitFailed) y
+# _impl_fit lo propaga como 500 ruidoso antes del TTL 60 de fit_worker.
 LANDMARKS_TIMEOUT_SECS = 5
 FIT_TIMEOUT_SECS = 10
 TEXTURE_TIMEOUT_SECS = 30
@@ -459,7 +496,20 @@ def fit_infer(job_id: str, payload: bytes) -> bytes:
     t0 = time.perf_counter()
     out = _impl_fit(payload)
     dt = int((time.perf_counter() - t0) * 1000)
-    logger.info("fit ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
+    try:
+        from backend.gnm_fit import _LAST_FIT_STATS as _fit_stats
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from gnm_fit import _LAST_FIT_STATS as _fit_stats  # type: ignore[no-redef]
+    iterations = int(_fit_stats.get("iterations", 0))
+    loss = float(_fit_stats.get("loss", float("nan")))
+    logger.info(
+        "fit ok job=%s out_len=%d duration_ms=%d iterations=%d loss=%.6g",
+        job_id,
+        len(out),
+        dt,
+        iterations,
+        loss,
+    )
     return out
 
 

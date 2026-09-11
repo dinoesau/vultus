@@ -786,15 +786,19 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
     rb_fit = _parse_fit(bytes(fit_b))
     ra_uv = _parse_uv_a(bytes(uv_a))
     rb_uv = _parse_uv_a(bytes(uv_b))
-    assert isinstance(ra_fit, _OkA) and isinstance(rb_fit, _OkA)
-    assert isinstance(ra_uv, _OkA) and isinstance(rb_uv, _OkA)
+    if not isinstance(ra_fit, _OkA) or not isinstance(rb_fit, _OkA):
+        raise RuntimeError(f"assemble parse fit failed: a={ra_fit} b={rb_fit}")
+    if not isinstance(ra_uv, _OkA) or not isinstance(rb_uv, _OkA):
+        raise RuntimeError("assemble parse uv failed")
     heat = _heatmap_abs_diff(bytes(uv_a), bytes(uv_b))
     r_mesh_a = _glb(ra_fit.value, ra_uv.value)
     r_mesh_b = _glb(rb_fit.value, rb_uv.value)
     r_pbr_a = _pbr(ra_uv.value)
     r_pbr_b = _pbr(rb_uv.value)
-    assert isinstance(r_mesh_a, _OkA) and isinstance(r_mesh_b, _OkA)
-    assert isinstance(r_pbr_a, _OkA) and isinstance(r_pbr_b, _OkA)
+    if not isinstance(r_mesh_a, _OkA) or not isinstance(r_mesh_b, _OkA):
+        raise RuntimeError(f"assemble glb failed: a={r_mesh_a} b={r_mesh_b}")
+    if not isinstance(r_pbr_a, _OkA) or not isinstance(r_pbr_b, _OkA):
+        raise RuntimeError(f"assemble pbr failed: a={r_pbr_a} b={r_pbr_b}")
     mesh_a = bytes(r_mesh_a.value.as_bytes())
     mesh_b = bytes(r_mesh_b.value.as_bytes())
     assemble_ms = int((time.perf_counter() - t_assemble) * 1000)

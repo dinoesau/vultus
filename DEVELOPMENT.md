@@ -176,6 +176,8 @@ Valor esperado es literal golden, no recomputado.
 Regenerar bin: `python3 scripts/extract_gnm_template.py --check` (sin `--check` escribe el bin).
 Gate real: `python3 scripts/e2e-gnm-real.py` (LFW Bush misma/distinta con margen).
 Goldens LFW congelados por sha256.
+CHECK 5 fija la orientacion V: ancla nariz (dist < 60) + evidencia >= 0.15.
+Diag de camara: `python3 scripts/render_diag.py --photo <jpg> --out <png>`.
 No commitear JPEGs LFW.
 
 ### 7.2 Frontend E2E

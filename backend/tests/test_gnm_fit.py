@@ -23,6 +23,7 @@ from backend.gnm_fit import (
     coeff_distance,
     fit_gnm,
     fit_gnm_from_request,
+    project,
 )
 
 
@@ -135,3 +136,50 @@ def test_fit_uses_real_head_basis() -> None:
     assert _LAST_FIT_STATS["iterations"] == 3.0
     assert math.isfinite(_LAST_FIT_STATS["loss"]) and _LAST_FIT_STATS["loss"] >= 0.0
     assert _LAST_FIT_STATS["duration_ms"] > 0.0
+
+
+def test_project_identity_maps_xy_hand_literals() -> None:
+    import numpy as np
+
+    from backend.domain import parse_camera_params
+
+    parsed = parse_camera_params([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    assert isinstance(parsed, Ok)
+    pts = np.asarray([[0.2, 0.3, 0.5], [0.7, 0.1, -0.2]], dtype=np.float64)
+    out = project(parsed.value, pts)
+    assert out.shape == (2, 2)
+    assert abs(float(out[0, 0]) - 0.2) < 1e-12
+    assert abs(float(out[0, 1]) - 0.3) < 1e-12
+    assert abs(float(out[1, 0]) - 0.7) < 1e-12
+    assert abs(float(out[1, 1]) - 0.1) < 1e-12
+
+
+def test_project_scale_translate_hand_literals() -> None:
+    import numpy as np
+
+    from backend.domain import parse_camera_params
+
+    parsed = parse_camera_params([2.0, 0.0, 0.0, 0.1, 0.0, 2.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.0])
+    assert isinstance(parsed, Ok)
+    pts = np.asarray([[0.5, 0.25, 1.0]], dtype=np.float64)
+    out = project(parsed.value, pts)
+    assert abs(float(out[0, 0]) - 1.1) < 1e-12
+    assert abs(float(out[0, 1]) - 0.7) < 1e-12
+
+
+def test_estimate_camera_recovers_opposite_y_sign() -> None:
+    import numpy as np
+
+    from backend.gnm_fit import _estimate_camera
+
+    rng = np.random.default_rng(7)
+    pred = rng.uniform(-0.07, 0.07, size=(68, 3))
+    pred[:, 1] += 0.25
+    targets = np.stack([2.0 * pred[:, 0] + 0.1, -2.0 * pred[:, 1] + 0.9], axis=1)
+    sx, tx, sy, ty = _estimate_camera(pred, targets)
+    assert abs(sx - 2.0) < 1e-9
+    assert abs(tx - 0.1) < 1e-9
+    assert abs(sy + 2.0) < 1e-9
+    assert abs(ty - 0.9) < 1e-9
+    assert sx > 0.0
+    assert sy < 0.0

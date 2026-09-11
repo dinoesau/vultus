@@ -30,6 +30,13 @@ _ABS_WEIGHTS = "/Users/esau.martinez/Code/weights/gnm"
 
 _GROUP_THRESHOLD = 1e-4
 
+# Convencion V unica documentada: las UVs de GNM viven con origen
+# abajo-izquierda (su propio renderer flipea V). El bake trabaja en espacio
+# pixel (flipea al rasterizar, como blob) y el export escribe `v = 1 - v_uv`
+# a convencion glTF (origen arriba-izquierda). Un solo flip total por
+# construccion; doble-flip y cero-flip fallan el gate de orientacion (S5).
+GNM_UV_ORIGIN_BOTTOM_LEFT = True
+
 _ISLAND_MIN = 1
 _ISLAND_MAX = 5
 
@@ -72,6 +79,7 @@ class GnmHead:
 
     template_positions: NDArray[np.float32]
     triangles: NDArray[np.int32]
+    triangle_uvs: NDArray[np.float32]
     vertex_uvs: NDArray[np.float32]
     identity_basis: NDArray[np.float32]
     vertex_groups: NDArray[np.float32]
@@ -227,6 +235,13 @@ def _load_uncached() -> GnmHead:
         if int(tri64.min()) < 0 or int(tri64.max()) >= TEMPLATE_VERTS_REAL:
             raise RuntimeError("gnm head triangles con indice fuera de rango")
         triangles: NDArray[np.int32] = tri64.astype(np.int32)
+        tri_uvs = _need_f32(data, "triangle_uvs")
+        if tri_uvs.shape != (TEMPLATE_TRIS_REAL, 3, 2):
+            raise RuntimeError(f"gnm head triangle_uvs shape {tri_uvs.shape}")
+        if not bool(np.all(np.isfinite(tri_uvs))):
+            raise RuntimeError("gnm head triangle_uvs no finita")
+        if float(tri_uvs.min()) < 0.0 or float(tri_uvs.max()) > 1.0:
+            raise RuntimeError("gnm head triangle_uvs fuera de 0..1")
         groups = _need_f32(data, "vertex_groups")
         if groups.shape[1] != TEMPLATE_VERTS_REAL:
             raise RuntimeError(f"gnm head vertex_groups shape {groups.shape}")
@@ -248,6 +263,7 @@ def _load_uncached() -> GnmHead:
     return GnmHead(
         template_positions=positions,
         triangles=triangles,
+        triangle_uvs=np.ascontiguousarray(tri_uvs, dtype=np.float32),
         vertex_uvs=vertex_uvs,
         identity_basis=basis,
         vertex_groups=groups,
@@ -394,3 +410,41 @@ def tongue_mask() -> list[bool]:
     head = load_gnm_head()
     mask: list[bool] = _group_mask(head, _ISLAND_TONGUE).tolist()
     return mask
+
+
+def raw_triangles() -> NDArray[np.int32]:
+    """Passthrough crudo de `triangles` 35324x3 (sin copiar semantica)."""
+    return np.asarray(load_gnm_head().triangles, dtype=np.int32)
+
+
+def raw_triangle_uvs() -> NDArray[np.float32]:
+    """Passthrough crudo de `triangle_uvs` 35324x3x2 en origen abajo-izquierda."""
+    return np.asarray(load_gnm_head().triangle_uvs, dtype=np.float32)
+
+
+def vertex_normals(positions: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Normales por vertice ponderadas por area, normalizadas.
+
+    Entrada (17821,3); salida (17821,3) finita. Triangulos degenerados
+    aportan cero; vertices aislados quedan en (0,0,0) para que el facing
+    los marque no visibles en el bake.
+    """
+    pos = np.asarray(positions, dtype=np.float64)
+    if pos.shape != (TEMPLATE_VERTS_REAL, 3):
+        raise ValueError(f"positions shape {pos.shape} != {(TEMPLATE_VERTS_REAL, 3)}")
+    if not bool(np.all(np.isfinite(pos))):
+        raise ValueError("positions no finitas")
+    tris = np.asarray(load_gnm_head().triangles, dtype=np.int64)
+    acc: NDArray[np.float64] = np.zeros_like(pos)
+    p0 = pos[tris[:, 0]]
+    p1 = pos[tris[:, 1]]
+    p2 = pos[tris[:, 2]]
+    face = np.cross(p1 - p0, p2 - p0)
+    np.add.at(acc, tris[:, 0], face)
+    np.add.at(acc, tris[:, 1], face)
+    np.add.at(acc, tris[:, 2], face)
+    lens = np.linalg.norm(acc, axis=1)
+    out: NDArray[np.float64] = np.zeros_like(acc)
+    nz = lens > 0.0
+    out[nz] = acc[nz] / lens[nz][:, None]
+    return out

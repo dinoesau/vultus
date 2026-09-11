@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from backend.gnm_head import (
+    GNM_UV_ORIGIN_BOTTOM_LEFT,
     IDENTITY_DIM,
     LANDMARKS68,
     MEDIAPIPE_POINTS,
@@ -26,8 +27,11 @@ from backend.gnm_head import (
     island_vertex_mask,
     load_gnm_head,
     mediapipe478_to_gnm68_targets,
+    raw_triangle_uvs,
+    raw_triangles,
     teeth_mask,
     tongue_mask,
+    vertex_normals,
 )
 
 
@@ -136,3 +140,27 @@ def test_gnm_head_parsea_con_gramatica_py310() -> None:
     with open(os.path.join(backend_dir, "gnm_head.py"), encoding="utf-8") as f:
         src = f.read()
     ast.parse(src, filename=os.path.join("backend", "gnm_head.py"), feature_version=(3, 10))
+
+
+def test_raw_accessors_y_convention_v() -> None:
+    assert GNM_UV_ORIGIN_BOTTOM_LEFT is True
+    tris = raw_triangles()
+    uvs = raw_triangle_uvs()
+    assert tris.shape == (35324, 3)
+    assert uvs.shape == (35324, 3, 2)
+    assert float(np.asarray(uvs).min()) >= 0.0
+    assert float(np.asarray(uvs).max()) <= 1.0
+
+
+def test_vertex_normals_plano_conocido() -> None:
+    head = load_gnm_head()
+    template = np.asarray(head.template_positions, dtype=np.float64)
+    flat = template.copy()
+    flat[:, 2] = 0.0
+    normals = vertex_normals(flat)
+    assert normals.shape == (17821, 3)
+    assert bool(np.all(np.isfinite(normals)))
+    lens = np.linalg.norm(normals, axis=1)
+    nz = lens > 0.0
+    assert bool(np.all(np.abs(lens[nz] - 1.0) < 1e-9))
+    assert bool(np.all(np.abs(np.abs(normals[nz][:, 2]) - 1.0) < 1e-9))

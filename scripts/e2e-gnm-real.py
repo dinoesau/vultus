@@ -51,11 +51,11 @@ PATH_C = DATASET / "Aaron_Eckhart" / "Aaron_Eckhart_0001.jpg"
 SHA_A = "b559818d8704954f81e2df57e9fb5dc0962dd8811cc4ff27cbbd2afc7c12a576"
 SHA_B = "f04d53698da366ca8562b2d24ad9ed058116621b8fd0d51fcb46a6e5e470e0f3"
 
-EXPECTED_VERTS = 17821
+EXPECTED_VERTS = 18437
 SMOOTH_MAX = 50.0
 STD_LO = 15.0
 STD_HI = 100.0
-CORR_MIN = 0.3
+GRAY_MAX = 0.9
 
 TASK_CANDIDATES = (
     REPO_ROOT / "weights" / "mediapipe" / "face_landmarker.task",
@@ -267,7 +267,7 @@ def main() -> int:
         f"(esperado {UV_LEN}); magic A/B/C="
         f"{magics['A']!r}/{magics['B']!r}/{magics['C']!r}; "
         f"verts A/B/C={verts['A']}/{verts['B']}/{verts['C']} "
-        f"(esperado {EXPECTED_VERTS}; doble actual 4225 -> rojo esperado)."
+        f"(esperado {EXPECTED_VERTS} con seams; el doble viejo daba 4225)."
         f"{glb_note}",
     )
 
@@ -284,28 +284,28 @@ def main() -> int:
         f"C={smooth['C']:.2f} (umbral <{SMOOTH_MAX}; ruido sha256 ~80+)",
     )
 
-    # --- CHECK 3: std 15..100 + correlacion con thumbnail > 0.3 ---
+    # --- CHECK 3: std 15..100 + contenido foto (gris < 0.9) ---
+    # Adaptado por el bake: la corr contra el thumbnail (~0 por construccion,
+    # el albedo vive en layout UV desenrollado) ya no discrimina foto de
+    # ruido; la reemplaza gris<0.9 (hay pixeles muestreados de la foto) con
+    # std en rango (foto real, no plano ni hash). El ancla de orientacion
+    # vive en CHECK 5.
     stds: dict[str, float] = {}
-    corrs: dict[str, float] = {}
+    grays: dict[str, float] = {}
     for tag in ("A", "B", "C"):
         arr = np.frombuffer(albedos[tag], dtype=np.uint8).astype(np.float64)
         stds[tag] = float(arr.std())
-        thumb = np.asarray(
-            Image.open(io.BytesIO(raws[tag])).convert("RGB").resize((512, 512))
-        ).astype(np.float64)
-        corrs[tag] = pearson_corr(
-            thumb, np.frombuffer(albedos[tag], dtype=np.uint8)
-        )
+        grays[tag] = float((((arr.reshape(512, 512, 3) == 128.0).all(axis=2))).mean())
     c3_ok = all(STD_LO <= v <= STD_HI for v in stds.values()) and all(
-        v > CORR_MIN for v in corrs.values()
+        v < GRAY_MAX for v in grays.values()
     )
     check(
         "3-foto-vs-ruido",
         c3_ok,
         f"std A={stds['A']:.2f} B={stds['B']:.2f} C={stds['C']:.2f} "
-        f"(rango {STD_LO}..{STD_HI}); corr A={corrs['A']:.3f} "
-        f"B={corrs['B']:.3f} C={corrs['C']:.3f} (umbral >{CORR_MIN}; "
-        f"dobles hash no correlacionan ~0)",
+        f"(rango {STD_LO}..{STD_HI}); gris A={grays['A']:.3f} "
+        f"B={grays['B']:.3f} C={grays['C']:.3f} (umbral <{GRAY_MAX}; "
+        f"gris total = sin muestreo)",
     )
 
     # --- CHECK 4: margen estricto d(A,A)==0 < d(A,B) < d(A,C) ---
@@ -321,6 +321,60 @@ def main() -> int:
         f"d(A,A)={d_self:.6f} d(A,Bmisma)={d_same:.6f} "
         f"d(A,Cdistinta)={d_diff:.6f} "
         f"(exige 0==d_self<d_same<d_diff estricto)",
+    )
+
+    # --- CHECK 5: orientacion V + evidencia (defecto de prod: textura flipeada) ---
+    # Desviacion documentada del plan: el plan pedia corr top-half > 0.5 entre
+    # albedo y thumbnail, pero el albedo horneado vive en layout UV
+    # desenrollado y su corr contra la foto es ~0 orientado o flipeado
+    # (medido -0.04/-0.03 en Bush). El gate ancla la punta de la nariz
+    # (dlib 30): color del atlas en su UV vs foto en su landmark. Flipeado en
+    # V muestrea la frente/pelo (dist ~107 en Bush); orientado dist ~21.
+    # Umbral 60 + evidencia >= 0.15. Se verifica en rojo con flip temporal.
+    NOSE_DLIB = 30
+    NOSE_DIST_MAX = 60.0
+    EVIDENCE_MIN = 0.15
+    nose_dists: dict[str, float] = {}
+    gray_frac: dict[str, float] = {}
+    try:
+        from backend.gnm_head import MP_68_MAP, load_gnm_head
+
+        head = load_gnm_head()
+        vuv = np.asarray(head.vertex_uvs, dtype=np.float64)
+        peak = int(head.landmark_indices[NOSE_DLIB][np.argmax(head.landmark_weights[NOSE_DLIB])])
+        nu, nv = float(vuv[peak][0]), float(vuv[peak][1])
+        for tag in ("A", "B", "C"):
+            alb = np.frombuffer(albedos[tag], dtype=np.uint8).reshape(512, 512, 3).astype(np.float64)
+            gray_frac[tag] = float(((alb == 128.0).all(axis=2)).mean())
+            au, av = nu * 511.0, (1.0 - nv) * 511.0
+            bak_rgb = alb[round(av), round(au)]
+            thumb = np.asarray(
+                Image.open(io.BytesIO(raws[tag])).convert("RGB").resize((512, 512))
+            ).astype(np.float64)
+            lm_pts = json.loads(landmarks[tag].as_bytes().decode("utf-8"))
+            mp_idx = MP_68_MAP[NOSE_DLIB]
+            dx = float(lm_pts[mp_idx][0]) * 511.0
+            dy = float(lm_pts[mp_idx][1]) * 511.0
+            det_rgb = thumb[round(dy), round(dx)]
+            nose_dists[tag] = float(np.linalg.norm(bak_rgb - det_rgb))
+            # Diagnostico del plan (informativo): corr por mitades.
+            top_c = pearson_corr(alb[:256], thumb[:256])
+            bot_c = pearson_corr(alb[256:], thumb[256:])
+            print(f"[ORIENT {tag}] nose_dist={nose_dists[tag]:.1f} gray={gray_frac[tag]:.3f} "
+                  f"top_corr={top_c:.3f} bot_corr={bot_c:.3f}")
+        c5_ok = all(v < NOSE_DIST_MAX for v in nose_dists.values()) and all(
+            (1.0 - g) >= EVIDENCE_MIN for g in gray_frac.values()
+        )
+    except RuntimeError as exc:
+        c5_ok = False
+        print(f"[ORIENT] FAIL sin pesos GNM: {exc}")
+    check(
+        "5-orientacion",
+        c5_ok,
+        f"nose_dist A/B/C={nose_dists.get('A', -1):.1f}/{nose_dists.get('B', -1):.1f}/{nose_dists.get('C', -1):.1f} "
+        f"(umbral <{NOSE_DIST_MAX}); evidencia A/B/C="
+        f"{1.0 - gray_frac.get('A', 1.0):.3f}/{1.0 - gray_frac.get('B', 1.0):.3f}/{1.0 - gray_frac.get('C', 1.0):.3f} "
+        f"(min {EVIDENCE_MIN}; orientado Bush ~0.23, flipeado ~107 en nariz)",
     )
 
     failed = [name for name, ok, _ in results if not ok]

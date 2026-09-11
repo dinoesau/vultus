@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 from backend.domain import (
     CAMERA_PARAMS_LEN,
     GNM_COEFFS_LEN,
+    CameraParams,
     DomainError,
     Err,
     FitFailed,
@@ -98,42 +99,43 @@ def _landmark_model() -> tuple[NDArray[np.float64], NDArray[np.float64]]:
 
 def _estimate_camera(
     pred: NDArray[np.float64], targets: NDArray[np.float64]
-) -> tuple[float, float, float]:
-    """Weak-perspective cerrada: x = s*X + tx, y = s*Y + ty por lstsq."""
-    design: NDArray[np.float64] = np.zeros((2 * LANDMARKS68, 3), dtype=np.float64)
-    rhs: NDArray[np.float64] = np.zeros((2 * LANDMARKS68,), dtype=np.float64)
-    design[0::2, 0] = pred[:, 0]
-    design[0::2, 1] = 1.0
-    design[1::2, 0] = pred[:, 1]
-    design[1::2, 2] = 1.0
-    rhs[0::2] = targets[:, 0]
-    rhs[1::2] = targets[:, 1]
-    raw = np.linalg.lstsq(design, rhs, rcond=None)[0]
-    sol: NDArray[np.float64] = np.asarray(raw, dtype=np.float64)
-    s = float(sol[0])
-    tx = float(sol[1])
-    ty = float(sol[2])
-    if not (math.isfinite(s) and math.isfinite(tx) and math.isfinite(ty)):
+) -> tuple[float, float, float, float]:
+    """Weak-perspective por eje: x = sx*X + tx, y = sy*Y + ty por lstsq.
+
+    Hallazgo Wave 1 (Bush real): corr X +0.93, corr Y -0.94. La Y de malla
+    es y-up y los targets MediaPipe son y-down, asi que `sy` sale negativa
+    mientras `sx` sale positiva. Un `s` compartido no puede ajustar ambos
+    ejes y colapsa el fit (error ~28px); por eso cada eje estima su escala.
+    """
+    dx = np.stack([pred[:, 0], np.ones((LANDMARKS68,), dtype=np.float64)], axis=1)
+    dy = np.stack([pred[:, 1], np.ones((LANDMARKS68,), dtype=np.float64)], axis=1)
+    solx = np.asarray(np.linalg.lstsq(dx, targets[:, 0], rcond=None)[0], dtype=np.float64)
+    soly = np.asarray(np.linalg.lstsq(dy, targets[:, 1], rcond=None)[0], dtype=np.float64)
+    sx = float(solx[0])
+    tx = float(solx[1])
+    sy = float(soly[0])
+    ty = float(soly[1])
+    if not (math.isfinite(sx) and math.isfinite(tx) and math.isfinite(sy) and math.isfinite(ty)):
         raise ValueError("non-finite camera estimate")
-    return (s, tx, ty)
+    return (sx, tx, sy, ty)
 
 
 def _solve_coefs(
     x0: NDArray[np.float64],
     basis: NDArray[np.float64],
     targets: NDArray[np.float64],
-    cam: tuple[float, float, float],
+    cam: tuple[float, float, float, float],
 ) -> NDArray[np.float64]:
     """Ridge cerrada sobre 253 coefs con camara fija, recorte a [-3, 3]."""
-    s, tx, ty = cam
+    sx, tx, sy, ty = cam
     dim = GNM_COEFFS_LEN
     count = 2 * LANDMARKS68
     mat: NDArray[np.float64] = np.zeros((count, dim), dtype=np.float64)
-    mat[0::2, :] = s * basis[:, :, 0].T
-    mat[1::2, :] = s * basis[:, :, 1].T
+    mat[0::2, :] = sx * basis[:, :, 0].T
+    mat[1::2, :] = sy * basis[:, :, 1].T
     rhs: NDArray[np.float64] = np.zeros((count,), dtype=np.float64)
-    rhs[0::2] = targets[:, 0] - (s * x0[:, 0] + tx)
-    rhs[1::2] = targets[:, 1] - (s * x0[:, 1] + ty)
+    rhs[0::2] = targets[:, 0] - (sx * x0[:, 0] + tx)
+    rhs[1::2] = targets[:, 1] - (sy * x0[:, 1] + ty)
     aug: NDArray[np.float64] = np.vstack([mat, math.sqrt(_RIDGE_LAMBDA) * np.eye(dim, dtype=np.float64)])
     aug_rhs: NDArray[np.float64] = np.concatenate([rhs, np.zeros((dim,), dtype=np.float64)])
     raw = np.linalg.lstsq(aug, aug_rhs, rcond=None)[0]
@@ -156,15 +158,15 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> FitResult:
         raise ValueError("non-finite fit targets")
     x0, basis = _landmark_model()
     coefs: NDArray[np.float64] = np.zeros((GNM_COEFFS_LEN,), dtype=np.float64)
-    cam: tuple[float, float, float] = (1.0, 0.0, 0.0)
+    cam: tuple[float, float, float, float] = (1.0, 0.0, 1.0, 0.0)
     for _ in range(_OUTER_ITERS):
         pred: NDArray[np.float64] = x0 + np.einsum("d,dmc->mc", coefs, basis)
         cam = _estimate_camera(pred, targets)
         coefs = _solve_coefs(x0, basis, targets, cam)
-    s, tx, ty = cam
+    sx, tx, sy, ty = cam
     final_mesh: NDArray[np.float64] = x0 + np.einsum("d,dmc->mc", coefs, basis)
     proj: NDArray[np.float64] = np.stack(
-        [s * final_mesh[:, 0] + tx, s * final_mesh[:, 1] + ty], axis=1
+        [sx * final_mesh[:, 0] + tx, sy * final_mesh[:, 1] + ty], axis=1
     )
     loss = float(((proj - targets) ** 2).mean())
     if not math.isfinite(loss):
@@ -175,7 +177,7 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> FitResult:
     _LAST_FIT_STATS["duration_ms"] = duration_ms
     coeffs_parsed = parse_gnm_coeffs([float(v) for v in coefs])
     camera_parsed = parse_camera_params(
-        [s, 0.0, 0.0, tx, 0.0, s, 0.0, ty, 0.0, 0.0, 0.0, 0.0]
+        [sx, 0.0, 0.0, tx, 0.0, sy, 0.0, ty, 0.0, 0.0, 0.0, 0.0]
     )
     assert isinstance(coeffs_parsed, Ok)
     assert isinstance(camera_parsed, Ok)
@@ -214,3 +216,30 @@ def coeff_distance(a: GnmCoeffs, b: GnmCoeffs) -> float:
     if not math.isfinite(result):
         return float("inf")
     return result
+
+
+def project(camera: CameraParams, points: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Proyecta puntos 3D a coords normalizadas 0..1 (espacio MediaPipe, y-down).
+
+    La camara son 12 floats row-major 3x4: [r00,r01,r02,tx, r10,r11,r12,ty,
+    r20,r21,r22,tz]. Solo las dos primeras filas proyectan; la tercera se
+    ignora (el fit weak-perspective actual la deja en ceros).
+    Semantica de ejes: se asume y-down igual que los targets MediaPipe que
+    alimentan `_real_fit` (sin flip). El probe rojo de Wave 1 (overlay Bush +
+    corr top-half) revela si la Y de malla necesita flip o cambio de signo
+    en `s`; no asumir, medir.
+    """
+    arr = np.asarray(points, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] != 3:
+        raise ValueError(f"points shape {arr.shape} != (N, 3)")
+    if not bool(np.all(np.isfinite(arr))):
+        raise ValueError("points no finitos")
+    c = camera.as_tuple()
+    if len(c) != 12:
+        raise ValueError(f"camera len {len(c)} != 12")
+    if not all(math.isfinite(v) for v in c):
+        raise ValueError("camera no finita")
+    x = c[0] * arr[:, 0] + c[1] * arr[:, 1] + c[2] * arr[:, 2] + c[3]
+    y = c[4] * arr[:, 0] + c[5] * arr[:, 1] + c[6] * arr[:, 2] + c[7]
+    out: NDArray[np.float64] = np.stack([x, y], axis=1)
+    return out

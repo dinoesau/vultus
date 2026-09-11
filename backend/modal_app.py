@@ -802,6 +802,26 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
     mesh_a = bytes(r_mesh_a.value.as_bytes())
     mesh_b = bytes(r_mesh_b.value.as_bytes())
     assemble_ms = int((time.perf_counter() - t_assemble) * 1000)
+    try:
+        import numpy as _np
+
+        def _evidence_pct(raw: bytes) -> float:
+            arr = _np.frombuffer(raw, dtype=_np.uint8).reshape(-1, 3)
+            gray = (arr == 128).all(axis=1).mean()
+            return float(1.0 - gray)
+
+        ev_a = _evidence_pct(bytes(uv_a))
+        ev_b = _evidence_pct(bytes(uv_b))
+    except Exception:  # el log nunca tumba el job
+        ev_a = float("nan")
+        ev_b = float("nan")
+    logger.info(
+        "bake done job=%s evidence_pct_a=%.4f evidence_pct_b=%.4f assemble_ms=%d",
+        job_id,
+        ev_a,
+        ev_b,
+        assemble_ms,
+    )
     logger.info(
         "assemble gnm done job=%s assemble_ms=%d mesh_a_len=%d mesh_b_len=%d",
         job_id,

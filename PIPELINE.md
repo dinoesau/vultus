@@ -64,11 +64,17 @@ Salida `FitResult { 253 coefs + camara 3x4 }` (falla ruidoso sin cara).
 Sin landmarks no puede estimar pose.
 
 - **Textura GNM** depende de `image + fit + landmarks`.
-Salida `albedo` con detalle foto-real; solo ocluidas se inpaintean.
+Salida `albedo` con detalle foto-real; lo no visible queda en gris honesto.
 Es el cuello de botella y corre 2 veces en paralelo, una por cara.
+Vocabulario del bake: evidencia (texeles muestreados de la foto) vs gris.
+El gate E2E (`scripts/e2e-gnm-real.py` CHECK 5) ancla la punta de la nariz
+(distancia de color < 60) y exige evidencia >= 0.15; el overlay
+`scripts/render_diag.py --photo <jpg> --out <png>` muestra detected-68 en
+verde vs projected-68 en rojo con el error medio en px.
 
 - **Assemble** depende de `fit + albedo` por cara.
-Ensambla 5 islas GNM, deriva PBR y exporta GLB personalizado.
+Ensambla 5 islas GNM, deriva PBR y exporta GLB personalizado con seams reales
+(vertices partidos por `(v, vt)` unico, 18437 con pesos) y material emisivo.
 Salida `mesh GNM` con geometria de la persona.
 
 - **Heatmap + Report** depende de `complete-uv A y B` ya en mismo espacio canónico.

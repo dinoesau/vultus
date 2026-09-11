@@ -9,7 +9,6 @@ from backend.gnm_fit import fit_gnm
 from backend.gnm_texture import (
     build_albedo,
     inpaint_occluded,
-    occlusion_mask,
     project_texture,
     warp_with_landmarks,
 )
@@ -55,31 +54,23 @@ def test_albedo_derives_from_real_photo_not_hallucinated() -> None:
     assert list(b.value.as_bytes()[:4]) == [178, 178, 178, 178]
 
 
-def test_inpaint_touches_only_occluded_texels() -> None:
+def test_inpaint_is_identity_never_adds_comb() -> None:
+    """Regresion del peine de prod: el inpaint no toca ningun byte.
+
+    El hash anterior corrompia 1/8 texels con periodo 32B y ningun gate lo
+    veia porque los stubs solidos son punto fijo del promediado. Por eso el
+    input es estructurado (gradiente + alterno): cualquier muestreo parcial
+    dejaria diff != 0 o periodicidad a lag 32.
+    """
     from backend.domain import parse_complete_uv
 
     landmarks = _landmarks()
-    # Patron alterno no plano: el fallback solido de project_texture es punto
-    # fijo del promediado de vecinos, asi que el inpaint se prueba sobre un
-    # albedo alterno donde cada texel ocluido cambia si o si (vecinos iguales
-    # entre si y distintos del centro) y cada no ocluido queda intacto.
-    pattern = bytes(255 if i % 2 else 0 for i in range(UV_LEN))
-    parsed = parse_complete_uv(pattern)
+    structured = bytes((i * 7 + (i // 3) * 13) % 256 for i in range(UV_LEN))
+    parsed = parse_complete_uv(structured)
     assert isinstance(parsed, Ok)
     inpainted = inpaint_occluded(parsed.value, landmarks)
     assert isinstance(inpainted, Ok)
-    before = parsed.value.as_bytes()
-    after = inpainted.value.as_bytes()
-    mask = occlusion_mask(landmarks)
-    assert any(mask)
-    assert not all(mask)
-    for i in (0, 1, 2, 3):
-        if not mask[i]:
-            assert before[i] == after[i]
-    for i in range(UV_LEN):
-        if not mask[i]:
-            assert before[i] == after[i]
-    assert any(before[i] != after[i] for i in range(UV_LEN) if mask[i])
+    assert inpainted.value.as_bytes() == structured
 
 
 def test_warp_is_deterministic() -> None:

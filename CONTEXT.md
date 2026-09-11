@@ -52,10 +52,17 @@ Fit real es ridge identidad + camara con expresion neutra.
 Seam `fit_gnm` sin cambios.
 Dobles sha256 solo como fallback local sin pesos.
 
-- **complete-uv**: albedo tras proyeccion, warp TPS e inpaint solo de ocluidas.
+- **complete-uv**: albedo tras bake real 1024 reducido a 512.
 Tipo `CompleteUv::parse` exige exactamente `UV_LEN` bytes.
 Producida por `MlSidecarClient::texture(&JobId, &ImageBytes, &FitResult, &Landmarks) -> CompleteUv`
 sobre `POST /ml/texture`.
+El bake (`backend/gnm_texture.py`, `ATLAS_SIZE = 1024`) rasteriza `triangle_uvs`
+por baricentricas, proyecta cada texel con `gnm_fit.project` y muestrea la foto
+solo si pasa visibilidad triple (facing + `GRAZING_COS_MIN = 0.3` + z-buffer
+con `win_tri`); lo no visible queda en gris honesto `NO_DATA = (128,128,128)`,
+sin relleno ni inpaint.
+Sin pesos no hay retroproyeccion: gris completo determinista.
+El contrato 512 no cambia; 1024 vive en el bake y en `atlas_png` opcional del GLB.
 
 - **heatmap**: imagen `|UV_A - UV_B|` por región.
 Visualiza diferencias de textura.

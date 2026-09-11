@@ -30,7 +30,14 @@ from backend.pipeline_local import FIT_RESULT_LEN
 
 
 def _stub_image(marker: int = 0xA1) -> bytes:
-    return bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) + bytes([marker]) * 56
+    import io as _io
+
+    from PIL import Image as _Image
+
+    img = _Image.new("RGB", (16, 16), (marker, marker, marker))
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _landmarks_json() -> bytes:

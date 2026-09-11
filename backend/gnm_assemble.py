@@ -13,8 +13,6 @@ import struct
 import zipfile
 
 from backend.domain import (
-    TEMPLATE_TRIS,
-    TEMPLATE_VERTS,
     UV_HEIGHT,
     UV_LEN,
     UV_WIDTH,
@@ -111,30 +109,92 @@ def displaced_positions(fit: FitResult) -> list[tuple[float, float, float]]:
         ]
 
 
-def build_personalized_glb(fit: FitResult, albedo: CompleteUv) -> Ok[GnmMesh] | Err[DomainError]:
+def _seam_split_tables(
+    fit: FitResult,
+) -> tuple[
+    list[tuple[float, float, float]],
+    list[tuple[float, float]],
+    list[tuple[int, int, int]],
+]:
+    """Parte vertices por (v, vt) unico para seams UV reales.
+
+    Con pesos: `triangles` + `triangle_uvs` del npz. Sin pesos (CI, solo bin):
+    triangulos del bin + UV last-wins expandidas (split degenerado, coherente).
+    Las UVs salen en convencion glTF (`v = 1 - v_uv`, origen arriba-izquierda).
+    """
+    positions = displaced_positions(fit)
     try:
+        from backend.gnm_head import load_gnm_head
+
+        head = load_gnm_head()
+        import numpy as np
+
+        tris = np.asarray(head.triangles, dtype=np.int64).tolist()
+        tri_uvs = np.asarray(head.triangle_uvs, dtype=np.float64).tolist()
+    except RuntimeError:
         from backend.gnm import load_template
 
-        _, uvs, indices = load_template()
-        positions = displaced_positions(fit)
-        if len(positions) != TEMPLATE_VERTS or len(uvs) != TEMPLATE_VERTS:
-            raise ValueError(
-                f"mesh counts {len(positions)}/{len(uvs)} != {TEMPLATE_VERTS}"
-            )
-        if len(indices) != TEMPLATE_TRIS:
-            raise ValueError(f"tris {len(indices)} != {TEMPLATE_TRIS}")
-        from PIL import Image as _Image
+        _, bin_uvs, bin_tris = load_template()
+        tris = [(int(a), int(b), int(c)) for a, b, c in bin_tris]
+        tri_uvs = [
+            [list(bin_uvs[a]), list(bin_uvs[b]), list(bin_uvs[c])] for a, b, c in tris
+        ]
+    index_of: dict[tuple[int, float, float], int] = {}
+    out_pos: list[tuple[float, float, float]] = []
+    out_uv: list[tuple[float, float]] = []
+    out_tris: list[tuple[int, int, int]] = []
+    for (a, b, c), (uva, uvb, uvc) in zip(tris, tri_uvs):
+        row: list[int] = []
+        for v, uv in ((a, uva), (b, uvb), (c, uvc)):
+            key = (int(v), float(uv[0]), float(uv[1]))
+            idx = index_of.get(key)
+            if idx is None:
+                idx = len(out_pos)
+                index_of[key] = idx
+                p = positions[int(v)]
+                out_pos.append((float(p[0]), float(p[1]), float(p[2])))
+                out_uv.append((float(uv[0]), 1.0 - float(uv[1])))
+            row.append(idx)
+        out_tris.append((row[0], row[1], row[2]))
+    return out_pos, out_uv, out_tris
 
-        img = _Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(albedo.as_bytes()))
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        png = buf.getvalue()
-        pos_buf = struct.pack(f"<{len(positions) * 3}f", *[c for p in positions for c in p])
-        uv_buf = struct.pack(f"<{len(uvs) * 2}f", *[c for t in uvs for c in t])
-        flat_idx = [v for tri in indices for v in tri]
-        if not flat_idx or max(flat_idx) >= TEMPLATE_VERTS or min(flat_idx) < 0:
+
+def build_personalized_glb(
+    fit: FitResult, albedo: CompleteUv, atlas_png: bytes | None = None
+) -> Ok[GnmMesh] | Err[DomainError]:
+    """GLB con seams reales: vertices partidos por (v, vt) unico.
+
+    `atlas_png` (opcional, 1024 del bake) se incrusta tal cual; sin el,
+    se codifica el albedo 512. Las UVs de export van en convencion glTF
+    (origen arriba-izquierda): `v = 1 - v_uv`. Material emisivo (base negra)
+    para que el visor muestre los pixeles de la foto tal cual, sin doble
+    iluminacion.
+    """
+    try:
+        split_positions, split_uvs, split_tris = _seam_split_tables(fit)
+        n_exp = len(split_positions)
+        if n_exp == 0 or len(split_uvs) != n_exp:
+            raise ValueError("tablas de split incoherentes")
+        if len(split_tris) == 0:
+            raise ValueError("sin triangulos para export")
+        if atlas_png is not None:
+            png = bytes(atlas_png)
+        else:
+            from PIL import Image as _Image
+
+            img = _Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(albedo.as_bytes()))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            png = buf.getvalue()
+        pos_buf = struct.pack(f"<{len(split_positions) * 3}f", *[c for p in split_positions for c in p])
+        uv_buf = struct.pack(f"<{len(split_uvs) * 2}f", *[c for t in split_uvs for c in t])
+        flat_idx = [v for tri in split_tris for v in tri]
+        if not flat_idx or min(flat_idx) < 0 or max(flat_idx) >= n_exp:
             raise ValueError("indice fuera de rango")
-        idx_buf = struct.pack(f"<{len(flat_idx)}H", *flat_idx)
+        use_u32 = n_exp > 65535
+        idx_fmt = f"<{len(flat_idx)}I" if use_u32 else f"<{len(flat_idx)}H"
+        idx_comp = 5125 if use_u32 else 5123
+        idx_buf = struct.pack(idx_fmt, *flat_idx)
         pos_len, uvb_len, idx_len = len(pos_buf), len(uv_buf), len(idx_buf)
         uv_off = pos_len
         idx_off = pos_len + uvb_len
@@ -142,15 +202,15 @@ def build_personalized_glb(fit: FitResult, albedo: CompleteUv) -> Ok[GnmMesh] | 
         bin_buf = pos_buf + uv_buf + idx_buf + png
         while len(bin_buf) % 4 != 0:
             bin_buf += b"\x00"
-        xs = [p[0] for p in positions]
-        ys = [p[1] for p in positions]
-        zs = [p[2] for p in positions]
-        idx_count = len(indices) * 3
+        xs = [p[0] for p in split_positions]
+        ys = [p[1] for p in split_positions]
+        zs = [p[2] for p in split_positions]
+        idx_count = len(split_tris) * 3
         json_str = (
             '{"asset":{"version":"2.0","generator":"vultus-gnm-fit"},"scene":0,'
             '"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0,"name":"VultusFacePersonalized"}],'
             '"meshes":[{"name":"FacePersonalized","primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":2,"material":0}]}],'
-            '"materials":[{"name":"SkinPBR","pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.9,"baseColorTexture":{"index":0}}}],'
+            '"materials":[{"name":"SkinPBR","pbrMetallicRoughness":{"baseColorFactor":[0,0,0,1],"metallicFactor":0,"roughnessFactor":0.9,"baseColorTexture":{"index":0}},"emissiveTexture":{"index":0},"emissiveFactor":[1,1,1]}],'
             '"textures":[{"source":0,"sampler":0}],"samplers":[{"magFilter":9729,"minFilter":9729}],'
             '"images":[{"bufferView":3,"mimeType":"image/png"}],'
             f'"buffers":[{{"byteLength":{len(bin_buf)}}}],'
@@ -160,22 +220,24 @@ def build_personalized_glb(fit: FitResult, albedo: CompleteUv) -> Ok[GnmMesh] | 
             '{"buffer":0,"byteOffset":%d,"byteLength":%d}]'
             % (pos_len, uv_off, uvb_len, idx_off, idx_len, png_off, len(png))
             + ',"accessors":[{"bufferView":0,"componentType":5126,"count":'
-            + f"{TEMPLATE_VERTS}"
+            + f"{n_exp}"
             + ',"type":"VEC3",'
             + f'"max":[{max(xs)},{max(ys)},{max(zs)}],"min":[{min(xs)},{min(ys)},{min(zs)}]'
             + "},"
             + '{"bufferView":1,"componentType":5126,"count":'
-            + f"{TEMPLATE_VERTS}"
+            + f"{n_exp}"
             + ',"type":"VEC2"},'
-            + '{"bufferView":2,"componentType":5123,"count":'
+            + '{"bufferView":2,"componentType":'
+            + f"{idx_comp}"
+            + ',"count":'
             + f"{idx_count}"
             + ',"type":"SCALAR"}],'
             + '"extras":{"personalized":true,"islands":[1,2,3,4,5],"layout":'
             + f"{ISLAND_LAYOUT_VERSION}"
             + ',"verts":'
-            + f"{TEMPLATE_VERTS}"
+            + f"{n_exp}"
             + ',"tris":'
-            + f"{TEMPLATE_TRIS}"
+            + f"{len(split_tris)}"
             + "}}"
         )
         json_bytes = json_str.encode("utf-8")

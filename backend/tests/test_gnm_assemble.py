@@ -28,8 +28,14 @@ from backend.gnm_texture import build_albedo
 
 
 def _image(marker: int):
-    raw = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) + bytes([marker]) * 56
-    parsed = parse_image_bytes(raw)
+    import io as _io
+
+    from PIL import Image as _Image
+
+    img = _Image.new("RGB", (16, 16), (marker, marker, marker))
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    parsed = parse_image_bytes(buf.getvalue())
     assert isinstance(parsed, Ok)
     return parsed.value
 
@@ -120,7 +126,7 @@ def test_personalized_mesh_differs_per_identity() -> None:
 def test_personalized_glb_reports_real_counts() -> None:
     import struct
 
-    from backend.domain import TEMPLATE_TRIS, TEMPLATE_VERTS, UV_LEN
+    from backend.domain import UV_LEN
 
     fit, albedo = _fit_and_albedo(0xA1)
     out = build_personalized_glb(fit, albedo)
@@ -128,15 +134,78 @@ def test_personalized_glb_reports_real_counts() -> None:
     data = out.value.as_bytes()
     json_len = struct.unpack("<I", data[12:16])[0]
     doc = json.loads(data[20 : 20 + json_len].decode("utf-8"))
-    assert doc["accessors"][0]["count"] == TEMPLATE_VERTS == 17821
-    assert doc["accessors"][1]["count"] == TEMPLATE_VERTS == 17821
-    assert doc["accessors"][2]["count"] == TEMPLATE_TRIS * 3
-    assert doc["extras"]["verts"] == TEMPLATE_VERTS == 17821
-    assert doc["extras"]["tris"] == TEMPLATE_TRIS == 35324
+    n_exp = doc["accessors"][0]["count"]
+    assert doc["accessors"][1]["count"] == n_exp
+    assert doc["accessors"][2]["count"] == doc["extras"]["tris"] * 3 == 35324 * 3
+    assert doc["extras"]["verts"] == n_exp
     assert doc["extras"]["layout"] == ISLAND_LAYOUT_VERSION == 2
+    # Con pesos hay seams reales: mas vertices que los 17821 del template.
+    try:
+        from backend.gnm_head import load_gnm_head
+
+        load_gnm_head()
+        assert n_exp > 17821
+    except RuntimeError:
+        assert n_exp == 17821
     pbr = pbr_from_albedo(albedo)
     assert isinstance(pbr, Ok)
     assert len(pbr.value) == UV_LEN
+
+
+def test_glb_seams_unique_emissive_flipped_v() -> None:
+    import struct
+
+    fit, albedo = _fit_and_albedo(0xA1)
+    out = build_personalized_glb(fit, albedo)
+    assert isinstance(out, Ok)
+    data = out.value.as_bytes()
+    json_len = struct.unpack("<I", data[12:16])[0]
+    doc = json.loads(data[20 : 20 + json_len].decode("utf-8"))
+    assert doc["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"] == [0, 0, 0, 1]
+    assert doc["materials"][0]["emissiveTexture"] == {"index": 0}
+    assert doc["materials"][0]["emissiveFactor"] == [1, 1, 1]
+    n_exp = doc["accessors"][0]["count"]
+    pos_len = doc["bufferViews"][0]["byteLength"]
+    uv_len = doc["bufferViews"][1]["byteLength"]
+    assert pos_len == n_exp * 12
+    assert uv_len == n_exp * 8
+    bin_start = 20 + json_len + 8
+    bin_buf = data[bin_start:]
+    uv_off = doc["bufferViews"][1]["byteOffset"]
+    idx_off = doc["bufferViews"][2]["byteOffset"]
+    n_idx = doc["accessors"][2]["count"]
+    uvs = struct.unpack(f"<{n_exp * 2}f", bin_buf[uv_off : uv_off + uv_len])
+    comp = doc["accessors"][2]["componentType"]
+    fmt = f"<{n_idx}I" if comp == 5125 else f"<{n_idx}H"
+    idx = struct.unpack(fmt, bin_buf[idx_off : idx_off + n_idx * (4 if comp == 5125 else 2)])
+    assert max(idx) < n_exp and min(idx) >= 0
+    # Unicidad (v,vt): cada vertice de export aparece con una sola UV.
+    seen: dict[int, tuple[float, float]] = {}
+    for v in idx:
+        uv = (uvs[2 * v], uvs[2 * v + 1])
+        if v in seen:
+            assert seen[v] == uv
+        else:
+            seen[v] = uv
+    # Flip a glTF: la exportada es 1 - v_uv del npz (no last-wins).
+    try:
+        from backend.gnm_head import load_gnm_head
+
+        head = load_gnm_head()
+        import numpy as np
+
+        raw_uv = np.asarray(head.triangle_uvs, dtype=np.float64)
+        exp_v = np.sort((1.0 - raw_uv[:, :, 1]).ravel())
+        got_v = np.asarray(uvs, dtype=np.float64)[1::2]
+        # Cercania con tolerancia float32 (el redondeo a N decimales cruza
+        # fronteras en casos borde): vecino mas cercano a < 1e-6.
+        pos = np.searchsorted(exp_v, got_v)
+        lo = np.clip(pos - 1, 0, exp_v.size - 1)
+        hi = np.clip(pos, 0, exp_v.size - 1)
+        best = np.minimum(np.abs(exp_v[lo] - got_v), np.abs(exp_v[hi] - got_v))
+        assert bool((best < 1e-6).all())
+    except RuntimeError:
+        pass
 
 
 def test_full_zip_lists_island_and_pbr_names() -> None:

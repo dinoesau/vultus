@@ -99,6 +99,14 @@ def test_pbr_maps_ride_albedo_deterministically() -> None:
     assert isinstance(other, Ok)
     assert len(first.value) == UV_LEN
     assert first.value == second.value
+    try:
+        from backend.gnm_head import load_gnm_head
+
+        load_gnm_head()
+    except RuntimeError:
+        import pytest
+
+        pytest.skip("sin pesos ambos albedos son gris honesto; nada que distinguir")
     assert first.value != other.value
 
 

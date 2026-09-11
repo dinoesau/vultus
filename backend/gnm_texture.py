@@ -57,6 +57,55 @@ def _photo_rgb(image: ImageBytes) -> NDArray[np.uint8]:
     return np.asarray(img, dtype=np.uint8)
 
 
+def _remap_bilinear(
+    photo: NDArray[np.uint8],
+    map_x: NDArray[np.float32],
+    map_y: NDArray[np.float32],
+) -> NDArray[np.uint8]:
+    """Muestreo bilineal con borde constante `NO_DATA`.
+
+    Via `cv2.remap` cuando esta disponible (prod/GPU); fallback numpy puro
+    cuando no (CI solo instala API deps, sin cv2). En coords enteras ambos
+    son exactos; en fraccionarias coinciden dentro de redondeo.
+    """
+    try:
+        import cv2
+
+        cv2.setNumThreads(1)
+        out = cv2.remap(
+            photo, map_x, map_y, interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=NO_DATA,
+        )
+        return np.asarray(out, dtype=np.uint8)
+    except ImportError:
+        pass
+    src = np.asarray(photo, dtype=np.float64)
+    ph, pw = src.shape[0], src.shape[1]
+    mx = np.asarray(map_x, dtype=np.float64)
+    my = np.asarray(map_y, dtype=np.float64)
+    out = np.full(mx.shape + (3,), NO_DATA, dtype=np.float64)
+    ok = (mx >= 0.0) & (mx <= float(pw - 1)) & (my >= 0.0) & (my <= float(ph - 1))
+    if not bool(ok.any()):
+        return np.asarray(out, dtype=np.uint8)
+    x0 = np.floor(mx[ok]).astype(np.int64)
+    y0 = np.floor(my[ok]).astype(np.int64)
+    x1 = np.clip(x0 + 1, 0, pw - 1)
+    y1 = np.clip(y0 + 1, 0, ph - 1)
+    x0c = np.clip(x0, 0, pw - 1)
+    y0c = np.clip(y0, 0, ph - 1)
+    fx = (mx[ok] - x0).astype(np.float64)
+    fy = (my[ok] - y0).astype(np.float64)
+    c00 = src[y0c, x0c]
+    c10 = src[y0c, x1]
+    c01 = src[y1, x0c]
+    c11 = src[y1, x1]
+    w = (fx * fy)[:, None]
+    top = c00 * (1.0 - fx - fy + fx * fy)[:, None] + c10 * (fx - fx * fy)[:, None]
+    bot = c01 * (fy - w[:, 0])[:, None] + c11 * w
+    out[ok] = top + bot
+    return np.asarray(np.round(out), dtype=np.uint8)
+
+
 def _sample_atlas(
     photo: NDArray[np.uint8],
     mesh: NDArray[np.float64],
@@ -67,15 +116,13 @@ def _sample_atlas(
     atlas_size: int,
     mouth_tris: NDArray[np.bool_] | None = None,
 ) -> tuple[NDArray[np.uint8], float]:
-    """Nucleo puro del bake: raster + visibilidad triple + `cv2.remap`.
+    """Nucleo puro del bake: raster + visibilidad triple + remap bilineal.
 
     `camera_tuple` son 12 floats row-major 3x4 (misma semantica que
     `gnm_fit.project`). Devuelve (atlas SxSx3 uint8, evidence_frac).
-    Solo `remap` (+ `dilate` permitido, no usado para no rellenar) de cv2.
+    Solo `remap` (+ `dilate` permitido, no usado para no rellenar) de cv2;
+    sin cv2 (CI) usa el fallback numpy de `_remap_bilinear`.
     """
-    import cv2
-
-    cv2.setNumThreads(1)
     s = int(atlas_size)
     n_tris = int(tris.shape[0])
     texel_pos = np.full((s, s, 3), np.nan, dtype=np.float64)
@@ -221,11 +268,7 @@ def _sample_atlas(
     # Marca de visibilidad para enmascarar tras remap (remap muestrea todo).
     vis_mask = np.zeros((s, s), dtype=bool)
     vis_mask[cy[vis_depth], cx[vis_depth]] = True
-    sampled_raw = cv2.remap(
-        photo, map_x, map_y, interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT, borderValue=NO_DATA,
-    )
-    sampled: NDArray[np.uint8] = np.asarray(sampled_raw, dtype=np.uint8)
+    sampled: NDArray[np.uint8] = _remap_bilinear(photo, map_x, map_y)
     atlas[vis_mask] = sampled[vis_mask]
     evidence = float(vis_mask.mean())
     return atlas, evidence

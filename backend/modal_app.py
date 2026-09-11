@@ -545,6 +545,10 @@ if HAVE_MODAL:
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
         max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU
         timeout=60,
+        # Sin esto el loader cae a la ruta del repo (ausente en la imagen)
+        # y el fit sirve dobles silenciosos en prod; con VULTUS_REAL_ML=1
+        # la ausencia de pesos falla ruidoso en vez de devolver el doble.
+        env={"GNM_ASSETS_DIR": "/weights/gnm", "VULTUS_REAL_ML": "1"},
     )(fit_worker)
 
 
@@ -568,6 +572,7 @@ if HAVE_MODAL:
         max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU (anti-OOM)
         timeout=60,
         min_containers=0,
+        env={"GNM_ASSETS_DIR": "/weights/gnm", "VULTUS_REAL_ML": "1"},
     )(texture_worker)
 
 

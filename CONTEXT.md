@@ -18,7 +18,10 @@ Es apoyo visual.
 - **job**: trabajo asíncrono en queue con TTL de 60 segundos.
 Tiene `job_id` branded (`parseJobId` con `trim`, error `InvalidJobId`) y estados `queued`, `processing`, `done`, `failed`, `expired` (`parseJobStatus`, terminales en `TERMINAL_STATUSES`).
 El ciclo vive en el DO (`ProgressDO`): `init`, `progress`, `status`, alarmas TTL que marcan `expired` y purgan a 2xTTL.
-TTL es `TtlSecs` (`1..=3600`, default `60`, clamp total `parseTtlSecs`).
+TTL es TtlSecs (1..=3600) via parseTtlSecs -> Result InvalidTtlSecs; shell default 60 con log, DO 400.
+TTL estricto gobierna solo alarmas DO; R2 1d (jobs/ expire 1 dia, red de seguridad) + Queue sin TTL ni cancel (orphan-Queue aceptado solo post-enqueue, observado en consumer log); TTL != 60 es split-brain conocido, no usar distinto de 60 en prod.
+backend/local_runner.py:_env es helper generico string->string, no parsea TTL (igual backend/modal_app.py:_env); no hay TtlSecs en backend/domain.py y no se añade en este slice.
+Log invalido throttled por instancia (mismo job mismo valor) via `lastLogged` por raw en `load()` revalidation only; `/init` and compare log every invalid unthrottled by design, health silent.
 
 - **image**: foto de entrada en `bytes` JPEG o PNG.
 Debe contener una sola cara frontal o semi-frontal.
@@ -76,7 +79,7 @@ Firma `build_personalized_glb(&FitResult, &CompleteUv) -> GnmMesh` y
 `build_full_zip` con 7 nombres del manifiesto (`edge/contract.ts` fuente unica).
 
 - **stateless**: propiedad de no persistir nada tras entrega.
-Local: DO TTL 60s con purga a 2xTTL y `/tmp` tmpfs en runner. Prod: R2 `lifecycle 60s` + Queues 24h retención (TTL lógico 60s) y `/tmp` tmpfs en Modal.
+Local: DO TTL 60s con purga a 2xTTL y `/tmp` tmpfs en runner. Prod: R2 `lifecycle 1d (jobs/ expire 1 dia, red de seguridad)` + Queues 24h retención (TTL lógico 60s) y `/tmp` tmpfs en Modal.
 
 - **r2key**: clave `jobs/{id}/a|b` no vacía, sin `..`.
 Solo `Some` en prod (patrón `R2 pointer` por límite 128KB de Queues); en dev el worker la escribe al R2 emulado.
@@ -155,4 +158,4 @@ Ejemplo malo: `test_worker_calls_texture`.
 Valor esperado viene de literal golden verificado manualmente, no de recomputar con misma función.
 Golden UV es cabeza literal (`[10, 200]` vs `[4, 210]` -> `[6, 10]`).
 Goldens literales para `Progress`, `JobId`, JPEG/PNG con filler.
-Seam 1 tiene 6 tests pool en runtime (`edge/worker.http.test.ts`: snapshot `queued`, handshake falla en desconocido, backdoor dev `404` con vars prod).
+Seam 1 tiene 14 tests pool en runtime (`edge/worker.http.test.ts`: 6 base + 8 TTL; base: snapshot `queued`, `400` imagen/uuid, `404` desconocido + `409` pre-done, health `ttl_secs`, ws snapshot + handshake `404`, backdoor dev `404` con vars prod; TTL: resolve default 60, health-ttl_error compare logs, health silent + ttl_error sin log, DO-400-behavior `400` sin store/alarma incl absent ttl_secs (null query) is InvalidTtlSecs 400 by design, DO-400-fake-storage unit sin setAlarm, parity-60 `60` ambos lados, compare-502-cleanup `!ok` 502 sin R2/Queue, storage-corrupto-throttled revalida 60 load() revalidation only throttled por instancia (mismo job mismo valor) + load() absent (undefined key) is silent 60 y alarma 60s/120s, queue-send-throw-orphan).

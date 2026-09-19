@@ -23,7 +23,6 @@ import {
   parseProgress,
   parseStage,
   parseTtlSecs,
-  parseTtlSecsBranded,
   progressToNumber,
   ttlToNumber,
 } from "./contract";
@@ -39,16 +38,44 @@ describe("contrato edge como fuente de verdad", () => {
     expect(isUuid("11111111-1111-4111-8111-111111111111")).toBe(true);
   });
 
-  it("ttl clamp 1..3600 default 60 nunca NaN", () => {
+  it("ttl estricto 1..3600 via Result InvalidTtlSecs nunca lanza", () => {
     expect(RESULT_TTL_SECONDS).toBe(60);
-    expect(parseTtlSecs(null)).toBe(60);
-    expect(parseTtlSecs(undefined)).toBe(60);
-    expect(parseTtlSecs("nope")).toBe(60);
-    expect(parseTtlSecs("0")).toBe(1);
-    expect(parseTtlSecs("9999")).toBe(3600);
-    expect(parseTtlSecs("60")).toBe(60);
-    expect(ttlToNumber(parseTtlSecsBranded("60"))).toBe(60);
-    expect(ttlToNumber(parseTtlSecsBranded("0"))).toBe(1);
+    expect(parseTtlSecs(60)).toEqual({ ok: true, value: 60 });
+    expect(parseTtlSecs(60.0)).toEqual({ ok: true, value: 60 });
+    expect(parseTtlSecs("60")).toEqual({ ok: true, value: 60 });
+    expect(parseTtlSecs("1")).toEqual({ ok: true, value: 1 });
+    expect(parseTtlSecs("3600")).toEqual({ ok: true, value: 3600 });
+    expect(parseTtlSecs(" 60\n")).toEqual({ ok: true, value: 60 });
+    expect(parseTtlSecs(1)).toEqual({ ok: true, value: 1 });
+    expect(parseTtlSecs(3600)).toEqual({ ok: true, value: 3600 });
+    const ok = parseTtlSecs("60");
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ttlToNumber(ok.value)).toBe(60);
+    expect(parseTtlSecs(0)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(3601)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(-1)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(9999)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs("nope")).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(null)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(undefined)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs("")).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs("   ")).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(" \t\n")).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(false)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs("060")).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs("+60")).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs("0x3c")).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs("60.0")).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(60.9)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(NaN)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(Infinity)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(60n)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(Symbol())).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs(true)).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(parseTtlSecs({})).toEqual({ ok: false, error: { kind: "InvalidTtlSecs" } });
+    expect(() => parseTtlSecs(Symbol())).not.toThrow();
+    expect(() => parseTtlSecs(60n)).not.toThrow();
+    expect(() => parseTtlSecs({})).not.toThrow();
   });
 
   it("progress solo 0..1 finito con Result", () => {

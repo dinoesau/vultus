@@ -463,7 +463,7 @@ def _parse_uv_bytes(raw: object, label: str) -> Result[bytes, DomainError]:
 
 @dataclass(frozen=True, slots=True)
 class CompleteUv:
-    """Solo via parse_complete_uv."""
+    """Solo via parse_complete_uv o mint tras bake probado."""
 
     _value: bytes
 
@@ -472,6 +472,12 @@ class CompleteUv:
 
     def __len__(self) -> int:
         return len(self._value)
+
+    @classmethod
+    def _mint_after_check(cls, raw: bytes) -> CompleteUv:
+        # Privado por convencion. Solo tras checks de longitud UV_LEN
+        # en modulos gnm-adjacentes (bake/compute). Revisar como `sudo`.
+        return cls(_value=raw)
 
 
 def parse_complete_uv(raw: object) -> Result[CompleteUv, DomainError]:
@@ -483,7 +489,7 @@ def parse_complete_uv(raw: object) -> Result[CompleteUv, DomainError]:
 
 @dataclass(frozen=True, slots=True)
 class Heatmap:
-    """Solo via parse_heatmap o compute_heatmap."""
+    """Solo via parse_heatmap o mint tras compute probado."""
 
     _value: bytes
 
@@ -492,6 +498,12 @@ class Heatmap:
 
     def __len__(self) -> int:
         return len(self._value)
+
+    @classmethod
+    def _mint_after_check(cls, raw: bytes) -> Heatmap:
+        # Privado por convencion. Solo tras checks de longitud UV_LEN
+        # en gnm.compute_heatmap (diff de dos CompleteUv probados).
+        return cls(_value=raw)
 
 
 def parse_heatmap(raw: object) -> Result[Heatmap, DomainError]:

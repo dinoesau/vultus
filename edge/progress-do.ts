@@ -8,10 +8,25 @@
 import {
   RESULT_TTL_SECONDS,
   isTerminalStatus,
-  isValidProgress,
-  isValidStage,
+  parseJobStatus,
+  parseProgress,
+  parseStage,
   parseTtlSecs,
+  progressToNumber,
+  resolveTtlSecs,
+  ttlToNumber,
+  type TtlSecs,
 } from "./contract";
+
+function isRecord(raw: unknown): raw is Record<string, unknown> {
+  return typeof raw === "object" && raw !== null && !Array.isArray(raw);
+}
+
+// Single proven default: RESULT_TTL_SECONDS (60) always parses.
+// Keeps the brand mint inside the contract parser; no casts outside contract.
+function provenDefaultTtl(): TtlSecs {
+  return resolveTtlSecs(RESULT_TTL_SECONDS).ttl;
+}
 
 export class ProgressDO {
   state: DurableObjectState;
@@ -19,7 +34,8 @@ export class ProgressDO {
   stage = "queued";
   status = "queued";
   job_id = "unknown";
-  ttlSecs = RESULT_TTL_SECONDS;
+  ttlSecs: TtlSecs = provenDefaultTtl();
+  private lastLogged: Set<string> = new Set();
 
   constructor(state: DurableObjectState) {
     this.state = state;
@@ -33,19 +49,39 @@ export class ProgressDO {
       "status",
       "ttl_secs",
     ]);
-    // `get` con array retorna Map en runtime Cloudflare.
-    const get = (k: string): unknown =>
-      stored instanceof Map ? stored.get(k) : (stored as Record<string, unknown>)?.[k];
+    // `get` con array retorna Map en runtime Cloudflare: estrechar sin `as`.
+    const get = (k: string): unknown => {
+      if (stored instanceof Map) return stored.get(k);
+      if (isRecord(stored)) return stored[k];
+      return undefined;
+    };
     const jobId = get("job_id");
     const progress = get("progress");
     const stage = get("stage");
     const status = get("status");
-    const ttl = get("ttl_secs");
+    const raw = get("ttl_secs");
     if (typeof jobId === "string") this.job_id = jobId;
-    if (typeof progress === "number") this.progress = progress;
-    if (typeof stage === "string") this.stage = stage;
-    if (typeof status === "string") this.status = status;
-    if (typeof ttl === "number") this.ttlSecs = ttl;
+    const parsedProgress = parseProgress(progress);
+    this.progress = parsedProgress.ok ? progressToNumber(parsedProgress.value) : 0;
+    const parsedStage = parseStage(stage);
+    this.stage = parsedStage.ok ? parsedStage.value : "queued";
+    const parsedStatus = parseJobStatus(status);
+    this.status = parsedStatus.ok ? parsedStatus.value : "queued";
+    if (raw === undefined) {
+      this.ttlSecs = provenDefaultTtl();
+    } else {
+      const r = parseTtlSecs(raw);
+      if (r.ok) {
+        this.ttlSecs = r.value;
+      } else {
+        this.ttlSecs = provenDefaultTtl();
+        const key = JSON.stringify(String(raw));
+        if (!this.lastLogged.has(key)) {
+          this.lastLogged.add(key);
+          console.error(JSON.stringify({ msg: "invalid ttl", raw: String(raw), default: RESULT_TTL_SECONDS }));
+        }
+      }
+    }
   }
 
   private async save(): Promise<void> {
@@ -54,36 +90,51 @@ export class ProgressDO {
       progress: this.progress,
       stage: this.stage,
       status: this.status,
-      ttl_secs: this.ttlSecs,
+      ttl_secs: ttlToNumber(this.ttlSecs),
     });
   }
 
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === "/init") {
-      this.job_id = url.searchParams.get("job_id") ?? "unknown";
-      this.ttlSecs = parseTtlSecs(url.searchParams.get("ttl_secs"));
+      const jobIdParam = url.searchParams.get("job_id") ?? "unknown";
+      const q = url.searchParams.get("ttl_secs");
+      const r = parseTtlSecs(q);
+      if (!r.ok) {
+        console.error(JSON.stringify({ msg: "invalid ttl", raw: String(q), default: RESULT_TTL_SECONDS }));
+        return Response.json({ detail: "invalid ttl" }, { status: 400 });
+      }
+      this.job_id = jobIdParam;
+      this.ttlSecs = r.value;
       this.progress = 0;
       this.stage = "queued";
       this.status = "queued";
       await this.save();
       // TTL logico: a los TTL marcamos expired; a los 2x TTL purgamos.
-      await this.state.storage.setAlarm(Date.now() + this.ttlSecs * 1000);
-      return Response.json({ ok: true, job_id: this.job_id, ttl_secs: this.ttlSecs });
+      const ttl = ttlToNumber(this.ttlSecs);
+      await this.state.storage.setAlarm(Date.now() + ttl * 1000);
+      return Response.json({ ok: true, job_id: this.job_id, ttl_secs: ttl });
     }
     if (url.pathname === "/progress" && req.method === "POST") {
-      const body = (await req.json()) as { progress?: unknown; stage?: unknown; status?: unknown };
-      if (body.progress !== undefined && !isValidProgress(body.progress)) {
+      let rawBody: unknown;
+      try {
+        rawBody = await req.json();
+      } catch {
+        return Response.json({ detail: "invalid json" }, { status: 400 });
+      }
+      const body: Record<string, unknown> = isRecord(rawBody) ? rawBody : {};
+      // Parse-once via smart constructors; el DO guarda numeros/strings probados.
+      if (body["progress"] !== undefined && !parseProgress(body["progress"]).ok) {
         return Response.json({ detail: "invalid progress" }, { status: 400 });
       }
-      if (body.stage !== undefined && !isValidStage(body.stage)) {
+      if (body["stage"] !== undefined && !parseStage(body["stage"]).ok) {
         return Response.json({ detail: "invalid stage" }, { status: 400 });
       }
       if (
-        body.status !== undefined &&
-        body.status !== "processing" &&
-        body.status !== "done" &&
-        body.status !== "failed"
+        body["status"] !== undefined &&
+        body["status"] !== "processing" &&
+        body["status"] !== "done" &&
+        body["status"] !== "failed"
       ) {
         return Response.json({ detail: "invalid status" }, { status: 400 });
       }
@@ -93,15 +144,18 @@ export class ProgressDO {
       if (this.status === "expired") {
         return Response.json({ detail: "expired" }, { status: 404 });
       }
-      if (typeof body.progress === "number") this.progress = body.progress;
-      if (typeof body.stage === "string") {
-        this.stage = body.stage;
+      const progressParsed = body["progress"] === undefined ? null : parseProgress(body["progress"]);
+      const stageParsed = body["stage"] === undefined ? null : parseStage(body["stage"]);
+      // Brands leidos via accesores, sin `as`: el numero viaja probado al storage.
+      if (progressParsed !== null && progressParsed.ok) this.progress = progressToNumber(progressParsed.value);
+      if (stageParsed !== null && stageParsed.ok) {
+        this.stage = stageParsed.value;
       }
-      if (body.status === "failed") {
+      if (body["status"] === "failed") {
         this.status = "failed";
-      } else if (body.status === "done" || this.stage === "done") {
+      } else if (body["status"] === "done" || this.stage === "done") {
         this.status = "done";
-      } else if (typeof body.stage === "string" || typeof body.progress === "number") {
+      } else if (stageParsed !== null || progressParsed !== null) {
         if (this.status === "queued") this.status = "processing";
       }
       await this.save();
@@ -122,7 +176,14 @@ export class ProgressDO {
       return new Response("expected websocket", { status: 400 });
     }
     const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
+    // Estrechamiento explicito del par (runtime Cloudflare): sin `as`.
+    // Un par malformado es bug de plataforma, no input de usuario.
+    const parts: unknown[] = Object.values(pair);
+    const client: unknown = parts[0];
+    const server: unknown = parts[1];
+    if (!(client instanceof WebSocket) || !(server instanceof WebSocket)) {
+      return Response.json({ detail: "upstream error" }, { status: 502 });
+    }
     server.accept();
     const snapshot = () =>
       JSON.stringify({
@@ -170,11 +231,12 @@ export class ProgressDO {
 
   async alarm(): Promise<void> {
     await this.load();
+    const ttl = ttlToNumber(this.ttlSecs);
     if (this.status !== "expired") {
       // Primera alarma (TTL): ventana visible como expired, como Rust `Expired`.
       this.status = "expired";
       await this.save();
-      await this.state.storage.setAlarm(Date.now() + this.ttlSecs * 1000);
+      await this.state.storage.setAlarm(Date.now() + ttl * 1000);
       return;
     }
     // Segunda alarma (2x TTL): purga total, como `Store::purge_expired` en Python.
@@ -183,6 +245,7 @@ export class ProgressDO {
     this.progress = 0;
     this.stage = "queued";
     this.status = "queued";
-    this.ttlSecs = RESULT_TTL_SECONDS;
+    this.ttlSecs = provenDefaultTtl();
+    this.lastLogged.clear();
   }
 }

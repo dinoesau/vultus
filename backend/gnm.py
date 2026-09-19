@@ -113,7 +113,9 @@ def compute_heatmap(uv_a: CompleteUv, uv_b: CompleteUv) -> Heatmap:
     raw = bytes(
         x - y if x >= y else y - x for x, y in zip(uv_a.as_bytes(), uv_b.as_bytes())
     )
-    return Heatmap(_value=raw)
+    # Ambas entradas son CompleteUv probados de UV_LEN; el diff conserva
+    # longitud por construccion. Mint sancionado, no forja libre.
+    return Heatmap._mint_after_check(raw)
 
 
 def uv_to_png(raw: bytes) -> bytes:

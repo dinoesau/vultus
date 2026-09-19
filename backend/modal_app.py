@@ -69,11 +69,21 @@ except OSError as e:
     logger.warning("weights dir not writable path=%s err=%s", WEIGHTS_DIR, e)
 
 def _is_jpeg(b: bytes) -> bool:
-    return len(b) >= 3 and b[0] == 0xFF and b[1] == 0xD8 and b[2] == 0xFF
+    # Delega a la invariante canonica de dominio (JPEG_MAGIC), sin duplicar literales.
+    try:
+        from backend.domain import JPEG_MAGIC
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import JPEG_MAGIC  # type: ignore[no-redef]
+    return len(b) >= 3 and b[0:3] == JPEG_MAGIC
 
 
 def _is_png(b: bytes) -> bool:
-    return len(b) >= 8 and b[0:8] == b"\x89PNG\r\n\x1a\n"
+    # Delega a la invariante canonica de dominio (PNG_MAGIC).
+    try:
+        from backend.domain import PNG_MAGIC
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import PNG_MAGIC  # type: ignore[no-redef]
+    return len(b) >= 8 and b[0:8] == PNG_MAGIC
 
 
 def _deterministic_landmarks(image: bytes) -> bytes:
@@ -90,20 +100,22 @@ def _deterministic_landmarks(image: bytes) -> bytes:
 
 
 def _check_landmarks_json(raw: bytes) -> None:
-    """Valida JSON [[x,y,z],...] con LANDMARKS_LEN puntos finitos. Lanza ValueError(detail)."""
+    """Valida JSON [[x,y,z],...] con LANDMARKS_LEN puntos finitos. Lanza ValueError(detail).
+
+    Fuente unica: backend.domain.parse_landmarks. Este wrapper conserva el
+    contrato raise (shell HTTP 400) sin duplicar la regla.
+    """
     try:
-        pts = json.loads(raw.decode("utf-8"))
-    except Exception as e:
-        raise ValueError(f"invalid landmarks json: {e}") from e
-    if not isinstance(pts, list) or len(pts) != LANDMARKS_LEN:
-        n = len(pts) if isinstance(pts, list) else -1
-        raise ValueError(f"expected {LANDMARKS_LEN} points, got {n}")
-    for p in pts:
-        if not isinstance(p, list) or len(p) != 3:
-            raise ValueError("invalid landmark point, expected [x,y,z]")
-        for v in p:
-            if not isinstance(v, (int, float)) or not math.isfinite(float(v)):
-                raise ValueError("non-finite landmark")
+        from backend.domain import Err as _ErrCk
+        from backend.domain import domain_to_message as _msgCk
+        from backend.domain import parse_landmarks as _parseLm
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrCk  # type: ignore[no-redef]
+        from domain import domain_to_message as _msgCk  # type: ignore[no-redef]
+        from domain import parse_landmarks as _parseLm  # type: ignore[no-redef]
+    parsed = _parseLm(raw)
+    if isinstance(parsed, _ErrCk):
+        raise ValueError(_msgCk(parsed.error)) from None
 
 
 # --- Inferencia real: MediaPipe tras el mismo contrato ---
@@ -212,13 +224,23 @@ def _real_landmarks(image: bytes) -> bytes:
 
 
 def _impl_landmarks(body: bytes) -> bytes:
-    if not body:
-        raise ValueError("empty body")
-    if not (_is_jpeg(body) or _is_png(body)):
-        raise ValueError("unsupported image format, expected JPEG or PNG")
+    # Parse-once en el borde: ImageBytes probado via dominio, sin rechequeo
+    # de magic aguas abajo. El contrato raise (400) se conserva para el shell HTTP.
+    try:
+        from backend.domain import Err as _ErrIm
+        from backend.domain import domain_to_message as _msgIm
+        from backend.domain import parse_image_bytes as _parseImg
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrIm  # type: ignore[no-redef]
+        from domain import domain_to_message as _msgIm  # type: ignore[no-redef]
+        from domain import parse_image_bytes as _parseImg  # type: ignore[no-redef]
+    parsed = _parseImg(body)
+    if isinstance(parsed, _ErrIm):
+        raise ValueError(_msgIm(parsed.error)) from None
+    proven = parsed.value.as_bytes()
     if _use_real():
-        return _real_landmarks(body)
-    return _deterministic_landmarks(body)
+        return _real_landmarks(proven)
+    return _deterministic_landmarks(proven)
 
 
 def _impl_fit(payload: bytes) -> bytes:
@@ -282,7 +304,10 @@ def _impl_texture(payload: bytes) -> bytes:
             raise RuntimeError(_msgT(result.error))
         raise ValueError(_msgT(result.error))
     out = result.value.as_bytes()
-    assert len(out) == UV_LEN
+    # El albedo sale de build_albedo (UV_LEN por construccion): chequeo
+    # explicito (el shell HTTP convierte a 500), nunca assert.
+    if len(out) != UV_LEN:
+        raise RuntimeError(f"bake len {len(out)} != {UV_LEN}")
     return out
 
 
@@ -475,7 +500,9 @@ def _heatmap_abs_diff(uv_a: bytes, uv_b: bytes) -> bytes:
         from gnm import compute_heatmap as _shared_heatmap  # type: ignore[no-redef]
     ra = _parse_uv(bytes(uv_a))
     rb = _parse_uv(bytes(uv_b))
-    assert isinstance(ra, _Ok) and isinstance(rb, _Ok)
+    # Longitudes ya chequeadas arriba: narrowing explicito, nunca assert.
+    if not isinstance(ra, _Ok) or not isinstance(rb, _Ok):
+        raise RuntimeError("heatmap self-check failed")
     return bytes(_shared_heatmap(ra.value, rb.value).as_bytes())
 
 

@@ -706,9 +706,11 @@ def project_texture(image: ImageBytes, fit: FitResult) -> Ok[CompleteUv] | Err[D
             # Suave (diff 0) y determinista; deriva de la foto por marcador.
             v = raw[-1] if len(raw) else 0
             out = bytes([v]) * UV_LEN
-        assert len(out) == UV_LEN
+        if len(out) != UV_LEN:
+            return Err(MlFailed(detail=MlDecode(details=f"project len {len(out)} != {UV_LEN}")))
         parsed = parse_complete_uv(out)
-        assert isinstance(parsed, Ok)
+        if isinstance(parsed, Err):
+            return parsed
         return parsed
     except Exception as exc:  # noqa: BLE001 - la proyeccion nunca tumba sin causa
         return Err(MlFailed(detail=MlDecode(details=f"project failed: {exc}")))
@@ -718,7 +720,8 @@ def warp_with_landmarks(albedo: CompleteUv, landmarks: Landmarks) -> Ok[Complete
     try:
         _ = landmarks  # reservado para el warp TPS real (Fase 2); v1 es identidad
         parsed = parse_complete_uv(bytes(albedo.as_bytes()))
-        assert isinstance(parsed, Ok)
+        if isinstance(parsed, Err):
+            return parsed
         return parsed
     except Exception as exc:  # noqa: BLE001
         return Err(MlFailed(detail=MlDecode(details=f"warp failed: {exc}")))
@@ -735,7 +738,8 @@ def inpaint_occluded(albedo: CompleteUv, landmarks: Landmarks) -> Ok[CompleteUv]
     try:
         _ = landmarks  # reservado para la oclusion geometrica (Fase 2)
         parsed = parse_complete_uv(bytes(albedo.as_bytes()))
-        assert isinstance(parsed, Ok)
+        if isinstance(parsed, Err):
+            return parsed
         return parsed
     except Exception as exc:  # noqa: BLE001
         return Err(MlFailed(detail=MlDecode(details=f"inpaint failed: {exc}")))
@@ -752,9 +756,11 @@ def build_albedo(
             (UV_WIDTH, UV_HEIGHT), _Image.Resampling.BILINEAR
         )
         out = img.tobytes()
-        assert len(out) == UV_LEN
+        if len(out) != UV_LEN:
+            return Err(MlFailed(detail=MlDecode(details=f"bake len {len(out)} != {UV_LEN}")))
         parsed = parse_complete_uv(out)
-        assert isinstance(parsed, Ok)
+        if isinstance(parsed, Err):
+            return parsed
         return parsed
     except Exception as exc:  # noqa: BLE001 - el bake nunca tumba sin causa
         return Err(MlFailed(detail=MlDecode(details=f"bake failed: {exc}")))

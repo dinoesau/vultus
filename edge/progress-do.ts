@@ -8,14 +8,24 @@
 import {
   RESULT_TTL_SECONDS,
   isTerminalStatus,
+  parseJobStatus,
   parseProgress,
   parseStage,
   parseTtlSecs,
   progressToNumber,
+  resolveTtlSecs,
+  ttlToNumber,
+  type TtlSecs,
 } from "./contract";
 
 function isRecord(raw: unknown): raw is Record<string, unknown> {
   return typeof raw === "object" && raw !== null && !Array.isArray(raw);
+}
+
+// Single proven default: RESULT_TTL_SECONDS (60) always parses.
+// Keeps the brand mint inside the contract parser; no casts outside contract.
+function provenDefaultTtl(): TtlSecs {
+  return resolveTtlSecs(RESULT_TTL_SECONDS).ttl;
 }
 
 export class ProgressDO {
@@ -24,7 +34,8 @@ export class ProgressDO {
   stage = "queued";
   status = "queued";
   job_id = "unknown";
-  ttlSecs = RESULT_TTL_SECONDS;
+  ttlSecs: TtlSecs = provenDefaultTtl();
+  private lastLogged: Set<string> = new Set();
 
   constructor(state: DurableObjectState) {
     this.state = state;
@@ -48,12 +59,29 @@ export class ProgressDO {
     const progress = get("progress");
     const stage = get("stage");
     const status = get("status");
-    const ttl = get("ttl_secs");
+    const raw = get("ttl_secs");
     if (typeof jobId === "string") this.job_id = jobId;
-    if (typeof progress === "number") this.progress = progress;
-    if (typeof stage === "string") this.stage = stage;
-    if (typeof status === "string") this.status = status;
-    if (typeof ttl === "number") this.ttlSecs = ttl;
+    const parsedProgress = parseProgress(progress);
+    this.progress = parsedProgress.ok ? progressToNumber(parsedProgress.value) : 0;
+    const parsedStage = parseStage(stage);
+    this.stage = parsedStage.ok ? parsedStage.value : "queued";
+    const parsedStatus = parseJobStatus(status);
+    this.status = parsedStatus.ok ? parsedStatus.value : "queued";
+    if (raw === undefined) {
+      this.ttlSecs = provenDefaultTtl();
+    } else {
+      const r = parseTtlSecs(raw);
+      if (r.ok) {
+        this.ttlSecs = r.value;
+      } else {
+        this.ttlSecs = provenDefaultTtl();
+        const key = JSON.stringify(String(raw));
+        if (!this.lastLogged.has(key)) {
+          this.lastLogged.add(key);
+          console.error(JSON.stringify({ msg: "invalid ttl", raw: String(raw), default: RESULT_TTL_SECONDS }));
+        }
+      }
+    }
   }
 
   private async save(): Promise<void> {
@@ -62,22 +90,30 @@ export class ProgressDO {
       progress: this.progress,
       stage: this.stage,
       status: this.status,
-      ttl_secs: this.ttlSecs,
+      ttl_secs: ttlToNumber(this.ttlSecs),
     });
   }
 
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === "/init") {
-      this.job_id = url.searchParams.get("job_id") ?? "unknown";
-      this.ttlSecs = parseTtlSecs(url.searchParams.get("ttl_secs"));
+      const jobIdParam = url.searchParams.get("job_id") ?? "unknown";
+      const q = url.searchParams.get("ttl_secs");
+      const r = parseTtlSecs(q);
+      if (!r.ok) {
+        console.error(JSON.stringify({ msg: "invalid ttl", raw: String(q), default: RESULT_TTL_SECONDS }));
+        return Response.json({ detail: "invalid ttl" }, { status: 400 });
+      }
+      this.job_id = jobIdParam;
+      this.ttlSecs = r.value;
       this.progress = 0;
       this.stage = "queued";
       this.status = "queued";
       await this.save();
       // TTL logico: a los TTL marcamos expired; a los 2x TTL purgamos.
-      await this.state.storage.setAlarm(Date.now() + this.ttlSecs * 1000);
-      return Response.json({ ok: true, job_id: this.job_id, ttl_secs: this.ttlSecs });
+      const ttl = ttlToNumber(this.ttlSecs);
+      await this.state.storage.setAlarm(Date.now() + ttl * 1000);
+      return Response.json({ ok: true, job_id: this.job_id, ttl_secs: ttl });
     }
     if (url.pathname === "/progress" && req.method === "POST") {
       let rawBody: unknown;
@@ -195,11 +231,12 @@ export class ProgressDO {
 
   async alarm(): Promise<void> {
     await this.load();
+    const ttl = ttlToNumber(this.ttlSecs);
     if (this.status !== "expired") {
       // Primera alarma (TTL): ventana visible como expired, como Rust `Expired`.
       this.status = "expired";
       await this.save();
-      await this.state.storage.setAlarm(Date.now() + this.ttlSecs * 1000);
+      await this.state.storage.setAlarm(Date.now() + ttl * 1000);
       return;
     }
     // Segunda alarma (2x TTL): purga total, como `Store::purge_expired` en Python.
@@ -208,6 +245,7 @@ export class ProgressDO {
     this.progress = 0;
     this.stage = "queued";
     this.status = "queued";
-    this.ttlSecs = RESULT_TTL_SECONDS;
+    this.ttlSecs = provenDefaultTtl();
+    this.lastLogged.clear();
   }
 }

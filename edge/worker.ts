@@ -8,7 +8,7 @@
  *
  * Shell delgado (parse-once): cada input se parsea una sola vez en el borde a
  * brands probados (`parseJobId`, `parseProgress`, `parseStage`,
- * `parseTtlSecsBranded`); aguas abajo solo viajan `JobId`, `Progress`,
+ * `resolveTtlSecs`); aguas abajo solo viajan `JobId`, `Progress`,
  * `StageName` y `TtlSecs`, sin `isValid*` ni `as`. Errores estratificados en
  * `WorkerDomainError` (4xx por variante) vs `AppError` infra (500/502 con log).
  * Sin type-state: las rutas no forman un workflow ordenado con operaciones
@@ -21,14 +21,13 @@ import {
   parseJobId,
   parseProgress,
   parseStage,
-  parseTtlSecsBranded,
   progressToNumber,
+  resolveTtlSecs,
   ttlToNumber,
   type JobId,
   type Progress,
   type Result,
   type StageName,
-  type TtlSecs,
 } from "./contract";
 import { assertNever } from "./assert";
 
@@ -269,14 +268,49 @@ async function handleCompare(req: Request, env: Env): Promise<Response> {
   const key = jobIdToString(jobId);
   const r2a = `jobs/${key}/a`;
   const r2b = `jobs/${key}/b`;
+  const { ttl, invalid, raw } = resolveTtlSecs(env.R2_TTL_SECONDS);
+  if (invalid) {
+    console.error(
+      JSON.stringify({ msg: "invalid ttl", raw: String(raw), default: 60, route: "compare", job_id: key }),
+    );
+  }
   // Cola solo con IDs+punteros, nunca bytes (limite 128KB/mensaje).
   await env.VULTUS_BUCKET.put(r2a, buffers.value.aBuf);
   await env.VULTUS_BUCKET.put(r2b, buffers.value.bBuf);
-  await env.VULTUS_QUEUE.send({ job_id: key, r2_keys: { image_a: r2a, image_b: r2b } });
-  const ttl: TtlSecs = parseTtlSecsBranded(env.R2_TTL_SECONDS);
   const stub = env.VULTUS_PROGRESS.get(env.VULTUS_PROGRESS.idFromName(key));
-  await stub.fetch(`https://do/init?job_id=${key}&ttl_secs=${ttlToNumber(ttl)}`);
-  return json({ job_id: key, status: "queued" }, 202);
+  const initRes = await stub.fetch(`https://do/init?job_id=${key}&ttl_secs=${ttlToNumber(ttl)}`);
+  if (initRes.ok) {
+    try {
+      await env.VULTUS_QUEUE.send({ job_id: key, r2_keys: { image_a: r2a, image_b: r2b } });
+    } catch (e) {
+      try {
+        await env.VULTUS_BUCKET.delete(r2a);
+      } catch {
+        console.error(JSON.stringify({ msg: "orphan r2", key: r2a, job_id: key }));
+      }
+      try {
+        await env.VULTUS_BUCKET.delete(r2b);
+      } catch {
+        console.error(JSON.stringify({ msg: "orphan r2", key: r2b, job_id: key }));
+      }
+      // DO bounded by TTL, no cancel endpoint: la entrada queued expira via TTL 60s/120s.
+      console.error(JSON.stringify({ msg: "queue failed", job_id: key, cause: String(e) }));
+      return json({ detail: "upstream error" }, 502);
+    }
+    return json({ job_id: key, status: "queued" }, 202);
+  }
+  try {
+    await env.VULTUS_BUCKET.delete(r2a);
+  } catch {
+    console.error(JSON.stringify({ msg: "orphan r2", key: r2a, job_id: key }));
+  }
+  try {
+    await env.VULTUS_BUCKET.delete(r2b);
+  } catch {
+    console.error(JSON.stringify({ msg: "orphan r2", key: r2b, job_id: key }));
+  }
+  console.error(JSON.stringify({ msg: "init failed", job_id: key, status: initRes.status }));
+  return json({ detail: "upstream error" }, 502);
 }
 
 async function handleResult(id: JobId, env: Env): Promise<Response> {
@@ -371,7 +405,19 @@ export default {
     }
 
     if (pathname === "/health" && req.method === "GET") {
-      const ttl: TtlSecs = parseTtlSecsBranded(env.R2_TTL_SECONDS);
+      const { ttl, invalid } = resolveTtlSecs(env.R2_TTL_SECONDS);
+      if (invalid) {
+        return Response.json(
+          {
+            status: "ok",
+            gateway: "worker",
+            queue: "ok",
+            ttl_secs: ttlToNumber(ttl),
+            ttl_error: "InvalidTtlSecs",
+          },
+          { headers: { ...CORS_HEADERS } },
+        );
+      }
       return Response.json(
         {
           status: "ok",

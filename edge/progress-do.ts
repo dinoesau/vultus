@@ -8,10 +8,15 @@
 import {
   RESULT_TTL_SECONDS,
   isTerminalStatus,
-  isValidProgress,
-  isValidStage,
+  parseProgress,
+  parseStage,
   parseTtlSecs,
+  progressToNumber,
 } from "./contract";
+
+function isRecord(raw: unknown): raw is Record<string, unknown> {
+  return typeof raw === "object" && raw !== null && !Array.isArray(raw);
+}
 
 export class ProgressDO {
   state: DurableObjectState;
@@ -33,9 +38,12 @@ export class ProgressDO {
       "status",
       "ttl_secs",
     ]);
-    // `get` con array retorna Map en runtime Cloudflare.
-    const get = (k: string): unknown =>
-      stored instanceof Map ? stored.get(k) : (stored as Record<string, unknown>)?.[k];
+    // `get` con array retorna Map en runtime Cloudflare: estrechar sin `as`.
+    const get = (k: string): unknown => {
+      if (stored instanceof Map) return stored.get(k);
+      if (isRecord(stored)) return stored[k];
+      return undefined;
+    };
     const jobId = get("job_id");
     const progress = get("progress");
     const stage = get("stage");
@@ -72,18 +80,25 @@ export class ProgressDO {
       return Response.json({ ok: true, job_id: this.job_id, ttl_secs: this.ttlSecs });
     }
     if (url.pathname === "/progress" && req.method === "POST") {
-      const body = (await req.json()) as { progress?: unknown; stage?: unknown; status?: unknown };
-      if (body.progress !== undefined && !isValidProgress(body.progress)) {
+      let rawBody: unknown;
+      try {
+        rawBody = await req.json();
+      } catch {
+        return Response.json({ detail: "invalid json" }, { status: 400 });
+      }
+      const body: Record<string, unknown> = isRecord(rawBody) ? rawBody : {};
+      // Parse-once via smart constructors; el DO guarda numeros/strings probados.
+      if (body["progress"] !== undefined && !parseProgress(body["progress"]).ok) {
         return Response.json({ detail: "invalid progress" }, { status: 400 });
       }
-      if (body.stage !== undefined && !isValidStage(body.stage)) {
+      if (body["stage"] !== undefined && !parseStage(body["stage"]).ok) {
         return Response.json({ detail: "invalid stage" }, { status: 400 });
       }
       if (
-        body.status !== undefined &&
-        body.status !== "processing" &&
-        body.status !== "done" &&
-        body.status !== "failed"
+        body["status"] !== undefined &&
+        body["status"] !== "processing" &&
+        body["status"] !== "done" &&
+        body["status"] !== "failed"
       ) {
         return Response.json({ detail: "invalid status" }, { status: 400 });
       }
@@ -93,15 +108,18 @@ export class ProgressDO {
       if (this.status === "expired") {
         return Response.json({ detail: "expired" }, { status: 404 });
       }
-      if (typeof body.progress === "number") this.progress = body.progress;
-      if (typeof body.stage === "string") {
-        this.stage = body.stage;
+      const progressParsed = body["progress"] === undefined ? null : parseProgress(body["progress"]);
+      const stageParsed = body["stage"] === undefined ? null : parseStage(body["stage"]);
+      // Brands leidos via accesores, sin `as`: el numero viaja probado al storage.
+      if (progressParsed !== null && progressParsed.ok) this.progress = progressToNumber(progressParsed.value);
+      if (stageParsed !== null && stageParsed.ok) {
+        this.stage = stageParsed.value;
       }
-      if (body.status === "failed") {
+      if (body["status"] === "failed") {
         this.status = "failed";
-      } else if (body.status === "done" || this.stage === "done") {
+      } else if (body["status"] === "done" || this.stage === "done") {
         this.status = "done";
-      } else if (typeof body.stage === "string" || typeof body.progress === "number") {
+      } else if (stageParsed !== null || progressParsed !== null) {
         if (this.status === "queued") this.status = "processing";
       }
       await this.save();
@@ -122,7 +140,14 @@ export class ProgressDO {
       return new Response("expected websocket", { status: 400 });
     }
     const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
+    // Estrechamiento explicito del par (runtime Cloudflare): sin `as`.
+    // Un par malformado es bug de plataforma, no input de usuario.
+    const parts: unknown[] = Object.values(pair);
+    const client: unknown = parts[0];
+    const server: unknown = parts[1];
+    if (!(client instanceof WebSocket) || !(server instanceof WebSocket)) {
+      return Response.json({ detail: "upstream error" }, { status: 502 });
+    }
     server.accept();
     const snapshot = () =>
       JSON.stringify({

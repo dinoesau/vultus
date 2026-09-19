@@ -30,6 +30,7 @@ import {
   type StageName,
   type TtlSecs,
 } from "./contract";
+import { assertNever } from "./assert";
 
 interface Env {
   VULTUS_QUEUE: Queue;
@@ -54,10 +55,6 @@ const CORS_HEADERS: Record<string, string> = {
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status, headers: { ...CORS_HEADERS } });
-}
-
-function assertNever(value: never, message = "Unhandled case"): never {
-  throw new Error(`${message}: ${JSON.stringify(value)}`);
 }
 
 type ImageProblem = "size" | "magic";
@@ -392,28 +389,32 @@ export default {
 
     const resultMatch = pathname.match(/^\/v1\/jobs\/([^/]+)\/result$/);
     if (resultMatch && req.method === "GET") {
-      const id = routeJobId(resultMatch[1]);
+      const rawId: unknown = resultMatch[1];
+      const id = routeJobId(rawId);
       if (!id.ok) return domainResponse(id.error);
       return handleResult(id.value, env);
     }
 
     const jobMatch = pathname.match(/^\/v1\/jobs\/([^/]+)$/);
     if (jobMatch && req.method === "GET") {
-      const id = routeJobId(jobMatch[1]);
+      const rawId: unknown = jobMatch[1];
+      const id = routeJobId(rawId);
       if (!id.ok) return domainResponse(id.error);
       return handleJob(id.value, env);
     }
 
     const progressMatch = pathname.match(/^\/v1\/jobs\/([^/]+)\/progress$/);
     if (progressMatch && req.method === "POST") {
-      const id = routeJobId(progressMatch[1]);
+      const rawId: unknown = progressMatch[1];
+      const id = routeJobId(rawId);
       if (!id.ok) return domainResponse(id.error);
       return handleProgress(id.value, req, env);
     }
 
     const evMatch = pathname.match(/^\/v1\/jobs\/([^/]+)\/events$/);
     if (evMatch) {
-      const id = routeJobId(evMatch[1]);
+      const rawId: unknown = evMatch[1];
+      const id = routeJobId(rawId);
       if (!id.ok) return domainResponse(id.error);
       return handleEvents(id.value, req, env);
     }

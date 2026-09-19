@@ -66,15 +66,20 @@ export type Result<T, E> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: E };
 
+// Canon good-typescript: Brand generico zero-runtime. Los brands existentes
+// (JobId/TtlSecs/Progress) lo usan como alias canonico; se conserva el
+// unique-symbol historico como interseccion para no romper asignabilidad.
+export type Brand<T, Name extends string> = T & { readonly __brand: Name };
+
 declare const JobIdBrand: unique symbol;
-export type JobId = string & { readonly [JobIdBrand]: "JobId" };
+export type JobId = Brand<string, "JobId"> & { readonly [JobIdBrand]: "JobId" };
 export type JobIdError = { readonly kind: "InvalidJobId" };
 
 declare const TtlSecsBrand: unique symbol;
-export type TtlSecs = number & { readonly [TtlSecsBrand]: "TtlSecs" };
+export type TtlSecs = Brand<number, "TtlSecs"> & { readonly [TtlSecsBrand]: "TtlSecs" };
 
 declare const ProgressBrand: unique symbol;
-export type Progress = number & { readonly [ProgressBrand]: "Progress" };
+export type Progress = Brand<number, "Progress"> & { readonly [ProgressBrand]: "Progress" };
 export type ProgressError = { readonly kind: "InvalidProgress" };
 
 export type StageError = { readonly kind: "InvalidStage" };
@@ -84,12 +89,14 @@ export function isTerminalStatus(s: unknown): s is TerminalStatus {
 }
 
 export function isJobStatus(s: unknown): s is JobStatus {
-  return typeof s === "string" && (STATUSES as readonly string[]).includes(s);
+  return parseJobStatus(s).ok;
 }
 
 export function parseJobStatus(raw: unknown): Result<JobStatus, JobStatusError> {
-  if (!isJobStatus(raw)) return { ok: false, error: { kind: "InvalidStatus" } };
-  return { ok: true, value: raw };
+  if (typeof raw !== "string" || !(STATUSES as readonly string[]).includes(raw)) {
+    return { ok: false, error: { kind: "InvalidStatus" } };
+  }
+  return { ok: true, value: raw as JobStatus };
 }
 
 export function isUuid(s: string): boolean {
@@ -150,12 +157,15 @@ export function ttlToNumber(ttl: TtlSecs): number {
   return ttl;
 }
 
+/** Fuente unica: parseProgress. isValid* delega aqui para no duplicar 0..1. */
 export function isValidProgress(n: unknown): n is number {
-  return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
+  return parseProgress(n).ok;
 }
 
 export function parseProgress(raw: unknown): Result<Progress, ProgressError> {
-  if (!isValidProgress(raw)) return { ok: false, error: { kind: "InvalidProgress" } };
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 1) {
+    return { ok: false, error: { kind: "InvalidProgress" } };
+  }
   return { ok: true, value: raw as Progress };
 }
 
@@ -163,11 +173,14 @@ export function progressToNumber(p: Progress): number {
   return p;
 }
 
+/** Fuente unica: parseStage. isValidStage delega aqui para no duplicar STAGES. */
 export function isValidStage(s: unknown): s is StageName {
-  return typeof s === "string" && (STAGES as readonly string[]).includes(s);
+  return parseStage(s).ok;
 }
 
 export function parseStage(raw: unknown): Result<StageName, StageError> {
-  if (!isValidStage(raw)) return { ok: false, error: { kind: "InvalidStage" } };
-  return { ok: true, value: raw };
+  if (typeof raw !== "string" || !(STAGES as readonly string[]).includes(raw)) {
+    return { ok: false, error: { kind: "InvalidStage" } };
+  }
+  return { ok: true, value: raw as StageName };
 }

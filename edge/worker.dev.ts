@@ -5,7 +5,7 @@
  * Las rutas dev solo responden con `ALLOW_DEV_ROUTES=1`; con vars de
  * produccion responden 404. El bundle de prod no referencia este modulo.
  */
-import { parseJobId } from "./contract";
+import { jobIdToString, parseJobId } from "./contract";
 import prod from "./worker";
 
 export { ProgressDO } from "./progress-do";
@@ -28,12 +28,25 @@ function devEnabled(env: DevEnv): boolean {
   return env.ALLOW_DEV_ROUTES === "1";
 }
 
-function isSlot(s: string): s is "a" | "b" {
-  return s === "a" || s === "b";
+type Slot = "a" | "b";
+type SlotError = { readonly kind: "InvalidSlot" };
+type ZipError = { readonly kind: "InvalidBundle" };
+
+/** Parse-once: slot a/b como Result, sin boolean isSlot aguas abajo. */
+function parseSlot(raw: unknown): import("./contract").Result<Slot, SlotError> {
+  if (raw === "a" || raw === "b") return { ok: true, value: raw };
+  return { ok: false, error: { kind: "InvalidSlot" } };
 }
 
-function isZip(bytes: Uint8Array): boolean {
-  return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+/** Parse-once: bundle zip (PK) como Result, sin boolean isZip aguas abajo. */
+function parseZipBundle(raw: unknown): import("./contract").Result<Uint8Array, ZipError> {
+  if (!(raw instanceof Uint8Array)) return { ok: false, error: { kind: "InvalidBundle" } };
+  const b0 = raw[0];
+  const b1 = raw[1];
+  if (raw.length === 0 || raw.length > DEV_MAX_RESULT_BYTES || b0 !== 0x50 || b1 !== 0x4b) {
+    return { ok: false, error: { kind: "InvalidBundle" } };
+  }
+  return { ok: true, value: raw };
 }
 
 export default {
@@ -44,11 +57,15 @@ export default {
     const blobMatch = pathname.match(/^\/dev\/blobs\/([^/]+)\/([^/]+)$/);
     if (blobMatch && req.method === "GET") {
       if (!devEnabled(env)) return json({ detail: "not found" }, 404);
-      const parsed = parseJobId(blobMatch[1]);
+      const jobRaw: unknown = blobMatch[1];
+      const slotRaw: unknown = blobMatch[2];
+      const parsed = parseJobId(jobRaw);
       if (!parsed.ok) return json({ detail: "invalid job_id" }, 400);
-      if (!isSlot(blobMatch[2])) return json({ detail: "invalid slot" }, 400);
+      const slot = parseSlot(slotRaw);
+      if (!slot.ok) return json({ detail: "invalid slot" }, 400);
       if (!env.VULTUS_BUCKET) return json({ detail: "missing bindings" }, 500);
-      const obj = await env.VULTUS_BUCKET.get(`jobs/${blobMatch[1]}/${blobMatch[2]}`);
+      // Llave via accesor del brand probado, sin `as`.
+      const obj = await env.VULTUS_BUCKET.get(`jobs/${jobIdToString(parsed.value)}/${slot.value}`);
       if (!obj || !obj.body) return json({ detail: "not found" }, 404);
       return new Response(obj.body, {
         headers: { "Content-Type": "application/octet-stream" },
@@ -58,14 +75,13 @@ export default {
     const resultMatch = pathname.match(/^\/dev\/results\/([^/]+)$/);
     if (resultMatch && req.method === "PUT") {
       if (!devEnabled(env)) return json({ detail: "not found" }, 404);
-      const parsed = parseJobId(resultMatch[1]);
+      const jobRaw: unknown = resultMatch[1];
+      const parsed = parseJobId(jobRaw);
       if (!parsed.ok) return json({ detail: "invalid job_id" }, 400);
       if (!env.VULTUS_BUCKET) return json({ detail: "missing bindings" }, 500);
-      const buf = new Uint8Array(await req.arrayBuffer());
-      if (buf.length === 0 || buf.length > DEV_MAX_RESULT_BYTES || !isZip(buf)) {
-        return json({ detail: "invalid result bundle" }, 400);
-      }
-      await env.VULTUS_BUCKET.put(`jobs/${resultMatch[1]}/result.zip`, buf);
+      const bundle = parseZipBundle(new Uint8Array(await req.arrayBuffer()));
+      if (!bundle.ok) return json({ detail: "invalid result bundle" }, 400);
+      await env.VULTUS_BUCKET.put(`jobs/${jobIdToString(parsed.value)}/result.zip`, bundle.value);
       return json({ ok: true });
     }
 

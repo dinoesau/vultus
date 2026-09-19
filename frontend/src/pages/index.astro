@@ -69,10 +69,14 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
     <script>
       import {
         API_PATHS,
+        errorDetail,
         extractResultImages,
         extractResultMeshes,
         isRetryableResultStatus,
         isTerminal,
+        parseCompareResponse,
+        parseJobEvent,
+        parsePollStatus,
         statusMessage,
         toWsUrl,
       } from "../components/compare-client.ts";
@@ -136,7 +140,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           img.removeAttribute("src");
         }
         for (const p of document.querySelectorAll(".placeholder")) {
-          (p as HTMLElement).hidden = false;
+          if (p instanceof HTMLElement) p.hidden = false;
         }
       }
 
@@ -186,7 +190,8 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
             new CustomEvent("vultus:meshes", { detail: { meshA, meshB } }),
           );
         } catch (err) {
-          showError(`job ${jobId}: zip sin meshes (${(err as Error).message}).`);
+          const why = err instanceof Error ? err.message : String(err);
+          showError(`job ${jobId}: zip sin meshes (${why}).`);
         }
         stageEl.textContent = `job ${jobId}: listo. Zip guardado en memoria para re-descarga local.`;
         statusEl.textContent = `job ${jobId}: done (zip en memoria)`;
@@ -218,7 +223,8 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         try {
           await renderResult(await res.blob(), jobId, myGen);
         } catch (err) {
-          showError(`job ${jobId}: zip inválido (${(err as Error).message}).`);
+          const why = err instanceof Error ? err.message : String(err);
+          showError(`job ${jobId}: zip inválido (${why}).`);
         }
       }
 
@@ -272,7 +278,15 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
             return;
           }
           if (!res.ok) return;
-          const body = (await res.json()) as { status: string };
+          let pollBody: unknown;
+          try {
+            pollBody = await res.json();
+          } catch {
+            return;
+          }
+          const poll = parsePollStatus(pollBody);
+          if (!poll.ok) return;
+          const body = { status: poll.value };
           if (body.status === "done") {
             stopLive();
             stageEl.textContent = `job ${jobId}: listo. Descargando resultado...`;
@@ -300,17 +314,19 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         }
         ws = socket;
         socket.addEventListener("message", (ev) => {
+          let raw: unknown;
           try {
-            const msg = JSON.parse(ev.data as string) as {
-              job_id: string;
-              status: string;
-              progress: number;
-              stage: string;
-            };
-            onEvent(jobId, msg.status, msg.progress, msg.stage, myGen);
+            raw = JSON.parse(ev.data);
           } catch {
             // Evento WS malformado: se ignora, el siguiente tick lo corrige.
+            return;
           }
+          const msg = parseJobEvent(raw);
+          if (!msg.ok) {
+            // Evento con forma rota: se ignora, el siguiente tick lo corrige.
+            return;
+          }
+          onEvent(jobId, msg.value.status, msg.value.progress, msg.value.stage, myGen);
         });
         const onDrop = () => {
           if (!settled && myGen === gen) startPolling(jobId, myGen);
@@ -343,14 +359,27 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         stageEl.textContent = "enviando...";
         setProgress(0);
         const res = await fetch(`${api}${API_PATHS.compare}`, { method: "POST", body: fd });
-        const body = (await res.json()) as { job_id?: string; detail?: string };
-        if (!res.ok || !body.job_id) {
-          const detail = body.detail ?? JSON.stringify(body);
+        let rawBody: unknown;
+        try {
+          rawBody = await res.json();
+        } catch {
+          statusEl.textContent = `error ${res.status}: invalid response`;
+          stageEl.textContent = `error ${res.status}: invalid response`;
+          return;
+        }
+        if (!res.ok) {
+          const detail = errorDetail(rawBody);
           statusEl.textContent = `error ${res.status}: ${detail}`;
           stageEl.textContent = `error ${res.status}: ${detail}`;
           return;
         }
-        const jobId = body.job_id;
+        const parsed = parseCompareResponse(rawBody);
+        if (!parsed.ok) {
+          statusEl.textContent = `error ${res.status}: invalid response`;
+          stageEl.textContent = `error ${res.status}: invalid response`;
+          return;
+        }
+        const jobId = parsed.value.jobId;
         statusEl.textContent = `job ${jobId} queued...`;
         stageEl.textContent = `job ${jobId}: en cola...`;
         subscribe(jobId, myGen);

@@ -20,7 +20,12 @@ from backend.domain import (
     DomainError,
     Err,
     ImageBytes,
+    InvalidJobId,
+    Invariant,
     JobId,
+    MlFailed,
+    MlTransport,
+    NotFound,
     Ok,
     Progress,
     Stage,
@@ -72,31 +77,39 @@ def _gateway_status(job_id: JobId) -> str | None:
         return None
 
 
-def _parse_queue_message(raw: object) -> Ok[tuple[JobId, str, str]] | Err[str]:
-    """Borde del runner: valida job_id y punteros sin `..` una sola vez."""
+def _parse_queue_message(raw: object) -> Ok[tuple[JobId, str, str]] | Err[DomainError]:
+    """Borde del runner: valida job_id y punteros sin `..` una sola vez.
+
+    Errores estratificados (DomainError), nunca `str`: el caller mapea a
+    mensaje con `domain_to_message` solo donde humanos leen (log).
+    """
     if not isinstance(raw, dict):
-        return Err("queue body not object")
+        return Err(Invariant(detail="queue body not object"))
     job_raw = raw.get("job_id")
     keys = raw.get("r2_keys")
     if not isinstance(keys, dict):
-        return Err("queue body missing r2_keys")
+        return Err(Invariant(detail="queue body missing r2_keys"))
     job_result = parse_job_id(job_raw)
     if isinstance(job_result, Err):
-        return Err(domain_to_message(job_result.error))
+        propagated: DomainError = job_result.error
+        if not isinstance(propagated, InvalidJobId):
+            propagated = InvalidJobId()
+        return Err(propagated)
     for name in ("image_a", "image_b"):
         key = keys.get(name)
         if not isinstance(key, str) or not key.strip() or ".." in key or len(key.strip()) > 1024:
-            return Err(f"invalid r2 key for {name}")
-    assert isinstance(keys.get("image_a"), str) and isinstance(keys.get("image_b"), str)
-    return Ok((job_result.value, str(keys["image_a"]).strip(), str(keys["image_b"]).strip()))
+            return Err(Invariant(detail=f"invalid r2 key for {name}"))
+    key_a = keys.get("image_a")
+    key_b = keys.get("image_b")
+    if not isinstance(key_a, str) or not isinstance(key_b, str):
+        return Err(Invariant(detail="invalid r2 key"))
+    return Ok((job_result.value, key_a.strip(), key_b.strip()))
 
 
 def _fetch_blob(job_id: JobId, key: str) -> Ok[ImageBytes] | Err[DomainError]:
     slot = "a" if key.rstrip().endswith("/a") else "b"
     status, raw = _http("GET", f"{_gateway_base()}/dev/blobs/{job_id.as_str()}/{slot}")
     if status != 200:
-        from backend.domain import MlFailed, MlTransport
-
         return Err(MlFailed(detail=MlTransport(details=f"blob fetch {slot} status={status}")))
     parsed = parse_image_bytes(raw)
     if isinstance(parsed, Err):
@@ -111,8 +124,6 @@ class HttpProgressSink:
         self._job_id = job_id
 
     def _post_progress(self, payload: dict[str, object]) -> Ok[None] | Err[DomainError]:
-        from backend.domain import NotFound
-
         status, _ = _http(
             "POST",
             f"{_gateway_base()}/v1/jobs/{self._job_id.as_str()}/progress",
@@ -121,8 +132,6 @@ class HttpProgressSink:
         if status == 404:
             return Err(NotFound(job_id=self._job_id.as_str()))
         if status < 200 or status >= 300:
-            from backend.domain import MlFailed, MlTransport
-
             return Err(MlFailed(detail=MlTransport(details=f"progress post status={status}")))
         return Ok(None)
 
@@ -144,11 +153,10 @@ class HttpProgressSink:
             "application/zip",
         )
         if status < 200 or status >= 300:
-            from backend.domain import MlFailed, MlTransport
-
             return Err(MlFailed(detail=MlTransport(details=f"result put status={status}")))
         done = parse_progress(1.0)
-        assert isinstance(done, Ok)
+        if isinstance(done, Err):
+            return done
         return self._post_progress({"progress": done.value.value(), "stage": Stage.DONE.as_str(), "status": "done"})
 
     def fail(self) -> Ok[None] | Err[DomainError]:
@@ -178,7 +186,7 @@ def process_message(raw: object) -> JobOutcome:
     start = time.monotonic()
     parsed = _parse_queue_message(raw)
     if isinstance(parsed, Err):
-        logger.warning("bad queue message skipped err=%s", parsed.error)
+        logger.warning("bad queue message skipped err=%s", domain_to_message(parsed.error))
         return JobOutcome(job_id="unknown", action="skipped-bad-message")
     job_id, key_a, key_b = parsed.value
     status = _gateway_status(job_id)

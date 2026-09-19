@@ -37,8 +37,8 @@ _GROUP_THRESHOLD = 1e-4
 # construccion; doble-flip y cero-flip fallan el gate de orientacion (S5).
 GNM_UV_ORIGIN_BOTTOM_LEFT = True
 
-_ISLAND_MIN = 1
-_ISLAND_MAX = 5
+# Rango de islas 1..5: fuente unica en backend.domain (UV_ISLAND_MIN/MAX,
+# dueno de parse_uv_region). Este modulo no redefine el rango.
 
 _ISLAND_SKIN = ("skin",)
 _ISLAND_LEFT_EYE = ("left_eye",)
@@ -381,13 +381,20 @@ def _island_ids(head: GnmHead) -> NDArray[np.int32]:
 
 
 def island_vertex_mask(island: int) -> list[bool]:
-    """Mascara booleana de 17821 para la isla 1..5 (ValueError si no)."""
-    if isinstance(island, bool) or not isinstance(island, int):
-        raise TypeError(f"isla no entera: {island!r}")
-    if island < _ISLAND_MIN or island > _ISLAND_MAX:
-        raise ValueError(f"isla {island} fuera de 1..5")
+    """Mascara booleana de 17821 para la isla 1..5 (ValueError si no).
+
+    Borde delgado: la regla 1..5 vive en domain.parse_uv_region (fuente unica).
+    Este wrapper conserva el contrato raise para callers con int crudo.
+    """
+    from backend.domain import Err, parse_uv_region
+
+    parsed = parse_uv_region(island)
+    if isinstance(parsed, Err):
+        if isinstance(island, bool) or not isinstance(island, int):
+            raise TypeError(f"isla no entera: {island!r}")
+        raise ValueError(f"isla {island} fuera de 1..5")  # noqa: TRY004 - rango entero invalido es ValueError
     head = load_gnm_head()
-    mask: list[bool] = (_island_ids(head) == island).tolist()
+    mask: list[bool] = (_island_ids(head) == parsed.value.island()).tolist()
     return mask
 
 

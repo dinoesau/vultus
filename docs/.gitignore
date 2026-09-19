@@ -2,5 +2,3 @@
 # Esto permite commitear docs/ siempre vacio en GitHub
 *
 !.gitignore
-!secrets.md
-!plan-*.md

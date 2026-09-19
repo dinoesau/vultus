@@ -137,20 +137,36 @@ export function hasSupportedMagic(bytes: Uint8Array): boolean {
   return isJpeg(bytes) || isPng(bytes);
 }
 
-/** Paridad con `TtlSecs`: clamp 1..=3600, default 60. Nunca NaN. */
-export function parseTtlSecs(raw: string | null | undefined): number {
-  const n = Number(raw ?? `${RESULT_TTL_SECONDS}`);
-  if (!Number.isFinite(n)) return RESULT_TTL_SECONDS;
-  const floored = Math.floor(n);
-  if (floored < TTL_MIN_SECS) return TTL_MIN_SECS;
-  if (floored > TTL_MAX_SECS) return TTL_MAX_SECS;
-  return floored;
+export type TtlError = { readonly kind: "InvalidTtlSecs" };
+
+// Single mint site per good-typescript pillar 1: the brand assertion lives only here,
+// reviewed as sudo. All TTL smart-constructor paths mint via this helper.
+function mintTtlSecsUnchecked(value: number): TtlSecs {
+  return value as TtlSecs;
 }
 
-export function parseTtlSecsBranded(raw: unknown): TtlSecs {
-  const asString = typeof raw === "string" ? raw : raw == null ? null : String(raw);
-  const clamped = parseTtlSecs(asString);
-  return clamped as TtlSecs;
+/** Fuente unica: parseTtlSecs estricto 1..=3600 via Result InvalidTtlSecs; shell default 60 con log, DO 400. Nunca lanza. */
+export function parseTtlSecs(raw: unknown): Result<TtlSecs, TtlError> {
+  const err: Result<TtlSecs, TtlError> = { ok: false, error: { kind: "InvalidTtlSecs" } };
+  if (typeof raw === "number") {
+    if (!Number.isInteger(raw)) return err;
+    if (raw < TTL_MIN_SECS || raw > TTL_MAX_SECS) return err;
+    return { ok: true, value: mintTtlSecsUnchecked(raw) };
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!/^(0|[1-9][0-9]*)$/.test(trimmed)) return err;
+    const n = Number(trimmed);
+    if (!Number.isInteger(n) || n < TTL_MIN_SECS || n > TTL_MAX_SECS) return err;
+    return { ok: true, value: mintTtlSecsUnchecked(n) };
+  }
+  return err;
+}
+
+export function resolveTtlSecs(raw: unknown): { ttl: TtlSecs; invalid: boolean; raw: unknown } {
+  const r = parseTtlSecs(raw);
+  if (r.ok) return { ttl: r.value, invalid: false, raw };
+  return { ttl: mintTtlSecsUnchecked(RESULT_TTL_SECONDS), invalid: true, raw };
 }
 
 export function ttlToNumber(ttl: TtlSecs): number {

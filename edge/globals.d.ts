@@ -25,6 +25,7 @@ interface R2ObjectBody {
 interface R2Bucket {
   put(key: string, value: ArrayBuffer | Uint8Array): Promise<unknown>;
   get(key: string): Promise<(R2ObjectBody & { readonly body: ReadableStream | null }) | null>;
+  delete(key: string): Promise<void>;
 }
 
 interface Queue {

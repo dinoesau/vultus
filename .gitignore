@@ -51,3 +51,6 @@ models/*.ckpt
 
 # Wrangler local state
 .wrangler/
+
+# Vitest 
+.vite/vitest/results.json

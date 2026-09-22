@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from backend.domain import GnmCoeffs, Landmarks, UvRegion
+from backend.domain import GnmCoeffs, Landmarks
 
 TEMPLATE_VERTS_REAL = 17821
 TEMPLATE_TRIS_REAL = 35324
@@ -38,8 +38,8 @@ _GROUP_THRESHOLD = 1e-4
 # construccion; doble-flip y cero-flip fallan el gate de orientacion (S5).
 GNM_UV_ORIGIN_BOTTOM_LEFT = True
 
-_ISLAND_MIN = 1
-_ISLAND_MAX = 5
+# Rango de islas 1..5: fuente unica en backend.domain (UV_ISLAND_MIN/MAX,
+# dueno de parse_uv_region). Este modulo no redefine el rango.
 
 _ISLAND_SKIN = ("skin",)
 _ISLAND_LEFT_EYE = ("left_eye",)
@@ -397,22 +397,21 @@ def _island_ids(head: GnmHead) -> NDArray[np.int32]:
     return ids
 
 
-def island_vertex_mask(region: UvRegion) -> list[bool]:
-    """Mascara booleana de 17821 para la isla 1..5.
+def island_vertex_mask(island: int) -> list[bool]:
+    """Mascara booleana de 17821 para la isla 1..5 (ValueError si no).
 
-    `region` llega probada del borde; el core no revalida rango.
-    Acepta int legacy (tests) via comparacion directa 1..5.
+    Borde delgado: la regla 1..5 vive en domain.parse_uv_region (fuente unica).
+    Este wrapper conserva el contrato raise para callers con int crudo.
     """
-    if isinstance(region, UvRegion):
-        island = region.island()
-    else:
-        if isinstance(region, bool) or not isinstance(region, int):
-            raise TypeError(f"isla no entera: {region!r}")
-        if region < _ISLAND_MIN or region > _ISLAND_MAX:
-            raise ValueError(f"isla {region} fuera de 1..5")
-        island = region
+    from backend.domain import Err, parse_uv_region
+
+    parsed = parse_uv_region(island)
+    if isinstance(parsed, Err):
+        if isinstance(island, bool) or not isinstance(island, int):
+            raise TypeError(f"isla no entera: {island!r}")
+        raise ValueError(f"isla {island} fuera de 1..5")  # noqa: TRY004 - rango entero invalido es ValueError
     head = load_gnm_head()
-    mask: list[bool] = (_island_ids(head) == island).tolist()
+    mask: list[bool] = (_island_ids(head) == parsed.value.island()).tolist()
     return mask
 
 

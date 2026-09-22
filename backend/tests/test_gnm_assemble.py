@@ -23,7 +23,7 @@ from backend.gnm_assemble import (
     assemble_islands,
     build_full_zip,
     build_personalized_glb,
-    island_bounds,
+    island_bounds_of,
     pbr_from_albedo,
 )
 from backend.gnm_fit import fit_gnm
@@ -83,7 +83,7 @@ def test_five_islands_cover_full_uv_without_overlap() -> None:
     for island in range(1, 6):
         region = parse_uv_region(island)
         assert isinstance(region, Ok)
-        start, end = island_bounds(region.value)
+        start, end = island_bounds_of(region.value)
         assert end > start
         assert start == prev_end
         prev_end = end

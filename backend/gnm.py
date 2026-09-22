@@ -22,7 +22,6 @@ from backend.domain import (
     CompleteUv,
     Heatmap,
     ZipBundle,
-    _heatmap_from_diff,
 )
 
 _template_cache: (
@@ -107,13 +106,12 @@ def load_template() -> tuple[
 
 
 def compute_heatmap(uv_a: CompleteUv, uv_b: CompleteUv) -> Heatmap:
-    """Diferencia |a-b| por byte, infalible por construccion.
-
-    Ambos inputs cargan el invariante UV_LEN via parse_complete_uv,
-    el zip nunca puede fallar por longitud; no se retorna Result.
-    Unico mint via dominio interno _heatmap_from_diff.
-    """
-    return _heatmap_from_diff(uv_a, uv_b)
+    raw = bytes(
+        x - y if x >= y else y - x for x, y in zip(uv_a.as_bytes(), uv_b.as_bytes())
+    )
+    # Ambas entradas son CompleteUv probados de UV_LEN; el diff conserva
+    # longitud por construccion. Mint sancionado, no forja libre.
+    return Heatmap._mint_after_check(raw)  # noqa: SLF001 - mint sancionado tras checks UV_LEN, unico via compute_heatmap
 
 
 def uv_to_png(uv: CompleteUv | Heatmap) -> bytes:

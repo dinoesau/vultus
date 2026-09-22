@@ -254,7 +254,8 @@ class HttpProgressSink:
         if status < 200 or status >= 300:
             return Err(MlFailed(detail=MlTransport(details=f"result put status={status}")))
         done = parse_progress(1.0)
-        assert isinstance(done, Ok)
+        if isinstance(done, Err):
+            return done
         return self._post_progress({"progress": done.value.value(), "stage": Stage.DONE.as_str(), "status": "done"})
 
     def fail(self) -> Ok[None] | Err[DomainError]:

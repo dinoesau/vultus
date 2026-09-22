@@ -10,25 +10,37 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Literal
 
 from backend.domain import (
+    BaseUrl,
     CompareResult,
     DomainError,
     Err,
     ImageBytes,
+    InvalidR2Key,
     JobId,
+    MlFailed,
+    MlTransport,
+    NotFound,
     Ok,
     Progress,
+    QueueJob,
+    R2Key,
     Stage,
+    ZipBundle,
     domain_to_message,
     parse_base_url,
     parse_image_bytes,
-    parse_job_id,
     parse_progress,
+    parse_queue_envelope,
+    parse_r2_key,
 )
 from backend.gnm import build_result_zip, uv_to_png
 from backend.pipeline_local import (
@@ -37,18 +49,83 @@ from backend.pipeline_local import (
     default_config,
     run_pair,
 )
+from backend.shell_secrets import CfToken, SecretStr
 
 logger = logging.getLogger("vultus-runner")
 
 TERMINAL_STATUSES = ("done", "failed", "expired")
+
+UNKNOWN_JOB_ID = "unknown"
+
+# parse_r2_key vive en el dominio como dueno unico; el alias fija el borde
+# de cola del runner sobre ese parser sin duplicar la regla.
+_R2_KEY_PARSER = parse_r2_key
+
+
+@dataclass(frozen=True, slots=True)
+class DeadLetter:
+    """Sobre shell para mensajes malos: bytes crudos mas error tipado."""
+
+    raw: bytes
+    reason: DomainError
+
+
+_DEAD_LETTERS: list[DeadLetter] = []
+
+_DEAD_LETTER_MAX = 100
+
+# Lock para append/del + _METRICS: _Handler es ThreadingHTTPServer, sin
+# esto dos POST /hooks/queue concurrentes pueden corromper la lista.
+_DEAD_LETTER_LOCK = threading.Lock()
+
+_METRICS: dict[str, int] = {"queue_skip": 0}
+
+
+def _raw_to_bytes(raw: object) -> bytes:
+    if isinstance(raw, (bytes, bytearray)):
+        data = bytes(raw)
+    else:
+        try:
+            data = json.dumps(raw, default=str).encode("utf-8")
+        except (TypeError, ValueError):
+            data = repr(raw).encode("utf-8")
+    # Cap dead-letter payload: evita que un body gigante crezca sin cota
+    # en memoria (100 cartas x N bytes).
+    if len(data) > 4096:
+        return data[:4096]
+    return data
+
+
+def _dead_letter(raw: object, reason: DomainError) -> DeadLetter:
+    letter = DeadLetter(raw=_raw_to_bytes(raw), reason=reason)
+    with _DEAD_LETTER_LOCK:
+        _DEAD_LETTERS.append(letter)
+        if len(_DEAD_LETTERS) > _DEAD_LETTER_MAX:
+            del _DEAD_LETTERS[0 : len(_DEAD_LETTERS) - _DEAD_LETTER_MAX]
+        _METRICS["queue_skip"] = _METRICS.get("queue_skip", 0) + 1
+    return letter
+
+
+def _load_cf_token() -> CfToken | None:
+    raw = os.environ.get("CF_TOKEN", "").strip()
+    if not raw:
+        return None
+    return CfToken(_inner=SecretStr(_value=raw))
 
 
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, default).strip() or default
 
 
-def _gateway_base() -> str:
-    return _env("GATEWAY_URL", "http://localhost:8000").rstrip("/")
+def _gateway_base() -> BaseUrl:
+    raw = _env("GATEWAY_URL", "http://localhost:8000")
+    parsed = parse_base_url(raw)
+    if isinstance(parsed, Ok):
+        return parsed.value
+    logger.warning("invalid GATEWAY_URL, using default")
+    fallback = parse_base_url("http://localhost:8000")
+    assert isinstance(fallback, Ok)
+    return fallback.value
 
 
 def _http(method: str, url: str, body: bytes | None = None, content_type: str = "application/json") -> tuple[int, bytes]:
@@ -60,10 +137,17 @@ def _http(method: str, url: str, body: bytes | None = None, content_type: str = 
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        # Red caida / gateway apagado / timeout: no tumbar el thread del
+        # runner; el caller lo trata como status no-200 (599 = sin respuesta).
+        logger.warning("http %s failed url=%s err=%s", method, url, exc)
+        return 599, b""
 
 
 def _gateway_status(job_id: JobId) -> str | None:
-    status, raw = _http("GET", f"{_gateway_base()}/v1/jobs/{job_id.as_str()}")
+    base = _gateway_base()
+    url = base.join("/v1/jobs/") + job_id.as_str()
+    status, raw = _http("GET", url)
     if status != 200:
         return None
     try:
@@ -72,32 +156,45 @@ def _gateway_status(job_id: JobId) -> str | None:
         return None
 
 
-def _parse_queue_message(raw: object) -> Ok[tuple[JobId, str, str]] | Err[str]:
-    """Borde del runner: valida job_id y punteros sin `..` una sola vez."""
-    if not isinstance(raw, dict):
-        return Err("queue body not object")
-    job_raw = raw.get("job_id")
-    keys = raw.get("r2_keys")
-    if not isinstance(keys, dict):
-        return Err("queue body missing r2_keys")
-    job_result = parse_job_id(job_raw)
-    if isinstance(job_result, Err):
-        return Err(domain_to_message(job_result.error))
-    for name in ("image_a", "image_b"):
-        key = keys.get(name)
-        if not isinstance(key, str) or not key.strip() or ".." in key or len(key.strip()) > 1024:
-            return Err(f"invalid r2 key for {name}")
-    assert isinstance(keys.get("image_a"), str) and isinstance(keys.get("image_b"), str)
-    return Ok((job_result.value, str(keys["image_a"]).strip(), str(keys["image_b"]).strip()))
+def _parse_queue_message(raw: object) -> Ok[QueueJob] | Err[DomainError]:
+    """Borde del runner: delega al unico parse_queue_envelope del dominio.
+
+    Solo canonico; legacy a/b es Err desde Wave 5.
+    """
+    return parse_queue_envelope(raw)
 
 
-def _fetch_blob(job_id: JobId, key: str) -> Ok[ImageBytes] | Err[DomainError]:
-    slot = "a" if key.rstrip().endswith("/a") else "b"
-    status, raw = _http("GET", f"{_gateway_base()}/dev/blobs/{job_id.as_str()}/{slot}")
+def _fetch_blob(job_id: JobId, key: R2Key, slot: Literal["a", "b"]) -> Ok[ImageBytes] | Err[DomainError]:
+    # Contrato gateway vs R2Key: el gateway sirve /dev/blobs/{job}/{slot},
+    # pero la R2Key probada gana sobre el slot cuando trae sufijo /a o /b.
+    # Sufijo presente que discrepa del slot es Err sin fetch; sin sufijo
+    # se usa el slot explicito bajo el contrato dev documentado.
+    key_str = key.as_str()
+    slot_value: str = slot
+    if slot_value not in ("a", "b"):
+        logger.warning("r2key invalid slot job=%s slot=%s key=%s", job_id.as_str(), slot_value, key_str)
+        return Err(InvalidR2Key())
+    safe_slot: Literal["a", "b"]
+    if key_str.endswith("/a"):
+        if slot != "a":
+            logger.warning("r2key slot mismatch job=%s slot=%s key=%s", job_id.as_str(), slot, key_str)
+            return Err(InvalidR2Key())
+        safe_slot = "a"
+    elif key_str.endswith("/b"):
+        if slot != "b":
+            logger.warning("r2key slot mismatch job=%s slot=%s key=%s", job_id.as_str(), slot, key_str)
+            return Err(InvalidR2Key())
+        safe_slot = "b"
+    else:
+        safe_slot = slot
+    logger.debug("fetch blob job=%s slot=%s key=%s", job_id.as_str(), safe_slot, key_str)
+    base = _gateway_base()
+    url = base.join("/dev/blobs/") + f"{job_id.as_str()}/{safe_slot}"
+    status, raw = _http("GET", url)
+    if status == 404:
+        return Err(NotFound(job_id=job_id.as_str()))
     if status != 200:
-        from backend.domain import MlFailed, MlTransport
-
-        return Err(MlFailed(detail=MlTransport(details=f"blob fetch {slot} status={status}")))
+        return Err(MlFailed(detail=MlTransport(details=f"blob fetch {safe_slot} status={status}")))
     parsed = parse_image_bytes(raw)
     if isinstance(parsed, Err):
         return parsed
@@ -105,24 +202,27 @@ def _fetch_blob(job_id: JobId, key: str) -> Ok[ImageBytes] | Err[DomainError]:
 
 
 class HttpProgressSink:
-    """Sink sobre HTTP: mismo patron que los workers GPU en prod."""
+    """Sink sobre HTTP: mismo patron que los workers GPU en prod.
+
+    Analogo a OrderRepository en good-python: puerto estrecho que el
+    pipeline consume sin conocer el transporte; tests inyectan el sink
+    en memoria, prod inyecta este sink HTTP.
+    """
 
     def __init__(self, job_id: JobId) -> None:
         self._job_id = job_id
 
     def _post_progress(self, payload: dict[str, object]) -> Ok[None] | Err[DomainError]:
-        from backend.domain import NotFound
-
+        base = _gateway_base()
+        url = base.join("/v1/jobs/") + f"{self._job_id.as_str()}/progress"
         status, _ = _http(
             "POST",
-            f"{_gateway_base()}/v1/jobs/{self._job_id.as_str()}/progress",
+            url,
             json.dumps(payload).encode(),
         )
         if status == 404:
             return Err(NotFound(job_id=self._job_id.as_str()))
         if status < 200 or status >= 300:
-            from backend.domain import MlFailed, MlTransport
-
             return Err(MlFailed(detail=MlTransport(details=f"progress post status={status}")))
         return Ok(None)
 
@@ -130,22 +230,28 @@ class HttpProgressSink:
         return self._post_progress({"progress": progress.value(), "stage": stage.as_str()})
 
     def complete(self, result: CompareResult) -> Ok[None] | Err[DomainError]:
-        blob = build_result_zip(
-            uv_to_png(result.uv_a.as_bytes()),
-            uv_to_png(result.uv_b.as_bytes()),
-            uv_to_png(result.heatmap.as_bytes()),
-            result.mesh_a.as_bytes(),
-            result.mesh_b.as_bytes(),
+        uv_a_png = uv_to_png(result.uv_a)
+        uv_b_png = uv_to_png(result.uv_b)
+        heatmap_png = uv_to_png(result.heatmap)
+        bundle = ZipBundle(
+            uv_a_png=uv_a_png,
+            uv_b_png=uv_b_png,
+            heatmap_png=heatmap_png,
+            mesh_a_glb=result.mesh_a.as_bytes(),
+            mesh_b_glb=result.mesh_b.as_bytes(),
+            pbr_a=uv_a_png,
+            pbr_b=uv_b_png,
         )
+        blob = build_result_zip(bundle)
+        base = _gateway_base()
+        url = base.join("/dev/results/") + self._job_id.as_str()
         status, _ = _http(
             "PUT",
-            f"{_gateway_base()}/dev/results/{self._job_id.as_str()}",
+            url,
             blob,
             "application/zip",
         )
         if status < 200 or status >= 300:
-            from backend.domain import MlFailed, MlTransport
-
             return Err(MlFailed(detail=MlTransport(details=f"result put status={status}")))
         done = parse_progress(1.0)
         assert isinstance(done, Ok)
@@ -178,9 +284,11 @@ def process_message(raw: object) -> JobOutcome:
     start = time.monotonic()
     parsed = _parse_queue_message(raw)
     if isinstance(parsed, Err):
-        logger.warning("bad queue message skipped err=%s", parsed.error)
-        return JobOutcome(job_id="unknown", action="skipped-bad-message")
-    job_id, key_a, key_b = parsed.value
+        _dead_letter(raw, parsed.error)
+        logger.warning("bad queue message skipped err=%s", domain_to_message(parsed.error))
+        return JobOutcome(job_id=UNKNOWN_JOB_ID, action="skipped-bad-message")
+    job = parsed.value
+    job_id = job.job_id
     status = _gateway_status(job_id)
     if status in TERMINAL_STATUSES:
         logger.info("job already terminal skipped job=%s status=%s", job_id.as_str(), status)
@@ -188,11 +296,11 @@ def process_message(raw: object) -> JobOutcome:
     ml = _sidecar_client()
     if ml is None:
         return JobOutcome(job_id=job_id.as_str(), action="skipped-no-sidecar")
-    blob_a = _fetch_blob(job_id, key_a)
+    blob_a = _fetch_blob(job_id, job.r2_a, "a")
     if isinstance(blob_a, Err):
         HttpProgressSink(job_id).fail()
         return JobOutcome(job_id=job_id.as_str(), action="failed-blob")
-    blob_b = _fetch_blob(job_id, key_b)
+    blob_b = _fetch_blob(job_id, job.r2_b, "b")
     if isinstance(blob_b, Err):
         HttpProgressSink(job_id).fail()
         return JobOutcome(job_id=job_id.as_str(), action="failed-blob")
@@ -244,7 +352,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 def serve_forever(host: str = "0.0.0.0", port: int = 8001) -> None:
     server = ThreadingHTTPServer((host, port), _Handler)
-    logger.info("runner serving host=%s port=%d gateway=%s", host, port, _gateway_base())
+    logger.info("runner serving host=%s port=%d gateway=%s", host, port, _gateway_base().as_str())
     server.serve_forever()
 
 

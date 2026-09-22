@@ -18,6 +18,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from backend.domain import GnmCoeffs, Landmarks, UvRegion
+
 TEMPLATE_VERTS_REAL = 17821
 TEMPLATE_TRIS_REAL = 35324
 IDENTITY_DIM = 253
@@ -26,7 +28,6 @@ MEDIAPIPE_POINTS = 478
 
 _NPZ_REL = os.path.join("weights", "gnm", "versions", "v3_0", "gnm_head.npz")
 _LM_REL = os.path.join("weights", "gnm", "landmarks", "head_sparse_68.txt")
-_ABS_WEIGHTS = "/Users/esau.martinez/Code/weights/gnm"
 
 _GROUP_THRESHOLD = 1e-4
 
@@ -112,7 +113,6 @@ def _candidate_npz_paths() -> list[str]:
     if weights_dir:
         cands.append(os.path.join(weights_dir, "gnm", "versions", "v3_0", "gnm_head.npz"))
     cands.append(os.path.join(_repo_root(), _NPZ_REL))
-    cands.append(os.path.join(_ABS_WEIGHTS, "versions", "v3_0", "gnm_head.npz"))
     return _dedupe(cands)
 
 
@@ -133,7 +133,6 @@ def _candidate_landmark_paths() -> list[str]:
     if weights_dir:
         cands.append(os.path.join(weights_dir, "gnm", "landmarks", "head_sparse_68.txt"))
     cands.append(os.path.join(_repo_root(), _LM_REL))
-    cands.append(os.path.join(_ABS_WEIGHTS, "landmarks", "head_sparse_68.txt"))
     return _dedupe(cands)
 
 
@@ -284,7 +283,14 @@ def load_gnm_head() -> GnmHead:
     return _HEAD_CACHE
 
 
-def _as_coeff_vector(coeffs: tuple[float, ...]) -> NDArray[np.float64]:
+def _as_coeff_vector(coeffs: GnmCoeffs) -> NDArray[np.float64]:
+    """Vector 253 desde `GnmCoeffs` ya probado en el borde.
+
+    Acepta secuencia legacy de 253 finitos (tests y llamantes previos al
+    borde); el borde real prueba via el dominio, el core no reparsea.
+    """
+    if isinstance(coeffs, GnmCoeffs):
+        return np.asarray(list(coeffs.as_tuple()), dtype=np.float64)
     if len(coeffs) != IDENTITY_DIM:
         raise ValueError(f"coeffs len {len(coeffs)} != {IDENTITY_DIM}")
     vals: list[float] = []
@@ -298,7 +304,7 @@ def _as_coeff_vector(coeffs: tuple[float, ...]) -> NDArray[np.float64]:
     return np.asarray(vals, dtype=np.float64)
 
 
-def _eval_mesh_np(coeffs: tuple[float, ...]) -> NDArray[np.float64]:
+def _eval_mesh_np(coeffs: GnmCoeffs) -> NDArray[np.float64]:
     head = load_gnm_head()
     vec = _as_coeff_vector(coeffs)
     template = np.asarray(head.template_positions, dtype=np.float64)
@@ -307,13 +313,13 @@ def _eval_mesh_np(coeffs: tuple[float, ...]) -> NDArray[np.float64]:
     return mesh
 
 
-def eval_mesh(coeffs: tuple[float, ...]) -> list[list[float]]:
+def eval_mesh(coeffs: GnmCoeffs) -> list[list[float]]:
     """Malla personalizada: template + combinacion lineal de la base (253)."""
     out: list[list[float]] = _eval_mesh_np(coeffs).tolist()
     return out
 
 
-def eval_landmarks68(coeffs: tuple[float, ...]) -> list[list[float]]:
+def eval_landmarks68(coeffs: GnmCoeffs) -> list[list[float]]:
     """68 landmarks 3D como combo baricentrico de la malla evaluada."""
     head = load_gnm_head()
     mesh = _eval_mesh_np(coeffs)
@@ -324,37 +330,48 @@ def eval_landmarks68(coeffs: tuple[float, ...]) -> list[list[float]]:
     return out
 
 
-def mediapipe478_to_gnm68_targets(landmarks_bytes_json_478: bytes) -> list[list[float]]:
-    """Reduce 478 puntos MediaPipe JSON a 68 pares x,y segun MP_68_MAP.
+def _landmarks_from_legacy(raw: object) -> tuple[tuple[float, float, float], ...]:
+    """Shim legacy para tests: bytes JSON 478x3.
 
-    Unica funcion estrecha para este mapeo v1 aproximado: valida el JSON
-    (478 puntos [x, y, ...] finitos) y proyecta por el mapa congelado.
+    El borde real prueba `Landmarks` via el dominio; el core no reparsea
+    con gramatica de dominio, solo valida forma para proyectar.
     """
+    if not isinstance(raw, (bytes, bytearray, memoryview)):
+        raise TypeError(f"landmarks no bytes: {type(raw).__name__}")
     try:
-        text = bytes(landmarks_bytes_json_478).decode("utf-8")
-    except ValueError:
-        raise ValueError("landmarks no son utf-8")
-    try:
-        parsed: Any = json.loads(text)
-    except json.JSONDecodeError:
-        raise ValueError("landmarks no son json")
-    if not isinstance(parsed, list) or len(parsed) != MEDIAPIPE_POINTS:
-        got = len(parsed) if isinstance(parsed, list) else -1
-        raise ValueError(f"se esperaban {MEDIAPIPE_POINTS} puntos, hay {got}")
-    pts: list[list[float]] = []
-    for point in parsed:
-        if not isinstance(point, (list, tuple)) or len(point) < 2:
-            raise ValueError("punto sin par x,y")
-        pair: list[float] = []
-        for value in (point[0], point[1]):
+        pts = json.loads(bytes(raw).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"landmarks invalidos: {exc}") from exc
+    if not isinstance(pts, list) or len(pts) != MEDIAPIPE_POINTS:
+        got = len(pts) if isinstance(pts, list) else -1
+        raise ValueError(f"landmarks invalidos: {got} puntos != {MEDIAPIPE_POINTS}")
+    out: list[tuple[float, float, float]] = []
+    for point in pts:
+        if not isinstance(point, list) or len(point) != 3:
+            raise ValueError("landmarks invalidos: punto no [x,y,z]")
+        vals: list[float] = []
+        for value in point:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError("coordenada no finita")
+                raise TypeError("landmarks invalidos: no numerico")
             number = float(value)
             if not math.isfinite(number):
-                raise ValueError("coordenada no finita")
-            pair.append(number)
-        pts.append(pair)
-    return [pts[i] for i in MP_68_MAP]
+                raise ValueError("landmarks invalidos: no finito")
+            vals.append(number)
+        out.append((vals[0], vals[1], vals[2]))
+    return tuple(out)
+
+
+def mediapipe478_to_gnm68_targets(landmarks: Landmarks) -> list[list[float]]:
+    """Reduce 478 puntos MediaPipe a 68 pares x,y segun MP_68_MAP.
+
+    `landmarks` llega probado del borde; el core proyecta por el mapa
+    congelado. Acepta bytes legacy (tests) via shim local.
+    """
+    if isinstance(landmarks, Landmarks):
+        proven = landmarks.as_tuple()
+    else:
+        proven = _landmarks_from_legacy(landmarks)
+    return [[float(proven[i][0]), float(proven[i][1])] for i in MP_68_MAP]
 
 
 def _group_mask(head: GnmHead, names: tuple[str, ...]) -> NDArray[np.bool_]:
@@ -380,12 +397,20 @@ def _island_ids(head: GnmHead) -> NDArray[np.int32]:
     return ids
 
 
-def island_vertex_mask(island: int) -> list[bool]:
-    """Mascara booleana de 17821 para la isla 1..5 (ValueError si no)."""
-    if isinstance(island, bool) or not isinstance(island, int):
-        raise TypeError(f"isla no entera: {island!r}")
-    if island < _ISLAND_MIN or island > _ISLAND_MAX:
-        raise ValueError(f"isla {island} fuera de 1..5")
+def island_vertex_mask(region: UvRegion) -> list[bool]:
+    """Mascara booleana de 17821 para la isla 1..5.
+
+    `region` llega probada del borde; el core no revalida rango.
+    Acepta int legacy (tests) via comparacion directa 1..5.
+    """
+    if isinstance(region, UvRegion):
+        island = region.island()
+    else:
+        if isinstance(region, bool) or not isinstance(region, int):
+            raise TypeError(f"isla no entera: {region!r}")
+        if region < _ISLAND_MIN or region > _ISLAND_MAX:
+            raise ValueError(f"isla {region} fuera de 1..5")
+        island = region
     head = load_gnm_head()
     mask: list[bool] = (_island_ids(head) == island).tolist()
     return mask

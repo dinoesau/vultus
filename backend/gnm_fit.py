@@ -150,7 +150,7 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> FitResult:
     del image  # el fit geometrico solo usa landmarks; la imagen viaja al seam texture
     start = time.perf_counter()
     targets: NDArray[np.float64] = np.asarray(
-        mediapipe478_to_gnm68_targets(landmarks.as_bytes()), dtype=np.float64
+        mediapipe478_to_gnm68_targets(landmarks), dtype=np.float64
     )
     if targets.shape != (LANDMARKS68, 2):
         raise ValueError(f"targets shape {targets.shape} != {(LANDMARKS68, 2)}")

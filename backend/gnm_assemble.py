@@ -16,15 +16,18 @@ from backend.domain import (
     UV_HEIGHT,
     UV_LEN,
     UV_WIDTH,
+    ZIP_FULL,
     CompleteUv,
     DomainError,
     Err,
     FitResult,
     GnmMesh,
+    ImageBytes,
     MlDecode,
     MlFailed,
     Ok,
     UvRegion,
+    ZipBundle,
     parse_complete_uv,
     parse_gnm_mesh,
     parse_uv_region,
@@ -47,21 +50,18 @@ _ISLAND_ROW_BOUNDS: tuple[tuple[int, int], ...] = (
     (358, 512),
 )
 
-ZIP_PBR_A = "pbr_a.png"
-ZIP_PBR_B = "pbr_b.png"
+# ZIP_NAMES es el subset de 5 archivos; ZIP_FULL es el orden canonico de 7.
+# El dominio es dueno unico del orden (ver backend/domain.py).
 
 
-def island_bounds(island: int) -> tuple[int, int]:
-    if isinstance(island, bool) or not isinstance(island, int):
-        raise TypeError(f"isla no entera: {island!r}")
-    if island < 1 or island > ISLAND_COUNT:
-        raise ValueError(f"isla {island} fuera de 1..{ISLAND_COUNT}")
-    return _ISLAND_ROW_BOUNDS[island - 1]
+def island_bounds(region: UvRegion) -> tuple[int, int]:
+    """Borde interno: region ya probada via parse_uv_region, sin revalidar."""
+    return _ISLAND_ROW_BOUNDS[region.island() - 1]
 
 
 def island_albedo(albedo: CompleteUv, region: UvRegion) -> bytes:
     raw = albedo.as_bytes()
-    start_row, end_row = island_bounds(region.island())
+    start_row, end_row = island_bounds(region)
     row_len = UV_WIDTH * 3
     return raw[start_row * row_len : end_row * row_len]
 
@@ -69,13 +69,16 @@ def island_albedo(albedo: CompleteUv, region: UvRegion) -> bytes:
 def assemble_islands(albedo: CompleteUv) -> dict[int, bytes]:
     out: dict[int, bytes] = {}
     for island in range(1, ISLAND_COUNT + 1):
-        region = parse_uv_region(island)
-        assert isinstance(region, Ok)
-        out[island] = island_albedo(albedo, region.value)
+        # 1..5 siempre Ok; el continue es inalcanzable pero total
+        # (sin mint directo, sin raise).
+        parsed = parse_uv_region(island)
+        if isinstance(parsed, Err):
+            continue
+        out[island] = island_albedo(albedo, parsed.value)
     return out
 
 
-def pbr_from_albedo(albedo: CompleteUv) -> Ok[bytes] | Err[DomainError]:
+def pbr_from_albedo(albedo: CompleteUv) -> Ok[CompleteUv] | Err[DomainError]:
     try:
         raw = albedo.as_bytes()
         out = bytearray(UV_LEN)
@@ -85,7 +88,7 @@ def pbr_from_albedo(albedo: CompleteUv) -> Ok[bytes] | Err[DomainError]:
             out[i] = inv
             out[i + 1] = inv
             out[i + 2] = inv
-        return Ok(bytes(out))
+        return parse_complete_uv(bytes(out))
     except Exception as exc:  # noqa: BLE001
         return Err(MlFailed(detail=MlDecode(details=f"pbr failed: {exc}")))
 
@@ -94,7 +97,7 @@ def displaced_positions(fit: FitResult) -> list[tuple[float, float, float]]:
     try:
         from backend.gnm_head import eval_mesh
 
-        mesh = eval_mesh(fit.coeffs.as_tuple())
+        mesh = eval_mesh(fit.coeffs)
         return [(float(p[0]), float(p[1]), float(p[2])) for p in mesh]
     except RuntimeError:
         # Sin npz (CI/Docker usan solo el bin): desplaza el template del bin
@@ -160,7 +163,7 @@ def _seam_split_tables(
 
 
 def build_personalized_glb(
-    fit: FitResult, albedo: CompleteUv, atlas_png: bytes | None = None
+    fit: FitResult, albedo: CompleteUv, atlas_png: ImageBytes | None = None
 ) -> Ok[GnmMesh] | Err[DomainError]:
     """GLB con seams reales: vertices partidos por (v, vt) unico.
 
@@ -174,11 +177,11 @@ def build_personalized_glb(
         split_positions, split_uvs, split_tris = _seam_split_tables(fit)
         n_exp = len(split_positions)
         if n_exp == 0 or len(split_uvs) != n_exp:
-            raise ValueError("tablas de split incoherentes")
+            return Err(MlFailed(detail=MlDecode(details="glb failed: split incoherente")))
         if len(split_tris) == 0:
-            raise ValueError("sin triangulos para export")
+            return Err(MlFailed(detail=MlDecode(details="glb failed: sin triangulos")))
         if atlas_png is not None:
-            png = bytes(atlas_png)
+            png = atlas_png.as_bytes()
         else:
             from PIL import Image as _Image
 
@@ -190,7 +193,7 @@ def build_personalized_glb(
         uv_buf = struct.pack(f"<{len(split_uvs) * 2}f", *[c for t in split_uvs for c in t])
         flat_idx = [v for tri in split_tris for v in tri]
         if not flat_idx or min(flat_idx) < 0 or max(flat_idx) >= n_exp:
-            raise ValueError("indice fuera de rango")
+            return Err(MlFailed(detail=MlDecode(details="glb failed: indice fuera de rango")))
         use_u32 = n_exp > 65535
         idx_fmt = f"<{len(flat_idx)}I" if use_u32 else f"<{len(flat_idx)}H"
         idx_comp = 5125 if use_u32 else 5123
@@ -247,42 +250,36 @@ def build_personalized_glb(
         out = b"glTF" + struct.pack("<I", 2) + struct.pack("<I", total)
         out += struct.pack("<I", len(json_bytes)) + b"JSON" + json_bytes
         out += struct.pack("<I", len(bin_buf)) + b"BIN\x00" + bin_buf
-        parsed = parse_gnm_mesh(out)
-        assert isinstance(parsed, Ok)
-        return parsed
+        return parse_gnm_mesh(out)
     except Exception as exc:  # noqa: BLE001
         return Err(MlFailed(detail=MlDecode(details=f"glb failed: {exc}")))
 
 
-def build_full_zip(
-    a_png: bytes,
-    b_png: bytes,
-    h_png: bytes,
-    mesh_a: bytes,
-    mesh_b: bytes,
-    pbr_a: bytes,
-    pbr_b: bytes,
-) -> bytes:
-    from backend.domain import ZIP_HEATMAP, ZIP_MESH_A, ZIP_MESH_B, ZIP_UV_A, ZIP_UV_B
-
+def build_full_zip(bundle: ZipBundle) -> bytes:
+    """Zip 7 archivos en orden canonico ZIP_FULL (ZIP_NAMES 5-subset + PBR)."""
     buf = io.BytesIO()
+    payloads = (
+        bundle.uv_a_png,
+        bundle.uv_b_png,
+        bundle.heatmap_png,
+        bundle.mesh_a_glb,
+        bundle.mesh_b_glb,
+        bundle.pbr_a,
+        bundle.pbr_b,
+    )
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as z:
-        z.writestr(ZIP_UV_A, a_png)
-        z.writestr(ZIP_UV_B, b_png)
-        z.writestr(ZIP_HEATMAP, h_png)
-        z.writestr(ZIP_MESH_A, mesh_a)
-        z.writestr(ZIP_MESH_B, mesh_b)
-        z.writestr(ZIP_PBR_A, pbr_a)
-        z.writestr(ZIP_PBR_B, pbr_b)
+        for name, data in zip(ZIP_FULL, payloads):
+            z.writestr(name, data)
     return buf.getvalue()
 
 
 def albedo_from_islands(parts: dict[int, bytes]) -> Ok[CompleteUv] | Err[DomainError]:
     try:
         ordered = b"".join(parts[i] for i in range(1, ISLAND_COUNT + 1))
-        assert len(ordered) == UV_LEN
-        parsed = parse_complete_uv(ordered)
-        assert isinstance(parsed, Ok)
-        return parsed
     except Exception as exc:  # noqa: BLE001
         return Err(MlFailed(detail=MlDecode(details=f"islands join failed: {exc}")))
+    if len(ordered) != UV_LEN:
+        return Err(
+            MlFailed(detail=MlDecode(details=f"islands join failed: len {len(ordered)} != {UV_LEN}"))
+        )
+    return parse_complete_uv(ordered)

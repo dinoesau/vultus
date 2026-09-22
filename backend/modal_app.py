@@ -34,6 +34,26 @@ import os
 import sys
 import threading
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from backend.domain import (
+        DomainError,
+        FitResult,
+        ImageBytes,
+        Landmarks,
+        QueueJob,
+        R2Key,
+        Result,
+    )
+
+try:
+    from backend.shell_secrets import CfToken, SecretStr
+except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+    from shell_secrets import (  # type: ignore[no-redef, import-not-found]
+        CfToken,
+        SecretStr,
+    )
 
 logger = logging.getLogger("vultus-ml-sidecar")
 if not logging.getLogger().handlers:
@@ -54,9 +74,8 @@ GNM_ASSETS_DIR = os.environ.get("GNM_ASSETS_DIR", os.path.join(WEIGHTS_DIR, "gnm
 # VULTUS_REAL_ML: 1 fuerza real, 0 fuerza dobles, auto decide por pesos+deps.
 REAL_MODE = os.environ.get("VULTUS_REAL_ML", "auto").lower()
 
-# Nombres del bundle (contrato con edge/contract.ts ZIP_MANIFEST).
-ZIP_UV_A = "uv_a.png"
-ZIP_UV_B = "uv_b.png"
+# Nombres del bundle: dominio es dueno del 7-tupla ZIP_FULL (ver backend/domain.py).
+# Este modulo no define ZIP_* locales para evitar divergencia con edge/contract.ts.
 ZIP_HEATMAP = "heatmap.png"
 ZIP_MESH_A = "mesh_a.glb"
 ZIP_MESH_B = "mesh_b.glb"
@@ -68,17 +87,10 @@ try:
 except OSError as e:
     logger.warning("weights dir not writable path=%s err=%s", WEIGHTS_DIR, e)
 
-def _is_jpeg(b: bytes) -> bool:
-    return len(b) >= 3 and b[0] == 0xFF and b[1] == 0xD8 and b[2] == 0xFF
-
-
-def _is_png(b: bytes) -> bool:
-    return len(b) >= 8 and b[0:8] == b"\x89PNG\r\n\x1a\n"
-
-
-def _deterministic_landmarks(image: bytes) -> bytes:
+def _deterministic_landmarks(image: "ImageBytes") -> bytes:
     """Doble determinista: grilla derivada de sha256(image), 478 puntos finitos."""
-    seed = hashlib.sha256(image).digest()
+    raw = image.as_bytes()
+    seed = hashlib.sha256(raw).digest()
     pts = []
     for i in range(LANDMARKS_LEN):
         d = hashlib.sha256(seed + i.to_bytes(4, "big")).digest()
@@ -87,23 +99,6 @@ def _deterministic_landmarks(image: bytes) -> bytes:
         z = int.from_bytes(d[8:12], "big") / 4294967295.0
         pts.append([x, y, z])
     return json.dumps(pts).encode("utf-8")
-
-
-def _check_landmarks_json(raw: bytes) -> None:
-    """Valida JSON [[x,y,z],...] con LANDMARKS_LEN puntos finitos. Lanza ValueError(detail)."""
-    try:
-        pts = json.loads(raw.decode("utf-8"))
-    except Exception as e:
-        raise ValueError(f"invalid landmarks json: {e}") from e
-    if not isinstance(pts, list) or len(pts) != LANDMARKS_LEN:
-        n = len(pts) if isinstance(pts, list) else -1
-        raise ValueError(f"expected {LANDMARKS_LEN} points, got {n}")
-    for p in pts:
-        if not isinstance(p, list) or len(p) != 3:
-            raise ValueError("invalid landmark point, expected [x,y,z]")
-        for v in p:
-            if not isinstance(v, (int, float)) or not math.isfinite(float(v)):
-                raise ValueError("non-finite landmark")
 
 
 # --- Inferencia real: MediaPipe tras el mismo contrato ---
@@ -156,7 +151,7 @@ def _pil_from_image_bytes(raw: bytes):
     try:
         return Image.open(io.BytesIO(raw)).convert("RGB")
     except Exception as e:
-        raise ValueError(f"cannot decode image bytes: {e}") from e
+        raise ValueError("cannot decode image bytes") from e
 
 
 _LM_LOCK = threading.Lock()
@@ -189,12 +184,13 @@ def _landmarker():
         return _LM
 
 
-def _real_landmarks(image: bytes) -> bytes:
+def _real_landmarks(image: "ImageBytes") -> bytes:
     """Landmarks reales 478 [[x,y,z]...] finitos. ValueError = 400, otro = 500."""
     import mediapipe as mp
     import numpy as np
 
-    img = _pil_from_image_bytes(image)
+    raw = image.as_bytes()
+    img = _pil_from_image_bytes(raw)
     arr = np.asarray(img)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=arr)
     res = _landmarker().detect(mp_image)
@@ -211,79 +207,77 @@ def _real_landmarks(image: bytes) -> bytes:
     return json.dumps(pts).encode("utf-8")
 
 
-def _impl_landmarks(body: bytes) -> bytes:
-    if not body:
-        raise ValueError("empty body")
-    if not (_is_jpeg(body) or _is_png(body)):
-        raise ValueError("unsupported image format, expected JPEG or PNG")
+def _impl_landmarks(image: "ImageBytes") -> bytes:
+    """Borde media: recibe ImageBytes ya probado via parse_image_bytes.
+
+    Sin revalidacion de formato aqui: el borde HTTP/R2 parsea una vez y el
+    core compone el tipo probado. Retorna landmarks JSON 478 finitos.
+    """
     if _use_real():
-        return _real_landmarks(body)
-    return _deterministic_landmarks(body)
+        return _real_landmarks(image)
+    return _deterministic_landmarks(image)
 
 
-def _impl_fit(payload: bytes) -> bytes:
-    """Delega al modulo `gnm_fit`: fit-request -> 1060 bytes (253f + 12f LE).
+def _impl_fit(image: "ImageBytes", landmarks: "Landmarks") -> "Result[bytes, DomainError]":
+    """Nucleo fit GNM sobre tipos probados -> 1060 bytes (253f + 12f LE).
+
+    Borde: el handler HTTP parsea una vez via decode_fit_request a
+    (Landmarks, ImageBytes) y llama aqui con (image, landmarks) ya probados.
+    Retorna Result, nunca lanza por outcomes de dominio. JobId queda en
+    shell (str), nunca como objeto aqui.
 
     S7 prod-block: con `_use_real()` el doble esta prohibido. Si el fit
-    real no esta disponible (npz ausente) se falla ruidoso (RuntimeError
-    -> 500 con causa) antes de delegar, nunca doble silencioso.
+    real no esta disponible (npz ausente) se retorna Err(FitFailed) -> 500
+    generico via domain_to_status, nunca doble silencioso.
     """
     try:
         from backend.domain import Err as _Err
         from backend.domain import FitFailed as _FitFailed
-        from backend.domain import domain_to_message as _msg
-        from backend.gnm_fit import fit_gnm_from_request
+        from backend.domain import MlDecode as _MlDecode
+        from backend.domain import Ok as _Ok
+        from backend.gnm_fit import fit_gnm
         from backend.pipeline_local import encode_fit_result
     except ImportError:  # pragma: no cover - paridad ruta plana en imagen
         from domain import Err as _Err  # type: ignore[no-redef]
         from domain import FitFailed as _FitFailed  # type: ignore[no-redef]
-        from domain import domain_to_message as _msg  # type: ignore[no-redef]
-        from gnm_fit import fit_gnm_from_request  # type: ignore[no-redef]
+        from domain import MlDecode as _MlDecode  # type: ignore[no-redef]
+        from domain import Ok as _Ok  # type: ignore[no-redef]
+        from gnm_fit import fit_gnm  # type: ignore[no-redef]
         from pipeline_local import encode_fit_result  # type: ignore[no-redef]
     if _use_real() and not _gnm_npz_present():
         # Sin npz no hay fit real (`_real_fit_available` seria False y el
-        # seam caeria al doble): fallar ruidoso aqui, nunca doble
-        # silencioso. Casos resto (npz corrupto, landmarks ausentes) ya
-        # llegan como Err(FitFailed) -> RuntimeError abajo.
-        raise RuntimeError("real fit required but GNM head weights missing (npz ausente)")
-
-    result = fit_gnm_from_request(payload)
+        # seam caeria al doble): Err ruidoso aqui, nunca doble silencioso.
+        # Causa solo en logs, cliente ve "internal error" via domain_to_message.
+        logger.warning("real fit required but GNM head weights missing (npz ausente)")
+        return _Err(_FitFailed(detail=_MlDecode(details="real fit required but head weights missing")))
+    result = fit_gnm(image, landmarks)
     if isinstance(result, _Err):
-        if isinstance(result.error, _FitFailed):
-            raise RuntimeError(_msg(result.error))
-        raise ValueError(_msg(result.error))
-    return encode_fit_result(result.value)
+        return result
+    return _Ok(encode_fit_result(result.value))
 
 
-def _impl_texture(payload: bytes) -> bytes:
-    """Delega a `gnm_texture.build_albedo`: texture-request -> UV_LEN bytes."""
+def _impl_texture(
+    image: "ImageBytes", fit: "FitResult", landmarks: "Landmarks"
+) -> "Result[bytes, DomainError]":
+    """Delega a `gnm_texture.build_albedo`: tipos probados -> UV_LEN bytes.
+
+    Borde: el handler HTTP parsea una vez via decode_texture_request a
+    (ImageBytes, FitResult, Landmarks) y llama aqui sin re-parsear.
+    Retorna Result, nunca lanza por outcomes de dominio. JobId queda en
+    shell (str), nunca como objeto aqui.
+    """
     try:
         from backend.domain import Err as _Err2
-        from backend.domain import FitFailed as _FitFailed2
-        from backend.domain import MlFailed as _MlFailed2
-        from backend.domain import domain_to_message as _msgT
+        from backend.domain import Ok as _Ok2
         from backend.gnm_texture import build_albedo
-        from backend.pipeline_local import decode_texture_request
     except ImportError:  # pragma: no cover - paridad ruta plana en imagen
         from domain import Err as _Err2  # type: ignore[no-redef]
-        from domain import FitFailed as _FitFailed2  # type: ignore[no-redef]
-        from domain import MlFailed as _MlFailed2  # type: ignore[no-redef]
-        from domain import domain_to_message as _msgT  # type: ignore[no-redef]
+        from domain import Ok as _Ok2  # type: ignore[no-redef]
         from gnm_texture import build_albedo  # type: ignore[no-redef]
-        from pipeline_local import decode_texture_request  # type: ignore[no-redef]
-
-    decoded = decode_texture_request(payload)
-    if isinstance(decoded, _Err2):
-        raise ValueError(_msgT(decoded.error))
-    image, fit, landmarks = decoded.value
     result = build_albedo(image, fit, landmarks)
     if isinstance(result, _Err2):
-        if isinstance(result.error, (_FitFailed2, _MlFailed2)):
-            raise RuntimeError(_msgT(result.error))
-        raise ValueError(_msgT(result.error))
-    out = result.value.as_bytes()
-    assert len(out) == UV_LEN
-    return out
+        return result
+    return _Ok2(result.value.as_bytes())
 
 
 try:
@@ -366,19 +360,35 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _load_r2_secret() -> SecretStr | None:
+    """Secreto R2 en memoria como SecretStr. Nunca se loguea crudo."""
+    raw = _env("R2_SECRET_ACCESS_KEY")
+    if not raw:
+        return None
+    return SecretStr(_value=raw)
+
+
+def _load_cf_token() -> CfToken | None:
+    """Token Cloudflare como CfToken compartido. Solo escotilla get_secret_value."""
+    raw = _env("CLOUDFLARE_API_TOKEN") or _env("CLOUDFLARE_API_KEY")
+    if not raw:
+        return None
+    return CfToken(_inner=SecretStr(_value=raw))
+
+
 def _r2_client():
     import boto3
 
     account = _env("CLOUDFLARE_ACCOUNT_ID")
     key_id = _env("R2_ACCESS_KEY_ID")
-    secret = _env("R2_SECRET_ACCESS_KEY")
-    if not account or not key_id or not secret:
+    secret = _load_r2_secret()
+    if not account or not key_id or secret is None:
         raise RuntimeError("r2 creds missing: CLOUDFLARE_ACCOUNT_ID/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY")
     return boto3.client(
         "s3",
         endpoint_url=f"https://{account}.r2.cloudflarestorage.com",
         aws_access_key_id=key_id,
-        aws_secret_access_key=secret,
+        aws_secret_access_key=secret.get_secret_value(),
     )
 
 
@@ -453,37 +463,72 @@ def _job_alive(job_id: str) -> bool:
         return True
 
 
-def _fetch_r2_bytes(bucket: str, key: str) -> bytes:
-    r2 = _r2_client()
-    obj = r2.get_object(Bucket=bucket, Key=key)
-    data = obj["Body"].read()
-    if not data:
-        raise ValueError(f"empty r2 object {key}")
-    return data
+def _is_not_found_error(exc: Exception) -> bool:
+    """True si el error R2 es 404/NoSuchKey. Inspeccion sin filtrar detalle al cliente."""
+    name = type(exc).__name__
+    if name in ("NoSuchKey", "NotFound", "NoSuchBucket"):
+        return True
+    resp = getattr(exc, "response", None)
+    if isinstance(resp, dict):
+        err = resp.get("Error")
+        if isinstance(err, dict):
+            code = str(err.get("Code", ""))
+            status = resp.get("ResponseMetadata", {})
+            http_status = status.get("HTTPStatusCode") if isinstance(status, dict) else None
+            if code in ("NoSuchKey", "NotFound", "NoSuchBucket", "404") or http_status == 404:
+                return True
+            if "404" in code or "NoSuch" in code:
+                return True
+    return False
 
 
-def _heatmap_abs_diff(uv_a: bytes, uv_b: bytes) -> bytes:
-    if len(uv_a) != UV_LEN or len(uv_b) != UV_LEN:
-        raise ValueError(f"heatmap needs {UV_LEN} bytes per uv")
+def _fetch_r2_bytes(bucket: str, key: "R2Key", job_id: str = "unknown") -> "Result[ImageBytes, DomainError]":
+    """Borde R2: fetch + parse una vez a ImageBytes. Nunca lanza por payload invalido.
+
+    Clave ya probada (R2Key), bytes crudos se vuelven ImageBytes via
+    parse_image_bytes (vacio/no-jpeg -> InvalidImage 400). Infra (NoSuchKey/
+    404 -> NotFound 404, otro OSError/ClientError -> 500) envuelta una vez;
+    causa Exception preservada en log server-side, nunca str(e) al cliente.
+    """
     try:
-        from backend.domain import Ok as _Ok
-        from backend.domain import parse_complete_uv as _parse_uv
-        from backend.gnm import compute_heatmap as _shared_heatmap
-    except ImportError:
-        from domain import Ok as _Ok  # type: ignore[no-redef]
-        from domain import parse_complete_uv as _parse_uv  # type: ignore[no-redef]
-        from gnm import compute_heatmap as _shared_heatmap  # type: ignore[no-redef]
-    ra = _parse_uv(bytes(uv_a))
-    rb = _parse_uv(bytes(uv_b))
-    assert isinstance(ra, _Ok) and isinstance(rb, _Ok)
-    return bytes(_shared_heatmap(ra.value, rb.value).as_bytes())
+        from backend.domain import Err as _ErrF
+        from backend.domain import MlFailed as _MlFailedF
+        from backend.domain import MlTransport as _MlTransportF
+        from backend.domain import NotFound as _NotFoundF
+        from backend.domain import parse_image_bytes as _parse_image
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrF  # type: ignore[no-redef]
+        from domain import MlFailed as _MlFailedF  # type: ignore[no-redef]
+        from domain import MlTransport as _MlTransportF  # type: ignore[no-redef]
+        from domain import NotFound as _NotFoundF  # type: ignore[no-redef]
+        from domain import parse_image_bytes as _parse_image  # type: ignore[no-redef]
+    key_str = key.as_str()
+    try:
+        r2 = _r2_client()
+        obj = r2.get_object(Bucket=bucket, Key=key_str)
+        data = obj["Body"].read()
+    except (OSError, ValueError) as exc:
+        logger.warning("r2 fetch io failed job=%s key=%s kind=%s", job_id, key_str, type(exc).__name__)
+        return _ErrF(_MlFailedF(detail=_MlTransportF(details="r2 fetch failed")))
+    except Exception as exc:  # noqa: BLE001, RUF100 - boto3 ClientError es Exception; estrechado a NotFound/500 sin filtrar str al cliente
+        if _is_not_found_error(exc):
+            return _ErrF(_NotFoundF(job_id=job_id))
+        logger.warning("r2 fetch infra failed job=%s key=%s kind=%s", job_id, key_str, type(exc).__name__)
+        return _ErrF(_MlFailedF(detail=_MlTransportF(details="r2 fetch failed")))
+    parsed = _parse_image(data)
+    if isinstance(parsed, _ErrF):
+        return parsed
+    return parsed
 
 
 
 
 
-def mediapipe_infer(job_id: str, image: bytes) -> bytes:
-    """Nucleo landmarks real. Falla ruidoso sin pesos/CUDA-paquetizados, nunca doble silencioso."""
+def mediapipe_infer(job_id: str, image: "ImageBytes") -> bytes:
+    """Nucleo landmarks real. Falla ruidoso sin pesos/CUDA-paquetizados, nunca doble silencioso.
+
+    Borde: imagen ya probada (ImageBytes). JobId queda en shell (str).
+    """
     t0 = time.perf_counter()
     out = _real_landmarks(image)
     dt = int((time.perf_counter() - t0) * 1000)
@@ -491,10 +536,21 @@ def mediapipe_infer(job_id: str, image: bytes) -> bytes:
     return out
 
 
-def fit_infer(job_id: str, payload: bytes) -> bytes:
-    """Nucleo fit GNM: fit-request -> 1060 bytes (253 coefs + 12 camara)."""
+def fit_infer(
+    job_id: str, image: "ImageBytes", landmarks: "Landmarks"
+) -> "Result[bytes, DomainError]":
+    """Nucleo fit GNM sobre tipos probados -> 1060 bytes (253 coefs + 12 camara).
+
+    Borde: (image, landmarks) ya probados via decode_fit_request en el
+    handler o via R2 + landmarks probados en el worker. Retorna Result,
+    nunca lanza por outcomes de dominio. JobId queda en shell (str).
+    """
+    try:
+        from backend.domain import Err as _ErrFI
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrFI  # type: ignore[no-redef]
     t0 = time.perf_counter()
-    out = _impl_fit(payload)
+    result = _impl_fit(image, landmarks)
     dt = int((time.perf_counter() - t0) * 1000)
     try:
         from backend.gnm_fit import _LAST_FIT_STATS as _fit_stats
@@ -502,34 +558,78 @@ def fit_infer(job_id: str, payload: bytes) -> bytes:
         from gnm_fit import _LAST_FIT_STATS as _fit_stats  # type: ignore[no-redef]
     iterations = int(_fit_stats.get("iterations", 0))
     loss = float(_fit_stats.get("loss", float("nan")))
+    if isinstance(result, _ErrFI):
+        logger.info("fit err job=%s duration_ms=%d iterations=%d loss=%.6g", job_id, dt, iterations, loss)
+        return result
     logger.info(
         "fit ok job=%s out_len=%d duration_ms=%d iterations=%d loss=%.6g",
         job_id,
-        len(out),
+        len(result.value),
         dt,
         iterations,
         loss,
     )
-    return out
+    return result
 
 
-def texture_infer(job_id: str, payload: bytes) -> bytes:
-    """Nucleo textura GNM: texture-request -> albedo UV_LEN."""
+def texture_infer(
+    job_id: str, image: "ImageBytes", fit: "FitResult", landmarks: "Landmarks"
+) -> "Result[bytes, DomainError]":
+    """Nucleo textura GNM sobre tipos probados -> albedo UV_LEN.
+
+    Borde: (image, fit, landmarks) ya probados via decode_texture_request
+    en el handler o via cadena probada en el worker. Retorna Result, nunca
+    lanza por outcomes de dominio. JobId queda en shell (str).
+    """
+    try:
+        from backend.domain import Err as _ErrTI
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrTI  # type: ignore[no-redef]
     t0 = time.perf_counter()
-    out = _impl_texture(payload)
+    result = _impl_texture(image, fit, landmarks)
     dt = int((time.perf_counter() - t0) * 1000)
-    logger.info("texture ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
-    return out
+    if isinstance(result, _ErrTI):
+        logger.info("texture err job=%s duration_ms=%d", job_id, dt)
+        return result
+    logger.info("texture ok job=%s out_len=%d duration_ms=%d", job_id, len(result.value), dt)
+    return result
 
 
-def fit_worker(job_id: str, r2_key: str, landmarks_json: bytes):
-    """Worker fit - GNM fitting directo (GPU, 1 input por GPU). Lee imagen de R2."""
+def fit_worker(job_id: str, r2_key: "R2Key", landmarks: "Landmarks"):
+    """Worker fit - GNM fitting directo (GPU, 1 input por GPU). Lee imagen de R2.
+
+    Borde: r2_key (R2Key) y landmarks (Landmarks) ya probados; imagen se
+    obtiene via _fetch_r2_bytes -> Result[ImageBytes] y se pasa probada a
+    fit_infer junto a landmarks. JobId queda en shell (str).
+    """
+    try:
+        from backend.domain import Err as _ErrFW
+        from backend.domain import Ok as _OkFW
+        from backend.domain import domain_to_message as _msgFW
+        from backend.domain import domain_to_status as _statusFW
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrFW  # type: ignore[no-redef]
+        from domain import Ok as _OkFW  # type: ignore[no-redef]
+        from domain import domain_to_message as _msgFW  # type: ignore[no-redef]
+        from domain import domain_to_status as _statusFW  # type: ignore[no-redef]
     t0 = time.perf_counter()
     bucket = _r2_bucket()
-    image = _fetch_r2_bytes(bucket, r2_key)
-    n = len(landmarks_json)
-    payload = n.to_bytes(4, "big") + landmarks_json + image
-    out = fit_infer(job_id, payload)
+    fetched = _fetch_r2_bytes(bucket, r2_key, job_id)
+    if isinstance(fetched, _ErrFW):
+        msg = _msgFW(fetched.error)
+        if _statusFW(fetched.error) == 400:
+            raise ValueError(msg)
+        raise RuntimeError(msg)
+    image = fetched.value
+    inferred = fit_infer(job_id, image, landmarks)
+    if isinstance(inferred, _ErrFW):
+        msg = _msgFW(inferred.error)
+        if _statusFW(inferred.error) == 400:
+            raise ValueError(msg)
+        raise RuntimeError(msg)
+    if not isinstance(inferred, _OkFW):
+        raise RuntimeError("fit infer failed")
+    out = inferred.value
     dt = int((time.perf_counter() - t0) * 1000)
     logger.info("fit_worker ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
     return out
@@ -552,13 +652,32 @@ if HAVE_MODAL:
     )(fit_worker)
 
 
-def texture_worker(job_id: str, payload: bytes):
+def texture_worker(job_id: str, image: "ImageBytes", fit: "FitResult", landmarks: "Landmarks"):
     """
     Worker textura - proyeccion + warp + inpaint solo ocluidas (GPU).
-    Entrada: texture-request. Salida: albedo UV_LEN bytes.
+    Entrada: tipos probados (ImageBytes, FitResult, Landmarks).
+    Salida: albedo UV_LEN bytes.
     Pool de 2 contenedores para paralelizar cara A/B del mismo job.
     """
-    return texture_infer(job_id, payload)
+    try:
+        from backend.domain import Err as _ErrTW
+        from backend.domain import Ok as _OkTW
+        from backend.domain import domain_to_message as _msgTW
+        from backend.domain import domain_to_status as _statusTW
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrTW  # type: ignore[no-redef]
+        from domain import Ok as _OkTW  # type: ignore[no-redef]
+        from domain import domain_to_message as _msgTW  # type: ignore[no-redef]
+        from domain import domain_to_status as _statusTW  # type: ignore[no-redef]
+    inferred = texture_infer(job_id, image, fit, landmarks)
+    if isinstance(inferred, _ErrTW):
+        msg = _msgTW(inferred.error)
+        if _statusTW(inferred.error) == 400:
+            raise ValueError(msg)
+        raise RuntimeError(msg)
+    if not isinstance(inferred, _OkTW):
+        raise RuntimeError("texture infer failed")
+    return inferred.value
 
 
 if HAVE_MODAL:
@@ -576,12 +695,29 @@ if HAVE_MODAL:
     )(texture_worker)
 
 
-def mediapipe_worker(job_id: str, r2_key: str):
-    """Worker 1 - MediaPipe 478 landmarks CPU. Lee imagen de R2, retorna JSON 478 finitos."""
+def mediapipe_worker(job_id: str, r2_key: "R2Key"):
+    """Worker 1 - MediaPipe 478 landmarks CPU. Lee imagen de R2, retorna JSON 478 finitos.
+
+    Borde: r2_key ya probado (R2Key); imagen via _fetch_r2_bytes ->
+    Result[ImageBytes]. JobId queda en shell (str).
+    """
+    try:
+        from backend.domain import Err as _ErrMW
+        from backend.domain import domain_to_message as _msgMW
+        from backend.domain import domain_to_status as _statusMW
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrMW  # type: ignore[no-redef]
+        from domain import domain_to_message as _msgMW  # type: ignore[no-redef]
+        from domain import domain_to_status as _statusMW  # type: ignore[no-redef]
     t0 = time.perf_counter()
     bucket = _r2_bucket()
-    image = _fetch_r2_bytes(bucket, r2_key)
-    out = mediapipe_infer(job_id, image)
+    fetched = _fetch_r2_bytes(bucket, r2_key, job_id)
+    if isinstance(fetched, _ErrMW):
+        msg = _msgMW(fetched.error)
+        if _statusMW(fetched.error) == 400:
+            raise ValueError(msg)
+        raise RuntimeError(msg)
+    out = mediapipe_infer(job_id, fetched.value)
     dt = int((time.perf_counter() - t0) * 1000)
     logger.info("mediapipe_worker ok job=%s out_len=%d duration_ms=%d", job_id, len(out), dt)
     return out
@@ -604,16 +740,17 @@ def _cf_pull_messages(batch_size: int = 1):
     import httpx
 
     account = _env("CLOUDFLARE_ACCOUNT_ID")
-    token = _env("CLOUDFLARE_API_TOKEN") or _env("CLOUDFLARE_API_KEY")
+    cf_token = _load_cf_token()
     queue_id = _env("CLOUDFLARE_QUEUE_ID") or _env("QUEUE_ID") or "vultus-jobs"
-    if not account or not token:
+    if not account or cf_token is None:
         logger.info("queues creds missing, skip pull")
         return []
+    token_value = cf_token.get_secret_value()
     url = f"https://api.cloudflare.com/client/v4/accounts/{account}/queues/{queue_id}/messages/pull"
     try:
         r = httpx.post(
             url,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {token_value}", "Content-Type": "application/json"},
             json={"visibility_timeout_ms": QUEUE_VISIBILITY_TIMEOUT_SECS * 1000, "batch_size": batch_size},
             timeout=10.0,
         )
@@ -626,7 +763,7 @@ def _cf_pull_messages(batch_size: int = 1):
             "queues pull status=%d body=%.200s (token_len=%d queue_id=%s)",
             r.status_code,
             r.text,
-            len(token),
+            len(token_value),
             _env("CLOUDFLARE_QUEUE_ID") or _env("QUEUE_ID") or "vultus-jobs",
         )
         return []
@@ -645,135 +782,67 @@ def _cf_ack_messages(acks: list) -> None:
     if not acks:
         return
     account = _env("CLOUDFLARE_ACCOUNT_ID")
-    token = _env("CLOUDFLARE_API_TOKEN") or _env("CLOUDFLARE_API_KEY")
+    cf_token = _load_cf_token()
     queue_id = _env("CLOUDFLARE_QUEUE_ID") or _env("QUEUE_ID") or "vultus-jobs"
-    if not account or not token:
+    if not account or cf_token is None:
         return
     url = f"https://api.cloudflare.com/client/v4/accounts/{account}/queues/{queue_id}/messages/ack"
     try:
-        httpx.post(url, headers={"Authorization": f"Bearer {token}"}, json={"acks": acks}, timeout=10.0)
+        httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {cf_token.get_secret_value()}"},
+            json={"acks": acks},
+            timeout=10.0,
+        )
     except Exception as e:
         logger.warning("queues ack failed err=%s", e)
 
 
-def _parse_queue_body(msg: dict) -> tuple:
-    """Extrae (job_id, r2_a, r2_b) del body. La cola solo lleva IDs+punteros, nunca bytes."""
-    body = msg.get("body") or msg.get("message") or {}
-    if isinstance(body, str):
-        try:
-            body = json.loads(body)
-        except Exception as e:
-            raise ValueError(f"queue body not json: {e}") from e
-    if not isinstance(body, dict):
-        raise ValueError("queue body not object")
-    job_id = str(body.get("job_id") or body.get("jobId") or "")
-    r2_keys = body.get("r2_keys") or body.get("r2Keys") or {}
-    r2_a = str(r2_keys.get("image_a") or r2_keys.get("a") or "")
-    r2_b = str(r2_keys.get("image_b") or r2_keys.get("b") or "")
-    if not job_id or not r2_a or not r2_b:
-        raise ValueError("queue body missing job_id/r2_keys")
-    if ".." in r2_a or ".." in r2_b:
-        raise ValueError("invalid r2 key")
-    return job_id, r2_a, r2_b
+def _parse_queue_body(msg: object) -> "Result[QueueJob, DomainError]":
+    """Borde cola Modal: adaptador delgado sobre el unico parse_queue_envelope.
+
+    Solo canonico job_id + r2_keys.image_a/image_b; legacy a/b es Err
+    desde Wave 5. Nunca lanza por payload invalido: retorna Result.
+    """
+    try:
+        from backend.domain import parse_queue_envelope as _parse_envelope
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import (  # type: ignore[no-redef]
+            parse_queue_envelope as _parse_envelope,
+        )
+    return _parse_envelope(msg)
 
 
-def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
-    """Orquestador produccion: fetch R2, cadenas A/B en paralelo, join, zip a R2, progreso vivo."""
+def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
+    """Orquestador produccion: fetch R2, cadenas A/B en paralelo, join, zip a R2, progreso vivo.
+
+    Borde: r2_a/r2_b ya probados (R2Key); imagenes via _fetch_r2_bytes ->
+    Result[ImageBytes]; landmarks via parse_landmarks; fit via parse_fit_result;
+    uv via parse_complete_uv + compute_heatmap (dueno unico en dominio/gnm).
+    JobId queda en shell (str).
+    """
     import concurrent.futures
 
-    t0 = time.perf_counter()
-    bucket = _r2_bucket()
-    logger.info("job start job=%s a=%s b=%s", job_id, r2_a, r2_b)
-    if not _job_alive(job_id):
-        logger.info("job ya terminal antes de empezar job=%s, se omite", job_id)
-        return
-    _report_progress(job_id, PROGRESS_FIT, "fit")
-    r2 = _r2_client()
-    img_a = r2.get_object(Bucket=bucket, Key=r2_a)["Body"].read()
-    img_b = r2.get_object(Bucket=bucket, Key=r2_b)["Body"].read()
-    if not img_a or not img_b:
-        raise ValueError("empty image from r2")
-
-    def _is_modal_function(fn) -> bool:
-        return HAVE_MODAL and hasattr(fn, "remote")
-
-    # Landmarks A/B en paralelo. En Modal via workers remotos (CPU pool x4);
-    # en local/Docker via inferencia directa (mismo nucleo real).
-    if _is_modal_function(mediapipe_worker):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(mediapipe_worker.remote, job_id, r2_a)
-            fut_b = ex.submit(mediapipe_worker.remote, job_id, r2_b)
-            lm_a = fut_a.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
-            lm_b = fut_b.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(mediapipe_infer, job_id, img_a)
-            fut_b = ex.submit(mediapipe_infer, job_id, img_b)
-            lm_a = fut_a.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
-            lm_b = fut_b.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
-    _check_landmarks_json(lm_a)
-    _check_landmarks_json(lm_b)
-    if not _job_alive(job_id):
-        raise _ExpiredAbort(f"job expiro durante landmarks job={job_id}")
-    _report_progress(job_id, PROGRESS_FIT, "fit")
-
-    def _fit_payload(image: bytes, landmarks_json: bytes) -> bytes:
-        n = len(landmarks_json)
-        return n.to_bytes(4, "big") + landmarks_json + image
-
-    if _is_modal_function(fit_worker):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(fit_worker.remote, job_id, r2_a, lm_a)
-            fut_b = ex.submit(fit_worker.remote, job_id, r2_b, lm_b)
-            fit_a = fut_a.result(timeout=FIT_TIMEOUT_SECS + 50)
-            fit_b = fut_b.result(timeout=FIT_TIMEOUT_SECS + 50)
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(fit_infer, job_id, _fit_payload(img_a, lm_a))
-            fut_b = ex.submit(fit_infer, job_id, _fit_payload(img_b, lm_b))
-            fit_a = fut_a.result(timeout=FIT_TIMEOUT_SECS + 50)
-            fit_b = fut_b.result(timeout=FIT_TIMEOUT_SECS + 50)
     try:
-        from backend.pipeline_local import FIT_RESULT_LEN
-    except ImportError:
-        FIT_RESULT_LEN = 1060
-    if len(fit_a) != FIT_RESULT_LEN or len(fit_b) != FIT_RESULT_LEN:
-        raise ValueError("fit result bad length")
-    if not _job_alive(job_id):
-        raise _ExpiredAbort(f"job expiro durante fit job={job_id}")
-    _report_progress(job_id, PROGRESS_TEXTURE, "texture")
-
-    pay_a = _fit_payload(img_a, lm_a)
-    pay_b = _fit_payload(img_b, lm_b)
-    tex_a = len(pay_a).to_bytes(4, "big") + pay_a + bytes(fit_a)
-    tex_b = len(pay_b).to_bytes(4, "big") + pay_b + bytes(fit_b)
-    if _is_modal_function(texture_worker):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(texture_worker.remote, job_id, tex_a)
-            fut_b = ex.submit(texture_worker.remote, job_id, tex_b)
-            uv_a = fut_a.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
-            uv_b = fut_b.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(texture_infer, job_id, tex_a)
-            fut_b = ex.submit(texture_infer, job_id, tex_b)
-            uv_a = fut_a.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
-            uv_b = fut_b.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
-    if len(uv_a) != UV_LEN or len(uv_b) != UV_LEN:
-        raise ValueError("albedo bad length")
-    _report_progress(job_id, PROGRESS_ASSEMBLE, "assemble")
-
-    t_assemble = time.perf_counter()
-    try:
-        from backend.domain import Ok as _OkA
-        from backend.domain import parse_complete_uv as _parse_uv_a
+        from backend.domain import Err as _ErrR
+        from backend.domain import Ok as _OkR
+        from backend.domain import domain_to_message as _msgR
+        from backend.domain import domain_to_status as _statusR
+        from backend.domain import parse_complete_uv as _parse_uvR
+        from backend.domain import parse_landmarks as _parse_lmR
+        from backend.gnm import compute_heatmap as _heatmapR
         from backend.gnm_assemble import build_full_zip as _full_zip
         from backend.gnm_assemble import build_personalized_glb as _glb
         from backend.gnm_assemble import pbr_from_albedo as _pbr
         from backend.pipeline_local import parse_fit_result as _parse_fit
-    except ImportError:
-        from domain import Ok as _OkA  # type: ignore[no-redef]
-        from domain import parse_complete_uv as _parse_uv_a  # type: ignore[no-redef]
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrR  # type: ignore[no-redef]
+        from domain import Ok as _OkR  # type: ignore[no-redef]
+        from domain import domain_to_message as _msgR  # type: ignore[no-redef]
+        from domain import domain_to_status as _statusR  # type: ignore[no-redef]
+        from domain import parse_complete_uv as _parse_uvR  # type: ignore[no-redef]
+        from domain import parse_landmarks as _parse_lmR  # type: ignore[no-redef]
+        from gnm import compute_heatmap as _heatmapR  # type: ignore[no-redef]
         from gnm_assemble import build_full_zip as _full_zip  # type: ignore[no-redef]
         from gnm_assemble import (
             build_personalized_glb as _glb,  # type: ignore[no-redef]
@@ -782,25 +851,137 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
         from pipeline_local import (
             parse_fit_result as _parse_fit,  # type: ignore[no-redef]
         )
-    ra_fit = _parse_fit(bytes(fit_a))
-    rb_fit = _parse_fit(bytes(fit_b))
-    ra_uv = _parse_uv_a(bytes(uv_a))
-    rb_uv = _parse_uv_a(bytes(uv_b))
-    if not isinstance(ra_fit, _OkA) or not isinstance(rb_fit, _OkA):
-        raise RuntimeError(f"assemble parse fit failed: a={ra_fit} b={rb_fit}")
-    if not isinstance(ra_uv, _OkA) or not isinstance(rb_uv, _OkA):
-        raise RuntimeError("assemble parse uv failed")
-    heat = _heatmap_abs_diff(bytes(uv_a), bytes(uv_b))
+
+    def _raise_for_domain(err_obj: object, context: str) -> None:
+        msg = _msgR(err_obj)  # type: ignore[arg-type]
+        if _statusR(err_obj) == 400:  # type: ignore[arg-type]
+            raise ValueError(f"{context}: {msg}")
+        raise RuntimeError(f"{context}: {msg}")
+
+    t0 = time.perf_counter()
+    bucket = _r2_bucket()
+    logger.info("job start job=%s a=%s b=%s", job_id, r2_a.as_str(), r2_b.as_str())
+    if not _job_alive(job_id):
+        logger.info("job ya terminal antes de empezar job=%s, se omite", job_id)
+        return
+    _report_progress(job_id, PROGRESS_FIT, "fit")
+    fetched_a = _fetch_r2_bytes(bucket, r2_a, job_id)
+    if isinstance(fetched_a, _ErrR):
+        _raise_for_domain(fetched_a.error, "r2 fetch a failed")
+    fetched_b = _fetch_r2_bytes(bucket, r2_b, job_id)
+    if isinstance(fetched_b, _ErrR):
+        _raise_for_domain(fetched_b.error, "r2 fetch b failed")
+    if not isinstance(fetched_a, _OkR) or not isinstance(fetched_b, _OkR):
+        raise RuntimeError("r2 fetch failed")
+    img_a = fetched_a.value
+    img_b = fetched_b.value
+
+    def _is_modal_function(fn) -> bool:
+        return HAVE_MODAL and hasattr(fn, "remote")
+
+    # Landmarks A/B en paralelo. En Modal via workers remotos (CPU pool x4);
+    # en local/Docker via inferencia directa (mismo nucleo real con ImageBytes).
+    if _is_modal_function(mediapipe_worker):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(mediapipe_worker.remote, job_id, r2_a)
+            fut_b = ex.submit(mediapipe_worker.remote, job_id, r2_b)
+            lm_raw_a = fut_a.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
+            lm_raw_b = fut_b.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(mediapipe_infer, job_id, img_a)
+            fut_b = ex.submit(mediapipe_infer, job_id, img_b)
+            lm_raw_a = fut_a.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
+            lm_raw_b = fut_b.result(timeout=LANDMARKS_TIMEOUT_SECS + 25)
+    parsed_lm_a = _parse_lmR(lm_raw_a)
+    if isinstance(parsed_lm_a, _ErrR):
+        _raise_for_domain(parsed_lm_a.error, "landmarks a invalid")
+    parsed_lm_b = _parse_lmR(lm_raw_b)
+    if isinstance(parsed_lm_b, _ErrR):
+        _raise_for_domain(parsed_lm_b.error, "landmarks b invalid")
+    if not isinstance(parsed_lm_a, _OkR) or not isinstance(parsed_lm_b, _OkR):
+        raise RuntimeError("landmarks parse failed")
+    lm_a = parsed_lm_a.value
+    lm_b = parsed_lm_b.value
+    if not _job_alive(job_id):
+        raise _ExpiredAbort(f"job expiro durante landmarks job={job_id}")
+    _report_progress(job_id, PROGRESS_FIT, "fit")
+
+    if _is_modal_function(fit_worker):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(fit_worker.remote, job_id, r2_a, lm_a)
+            fut_b = ex.submit(fit_worker.remote, job_id, r2_b, lm_b)
+            fit_raw_a = fut_a.result(timeout=FIT_TIMEOUT_SECS + 50)
+            fit_raw_b = fut_b.result(timeout=FIT_TIMEOUT_SECS + 50)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(fit_infer, job_id, img_a, lm_a)
+            fut_b = ex.submit(fit_infer, job_id, img_b, lm_b)
+            res_a = fut_a.result(timeout=FIT_TIMEOUT_SECS + 50)
+            res_b = fut_b.result(timeout=FIT_TIMEOUT_SECS + 50)
+        if isinstance(res_a, _ErrR):
+            _raise_for_domain(res_a.error, "fit a failed")
+        if isinstance(res_b, _ErrR):
+            _raise_for_domain(res_b.error, "fit b failed")
+        if not isinstance(res_a, _OkR) or not isinstance(res_b, _OkR):
+            raise RuntimeError("fit infer failed")
+        fit_raw_a = res_a.value
+        fit_raw_b = res_b.value
+    ra_fit = _parse_fit(bytes(fit_raw_a))
+    rb_fit = _parse_fit(bytes(fit_raw_b))
+    if isinstance(ra_fit, _ErrR) or isinstance(rb_fit, _ErrR):
+        raise ValueError("fit result bad length")
+    if not isinstance(ra_fit, _OkR) or not isinstance(rb_fit, _OkR):
+        raise RuntimeError("fit parse failed")
+    if not _job_alive(job_id):
+        raise _ExpiredAbort(f"job expiro durante fit job={job_id}")
+    _report_progress(job_id, PROGRESS_TEXTURE, "texture")
+
+    if _is_modal_function(texture_worker):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(texture_worker.remote, job_id, img_a, ra_fit.value, lm_a)
+            fut_b = ex.submit(texture_worker.remote, job_id, img_b, rb_fit.value, lm_b)
+            uv_raw_a = fut_a.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
+            uv_raw_b = fut_b.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut_a = ex.submit(texture_infer, job_id, img_a, ra_fit.value, lm_a)
+            fut_b = ex.submit(texture_infer, job_id, img_b, rb_fit.value, lm_b)
+            tex_res_a = fut_a.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
+            tex_res_b = fut_b.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
+        if isinstance(tex_res_a, _ErrR):
+            _raise_for_domain(tex_res_a.error, "texture a failed")
+        if isinstance(tex_res_b, _ErrR):
+            _raise_for_domain(tex_res_b.error, "texture b failed")
+        if not isinstance(tex_res_a, _OkR) or not isinstance(tex_res_b, _OkR):
+            raise RuntimeError("texture infer failed")
+        uv_raw_a = tex_res_a.value
+        uv_raw_b = tex_res_b.value
+    ra_uv = _parse_uvR(bytes(uv_raw_a))
+    rb_uv = _parse_uvR(bytes(uv_raw_b))
+    if isinstance(ra_uv, _ErrR) or isinstance(rb_uv, _ErrR):
+        raise ValueError("albedo bad length")
+    if not isinstance(ra_uv, _OkR) or not isinstance(rb_uv, _OkR):
+        raise RuntimeError("albedo parse failed")
+    _report_progress(job_id, PROGRESS_ASSEMBLE, "assemble")
+
+    t_assemble = time.perf_counter()
     r_mesh_a = _glb(ra_fit.value, ra_uv.value)
     r_mesh_b = _glb(rb_fit.value, rb_uv.value)
     r_pbr_a = _pbr(ra_uv.value)
     r_pbr_b = _pbr(rb_uv.value)
-    if not isinstance(r_mesh_a, _OkA) or not isinstance(r_mesh_b, _OkA):
-        raise RuntimeError(f"assemble glb failed: a={r_mesh_a} b={r_mesh_b}")
-    if not isinstance(r_pbr_a, _OkA) or not isinstance(r_pbr_b, _OkA):
-        raise RuntimeError(f"assemble pbr failed: a={r_pbr_a} b={r_pbr_b}")
-    mesh_a = bytes(r_mesh_a.value.as_bytes())
-    mesh_b = bytes(r_mesh_b.value.as_bytes())
+    if isinstance(r_mesh_a, _ErrR) or isinstance(r_mesh_b, _ErrR):
+        raise RuntimeError("assemble glb failed")
+    if isinstance(r_pbr_a, _ErrR) or isinstance(r_pbr_b, _ErrR):
+        raise RuntimeError("assemble pbr failed")
+    if not isinstance(r_mesh_a, _OkR) or not isinstance(r_mesh_b, _OkR):
+        raise RuntimeError("assemble glb failed")
+    if not isinstance(r_pbr_a, _OkR) or not isinstance(r_pbr_b, _OkR):
+        raise RuntimeError("assemble pbr failed")
+    mesh_a = r_mesh_a.value.as_bytes()
+    mesh_b = r_mesh_b.value.as_bytes()
+    heat_obj = _heatmapR(ra_uv.value, rb_uv.value)
+    heat = heat_obj.as_bytes()
     assemble_ms = int((time.perf_counter() - t_assemble) * 1000)
     try:
         import numpy as _np
@@ -810,8 +991,8 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
             gray = (arr == 128).all(axis=1).mean()
             return float(1.0 - gray)
 
-        ev_a = _evidence_pct(bytes(uv_a))
-        ev_b = _evidence_pct(bytes(uv_b))
+        ev_a = _evidence_pct(ra_uv.value.as_bytes())
+        ev_b = _evidence_pct(rb_uv.value.as_bytes())
     except Exception:  # el log nunca tumba el job
         ev_a = float("nan")
         ev_b = float("nan")
@@ -841,15 +1022,17 @@ def _run_job_from_r2(job_id: str, r2_a: str, r2_b: str) -> None:
         return buf.getvalue()
 
     zip_bytes = _full_zip(
-        _to_png(uv_a),
-        _to_png(uv_b),
+        _to_png(ra_uv.value.as_bytes()),
+        _to_png(rb_uv.value.as_bytes()),
         _to_png(heat),
         mesh_a,
         mesh_b,
         _to_png(r_pbr_a.value),
         _to_png(r_pbr_b.value),
     )
-    r2.put_object(Bucket=bucket, Key=f"jobs/{job_id}/result.zip", Body=zip_bytes, ContentType="application/zip")
+    _r2_client().put_object(
+        Bucket=bucket, Key=f"jobs/{job_id}/result.zip", Body=zip_bytes, ContentType="application/zip"
+    )
     _report_progress(job_id, PROGRESS_DONE, "done")
     dt = int((time.perf_counter() - t0) * 1000)
     logger.info("job done job=%s zip_len=%d duration_ms=%d", job_id, len(zip_bytes), dt)
@@ -874,12 +1057,21 @@ def queue_pull_consumer():
         msg_id = str(msg.get("id") or msg.get("message_id") or "")
         lease = msg.get("lease_id") or msg.get("leaseId")
         try:
-            job_id, r2_a, r2_b = _parse_queue_body(msg)
-        except Exception as e:
-            logger.warning("bad queue message skipped err=%s", e)
+            from backend.domain import Err as _ErrC
+            from backend.domain import domain_to_message as _msgC
+        except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+            from domain import Err as _ErrC  # type: ignore[no-redef]
+            from domain import domain_to_message as _msgC  # type: ignore[no-redef]
+        parsed = _parse_queue_body(msg)
+        if isinstance(parsed, _ErrC):
+            logger.warning("bad queue message skipped err=%s", _msgC(parsed.error))
             if msg_id:
                 _cf_ack_messages([{"id": msg_id, **({"lease_id": lease} if lease else {})}])
             continue
+        job = parsed.value
+        job_id = job.job_id.as_str()
+        r2_a = job.r2_a
+        r2_b = job.r2_b
         try:
             # Deadline total = TTL: la primera llamada paga cold+carga, el resto warm.
             deadline = TOTAL_TIMEOUT_SECS
@@ -938,36 +1130,109 @@ try:
     sidecar = FastAPI(title="vultus-ml-sidecar")
 
     async def _run_impl(job_id: str, label: str, fn, *args):
+        try:
+            from backend.domain import Err as _ErrRun
+            from backend.domain import Ok as _OkRun
+            from backend.domain import domain_to_message as _msgRun
+            from backend.domain import domain_to_status as _statusRun
+        except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+            from domain import Err as _ErrRun  # type: ignore[no-redef]
+            from domain import Ok as _OkRun  # type: ignore[no-redef]
+            from domain import domain_to_message as _msgRun  # type: ignore[no-redef]
+            from domain import domain_to_status as _statusRun  # type: ignore[no-redef]
         t0 = time.perf_counter()
         try:
             out = await asyncio.to_thread(fn, *args)
         except ValueError as e:
+            # Solo ruta landmarks legacy: causa en logs, detalle generico al cliente.
             logger.info("%s 400 job=%s detail=%s", label, job_id, e)
-            return JSONResponse(status_code=400, content={"detail": str(e)})
-        except Exception as e:
+            return JSONResponse(status_code=400, content={"detail": "invalid request"})
+        except Exception:
             logger.exception("%s failed job=%s", label, job_id)
-            return JSONResponse(status_code=500, content={"detail": str(e)})
+            return JSONResponse(status_code=500, content={"detail": "internal error"})
+        if isinstance(out, _ErrRun):
+            status = _statusRun(out.error)
+            detail = _msgRun(out.error)
+            if status == 400:
+                logger.info("%s 400 job=%s detail=%s", label, job_id, detail)
+            else:
+                logger.warning("%s err job=%s status=%d detail=%s", label, job_id, status, detail)
+            return JSONResponse(status_code=status, content={"detail": detail})
+        raw = out.value if isinstance(out, _OkRun) else out
         dt = int((time.perf_counter() - t0) * 1000)
-        logger.info("%s ok job=%s out_len=%d duration_ms=%d", label, job_id, len(out), dt)
-        return Response(content=out, media_type="application/octet-stream")
+        logger.info("%s ok job=%s out_len=%d duration_ms=%d", label, job_id, len(raw), dt)
+        return Response(content=raw, media_type="application/octet-stream")
 
     @sidecar.post("/ml/landmarks")
     async def http_landmarks(request: Request):
+        try:
+            from backend.domain import Err as _ErrH
+            from backend.domain import domain_to_message as _msgH
+            from backend.domain import domain_to_status as _statusH
+            from backend.domain import parse_image_bytes as _parse_imageH
+        except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+            from domain import Err as _ErrH  # type: ignore[no-redef]
+            from domain import domain_to_message as _msgH  # type: ignore[no-redef]
+            from domain import domain_to_status as _statusH  # type: ignore[no-redef]
+            from domain import (
+                parse_image_bytes as _parse_imageH,  # type: ignore[no-redef]
+            )
         body = await request.body()
         job_id = request.headers.get("X-Job-Id", "unknown")
-        return await _run_impl(job_id, "landmarks", _impl_landmarks, body)
+        parsed = _parse_imageH(body)
+        if isinstance(parsed, _ErrH):
+            return JSONResponse(
+                status_code=_statusH(parsed.error), content={"detail": _msgH(parsed.error)}
+            )
+        return await _run_impl(job_id, "landmarks", _impl_landmarks, parsed.value)
 
     @sidecar.post("/ml/fit")
     async def http_fit(request: Request):
+        try:
+            from backend.domain import Err as _ErrFit
+            from backend.domain import decode_fit_request as _decode_fit
+            from backend.domain import domain_to_message as _msgFit
+            from backend.domain import domain_to_status as _statusFit
+        except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+            from domain import Err as _ErrFit  # type: ignore[no-redef]
+            from domain import (
+                decode_fit_request as _decode_fit,  # type: ignore[no-redef]
+            )
+            from domain import domain_to_message as _msgFit  # type: ignore[no-redef]
+            from domain import domain_to_status as _statusFit  # type: ignore[no-redef]
         payload = await request.body()
         job_id = request.headers.get("X-Job-Id", "unknown")
-        return await _run_impl(job_id, "fit", _impl_fit, payload)
+        decoded = _decode_fit(payload)
+        if isinstance(decoded, _ErrFit):
+            return JSONResponse(
+                status_code=_statusFit(decoded.error), content={"detail": _msgFit(decoded.error)}
+            )
+        landmarks, image = decoded.value
+        return await _run_impl(job_id, "fit", _impl_fit, image, landmarks)
 
     @sidecar.post("/ml/texture")
     async def http_texture(request: Request):
+        try:
+            from backend.domain import Err as _ErrTex
+            from backend.domain import domain_to_message as _msgTex
+            from backend.domain import domain_to_status as _statusTex
+            from backend.pipeline_local import decode_texture_request as _decode_tex
+        except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+            from domain import Err as _ErrTex  # type: ignore[no-redef]
+            from domain import domain_to_message as _msgTex  # type: ignore[no-redef]
+            from domain import domain_to_status as _statusTex  # type: ignore[no-redef]
+            from pipeline_local import (  # type: ignore[no-redef]
+                decode_texture_request as _decode_tex,
+            )
         payload = await request.body()
         job_id = request.headers.get("X-Job-Id", "unknown")
-        return await _run_impl(job_id, "texture", _impl_texture, payload)
+        decoded = _decode_tex(payload)
+        if isinstance(decoded, _ErrTex):
+            return JSONResponse(
+                status_code=_statusTex(decoded.error), content={"detail": _msgTex(decoded.error)}
+            )
+        image, fit, landmarks = decoded.value
+        return await _run_impl(job_id, "texture", _impl_texture, image, fit, landmarks)
 
 except ImportError:  # Entorno sin fastapi: solo dobles vía _impl_* (tests unitarios)
     sidecar = None  # type: ignore

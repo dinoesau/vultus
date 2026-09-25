@@ -5,8 +5,9 @@ Matriz:
 - VULTUS_REAL_ML=1 sin npz -> fit retorna Err / falla ruidosa 500, nunca doble.
 - con npz real -> fit real pasa (iterations==3 en stats y en el log).
 - `_weights_present` exige task MediaPipe Y npz GNM (sin npz no hay auto-real).
-- `_impl_fit` / `_impl_texture` propagan Err como RuntimeError (500);
-  errores de decode van como ValueError (400).
+- `_impl_fit` / `_impl_texture` retornan Result sobre tipos probados
+  (ImageBytes, Landmarks) / (ImageBytes, FitResult, Landmarks), nunca lanzan
+  por outcomes de dominio; los handlers mapean via domain_to_status/message.
 """
 
 from __future__ import annotations
@@ -22,9 +23,16 @@ from backend.domain import (
     EmptyPayload,
     Err,
     FitFailed,
+    FitResult,
     MlDecode,
     MlFailed,
     Ok,
+    domain_to_message,
+    domain_to_status,
+    parse_camera_params,
+    parse_gnm_coeffs,
+    parse_image_bytes,
+    parse_landmarks,
 )
 from backend.pipeline_local import FIT_RESULT_LEN
 
@@ -47,6 +55,26 @@ def _landmarks_json() -> bytes:
 def _fit_payload() -> bytes:
     landmarks = _landmarks_json()
     return len(landmarks).to_bytes(4, "big") + landmarks + _stub_image()
+
+
+def _proven_image():  # type: ignore[no-untyped-def]
+    parsed = parse_image_bytes(_stub_image())
+    assert isinstance(parsed, Ok)
+    return parsed.value
+
+
+def _proven_landmarks():  # type: ignore[no-untyped-def]
+    parsed = parse_landmarks(_landmarks_json())
+    assert isinstance(parsed, Ok)
+    return parsed.value
+
+
+def _proven_fit_result() -> FitResult:
+    coeffs = parse_gnm_coeffs([0.0] * 253)
+    camera = parse_camera_params([0.0] * 12)
+    assert isinstance(coeffs, Ok)
+    assert isinstance(camera, Ok)
+    return FitResult(coeffs=coeffs.value, camera=camera.value)
 
 
 @pytest.fixture
@@ -112,26 +140,38 @@ def test_use_real_modes(_no_gnm_weights, monkeypatch):
 
 
 def test_impl_fit_local_double_passes(_no_gnm_weights):
-    out = modal_app._impl_fit(_fit_payload())
-    assert len(out) == FIT_RESULT_LEN
-    assert modal_app._impl_fit(_fit_payload()) == out
+    image = _proven_image()
+    landmarks = _proven_landmarks()
+    first = modal_app._impl_fit(image, landmarks)
+    assert isinstance(first, Ok)
+    assert len(first.value) == FIT_RESULT_LEN
+    second = modal_app._impl_fit(image, landmarks)
+    assert isinstance(second, Ok)
+    assert second.value == first.value
 
 
 def test_impl_fit_real_required_without_weights_fails_loudly(_no_gnm_weights, monkeypatch):
     monkeypatch.setattr(modal_app, "REAL_MODE", "1")
     monkeypatch.setenv("VULTUS_REAL_ML", "1")
     assert gnm_fit._real_fit_available() is False
-    result = gnm_fit.fit_gnm_from_request(_fit_payload())
+    image = _proven_image()
+    landmarks = _proven_landmarks()
+    seam = gnm_fit.fit_gnm(image, landmarks)
+    assert isinstance(seam, Err)
+    assert domain_to_status(seam.error) == 500
+    result = modal_app._impl_fit(image, landmarks)
     assert isinstance(result, Err)
-    with pytest.raises(RuntimeError, match="weights missing"):
-        modal_app._impl_fit(_fit_payload())
+    assert domain_to_status(result.error) == 500
+    assert domain_to_message(result.error) == "internal error"
 
 
 def test_impl_fit_guard_blocks_silent_double(monkeypatch, tmp_path):
     """Aunque el seam devolviera Ok, con real exigido y sin pesos debe tronar."""
     if not gnm_fit._real_fit_available():
         pytest.skip("se necesita un FitResult real para simular el doble silencioso")
-    ok_result = gnm_fit.fit_gnm_from_request(_fit_payload())
+    image = _proven_image()
+    landmarks = _proven_landmarks()
+    ok_result = gnm_fit.fit_gnm(image, landmarks)
     assert isinstance(ok_result, Ok)
     missing = str(tmp_path / "missing.npz")
     monkeypatch.setattr(gnm_head, "_candidate_npz_paths", lambda: [missing])
@@ -142,9 +182,11 @@ def test_impl_fit_guard_blocks_silent_double(monkeypatch, tmp_path):
     try:
         assert gnm_fit._real_fit_available() is False
         monkeypatch.setattr(modal_app, "REAL_MODE", "1")
-        monkeypatch.setattr(gnm_fit, "fit_gnm_from_request", lambda _p: ok_result)
-        with pytest.raises(RuntimeError, match="weights missing"):
-            modal_app._impl_fit(_fit_payload())
+        monkeypatch.setattr(gnm_fit, "fit_gnm", lambda _i, _l: ok_result)
+        result = modal_app._impl_fit(image, landmarks)
+        assert isinstance(result, Err)
+        assert domain_to_status(result.error) == 500
+        assert domain_to_message(result.error) == "internal error"
     finally:
         gnm_head._HEAD_CACHE = None
         gnm_fit._LM_X0 = None
@@ -153,36 +195,44 @@ def test_impl_fit_guard_blocks_silent_double(monkeypatch, tmp_path):
 
 def test_impl_fit_err_mapping(monkeypatch):
     monkeypatch.setattr(modal_app, "REAL_MODE", "0")
+    image = _proven_image()
+    landmarks = _proven_landmarks()
     monkeypatch.setattr(
         gnm_fit,
-        "fit_gnm_from_request",
-        lambda _p: Err(FitFailed(detail=MlDecode(details="boom"))),
+        "fit_gnm",
+        lambda _i, _l: Err(FitFailed(detail=MlDecode(details="boom"))),
     )
-    with pytest.raises(RuntimeError, match="internal error"):
-        modal_app._impl_fit(_fit_payload())
+    result = modal_app._impl_fit(image, landmarks)
+    assert isinstance(result, Err)
+    assert domain_to_status(result.error) == 500
+    assert domain_to_message(result.error) == "internal error"
+    assert "boom" not in domain_to_message(result.error)
     monkeypatch.setattr(
-        gnm_fit, "fit_gnm_from_request", lambda _p: Err(EmptyPayload())
+        gnm_fit, "fit_gnm", lambda _i, _l: Err(EmptyPayload())
     )
-    with pytest.raises(ValueError):
-        modal_app._impl_fit(_fit_payload())
+    empty = modal_app._impl_fit(image, landmarks)
+    assert isinstance(empty, Err)
+    assert domain_to_status(empty.error) == 400
+    assert domain_to_message(empty.error) == domain_to_message(empty.error)
 
 
 def test_impl_texture_mapping(monkeypatch):
     from backend import gnm_texture
 
     monkeypatch.setattr(modal_app, "REAL_MODE", "0")
-    with pytest.raises(ValueError):
-        modal_app._impl_texture(b"")
+    image = _proven_image()
+    landmarks = _proven_landmarks()
+    fit = _proven_fit_result()
     monkeypatch.setattr(
         gnm_texture,
         "build_albedo",
         lambda _i, _f, _l: Err(MlFailed(detail=MlDecode(details="tex boom"))),
     )
-    fit_out = modal_app._impl_fit(_fit_payload())
-    pay = _fit_payload()
-    tex_req = len(pay).to_bytes(4, "big") + pay + fit_out
-    with pytest.raises(RuntimeError, match="internal error"):
-        modal_app._impl_texture(tex_req)
+    result = modal_app._impl_texture(image, fit, landmarks)
+    assert isinstance(result, Err)
+    assert domain_to_status(result.error) == 500
+    assert domain_to_message(result.error) == "internal error"
+    assert "tex boom" not in domain_to_message(result.error)
 
 
 def test_impl_texture_happy_path_uses_photo():
@@ -190,19 +240,22 @@ def test_impl_texture_happy_path_uses_photo():
         pytest.skip("sin pesos GNM: el happy path de textura corre con fit real local")
     from backend.modal_app import UV_LEN
 
-    fit_out = modal_app._impl_fit(_fit_payload())
-    pay = _fit_payload()
-    tex_req = len(pay).to_bytes(4, "big") + pay + fit_out
-    out = modal_app._impl_texture(tex_req)
-    assert len(out) == UV_LEN
+    image = _proven_image()
+    landmarks = _proven_landmarks()
+    fitted = gnm_fit.fit_gnm(image, landmarks)
+    assert isinstance(fitted, Ok)
+    out = modal_app._impl_texture(image, fitted.value, landmarks)
+    assert isinstance(out, Ok)
+    assert len(out.value) == UV_LEN
 
 
 def test_fit_infer_logs_iterations_and_loss(caplog):
     if not gnm_fit._real_fit_available():
         pytest.skip("sin pesos GNM: no hay stats reales que loguear")
     caplog.set_level(logging.INFO, logger="vultus-ml-sidecar")
-    out = modal_app.fit_infer("job-s7", _fit_payload())
-    assert len(out) == FIT_RESULT_LEN
+    out = modal_app.fit_infer("job-s7", _proven_image(), _proven_landmarks())
+    assert isinstance(out, Ok)
+    assert len(out.value) == FIT_RESULT_LEN
     assert gnm_fit._LAST_FIT_STATS["iterations"] == 3.0
     line = next(r.getMessage() for r in caplog.records if "fit ok job=job-s7" in r.getMessage())
     assert "iterations=3" in line

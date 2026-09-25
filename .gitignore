@@ -8,6 +8,7 @@ uv.lock
 *.egg-info/
 .mypy_cache/
 .ruff_cache/
+.vite/
 .pytest_cache/
 .coverage
 htmlcov/
@@ -50,3 +51,6 @@ models/*.ckpt
 
 # Wrangler local state
 .wrangler/
+
+# Vitest 
+.vite/vitest/results.json

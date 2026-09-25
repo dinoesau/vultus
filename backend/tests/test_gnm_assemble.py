@@ -8,10 +8,13 @@ import zipfile
 
 from backend.domain import (
     UV_LEN,
+    ZIP_FULL,
     Ok,
+    ZipBundle,
     parse_gnm_mesh,
     parse_image_bytes,
     parse_landmarks,
+    parse_uv_region,
 )
 from backend.gnm_assemble import (
     ISLAND_COUNT,
@@ -20,7 +23,7 @@ from backend.gnm_assemble import (
     assemble_islands,
     build_full_zip,
     build_personalized_glb,
-    island_bounds,
+    island_bounds_of,
     pbr_from_albedo,
 )
 from backend.gnm_fit import fit_gnm
@@ -78,7 +81,9 @@ def test_five_islands_cover_full_uv_without_overlap() -> None:
     assert total == UV_LEN
     prev_end = 0
     for island in range(1, 6):
-        start, end = island_bounds(island)
+        region = parse_uv_region(island)
+        assert isinstance(region, Ok)
+        start, end = island_bounds_of(region.value)
         assert end > start
         assert start == prev_end
         prev_end = end
@@ -228,24 +233,38 @@ def test_full_zip_lists_island_and_pbr_names() -> None:
     pb = pbr_from_albedo(albedo_b)
     assert isinstance(ma, Ok) and isinstance(mb, Ok)
     assert isinstance(pa, Ok) and isinstance(pb, Ok)
-    blob = build_full_zip(
-        uv_to_png(albedo_a.as_bytes()),
-        uv_to_png(albedo_b.as_bytes()),
-        uv_to_png(heat.as_bytes()),
-        ma.value.as_bytes(),
-        mb.value.as_bytes(),
-        uv_to_png(pa.value),
-        uv_to_png(pb.value),
+    bundle = ZipBundle(
+        uv_a_png=uv_to_png(albedo_a),
+        uv_b_png=uv_to_png(albedo_b),
+        heatmap_png=uv_to_png(heat),
+        mesh_a_glb=ma.value.as_bytes(),
+        mesh_b_glb=mb.value.as_bytes(),
+        pbr_a=uv_to_png(pa.value),
+        pbr_b=uv_to_png(pb.value),
     )
+    blob = build_full_zip(bundle)
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
-        names = sorted(z.namelist())
+        names = z.namelist()
     assert len(names) == 7
-    assert names == [
-        "heatmap.png",
-        "mesh_a.glb",
-        "mesh_b.glb",
-        "pbr_a.png",
-        "pbr_b.png",
-        "uv_a.png",
-        "uv_b.png",
-    ]
+    assert names == list(ZIP_FULL)
+
+
+def test_personalized_glb_embeds_atlas_png_1024_roundtrip() -> None:
+    import io as _io
+
+    from PIL import Image as _Image
+
+    fit, albedo = _fit_and_albedo(0xA1)
+    # Atlas 32x32 = 1024 pixeles del bake 1024, borde pre-parsa via parse_image_bytes.
+    img = _Image.new("RGB", (32, 32), (0xA1, 0xB2, 0xC3))
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    parsed = parse_image_bytes(buf.getvalue())
+    assert isinstance(parsed, Ok)
+    atlas_png = parsed.value
+    out = build_personalized_glb(fit, albedo, atlas_png=atlas_png)
+    assert isinstance(out, Ok)
+    data = out.value.as_bytes()
+    assert data[0:4] == b"glTF"
+    # Round-trip: el PNG del atlas viaja intacto dentro del BIN del GLB (1024).
+    assert atlas_png.as_bytes() in data

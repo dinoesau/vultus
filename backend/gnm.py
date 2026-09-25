@@ -16,16 +16,12 @@ import zipfile
 from backend.domain import (
     TEMPLATE_TRIS,
     TEMPLATE_VERTS,
-    UV_CHANNELS,
     UV_HEIGHT,
     UV_WIDTH,
-    ZIP_HEATMAP,
-    ZIP_MESH_A,
-    ZIP_MESH_B,
-    ZIP_UV_A,
-    ZIP_UV_B,
+    ZIP_NAMES,
     CompleteUv,
     Heatmap,
+    ZipBundle,
 )
 
 _template_cache: (
@@ -113,27 +109,33 @@ def compute_heatmap(uv_a: CompleteUv, uv_b: CompleteUv) -> Heatmap:
     raw = bytes(
         x - y if x >= y else y - x for x, y in zip(uv_a.as_bytes(), uv_b.as_bytes())
     )
-    return Heatmap(_value=raw)
+    # Ambas entradas son CompleteUv probados de UV_LEN; el diff conserva
+    # longitud por construccion. Mint sancionado, no forja libre.
+    return Heatmap._mint_after_check(raw)  # noqa: SLF001 - mint sancionado tras checks UV_LEN, unico via compute_heatmap
 
 
-def uv_to_png(raw: bytes) -> bytes:
+def uv_to_png(uv: CompleteUv | Heatmap) -> bytes:
     from PIL import Image
 
-    img = Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(raw))
+    img = Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(uv.as_bytes()))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
 
-def build_result_zip(
-    a_png: bytes, b_png: bytes, h_png: bytes, mesh_a: bytes, mesh_b: bytes
-) -> bytes:
-    _ = (UV_WIDTH, UV_HEIGHT, UV_CHANNELS)
+def build_result_zip(bundle: ZipBundle) -> bytes:
+    """Zip 5 archivos ZIP_NAMES desde el mismo ZipBundle de 7.
+
+    Delega a build_full_zip (dueno unico del orden ZIP_FULL) y
+    emite solo el subset ZIP_NAMES en orden canonico.
+    """
+    from backend.gnm_assemble import build_full_zip
+
+    full = build_full_zip(bundle)
+    with zipfile.ZipFile(io.BytesIO(full)) as src:
+        payloads = {name: src.read(name) for name in ZIP_NAMES}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as z:
-        z.writestr(ZIP_UV_A, a_png)
-        z.writestr(ZIP_UV_B, b_png)
-        z.writestr(ZIP_HEATMAP, h_png)
-        z.writestr(ZIP_MESH_A, mesh_a)
-        z.writestr(ZIP_MESH_B, mesh_b)
+        for name in ZIP_NAMES:
+            z.writestr(name, payloads[name])
     return buf.getvalue()

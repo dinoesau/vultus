@@ -1,5 +1,15 @@
+[tool.mypy]
+strict = true
+
+[tool.ruff.lint]
+extend-select = ["SLF"]
+
 [tool.ruff.lint.per-file-ignores]
 # Baseline preexistente: modal_app.py nunca paso ruff (el CI anterior no
 # hacia lint). Estas 10 violaciones son anteriores al plan-remove-rust-stack.
 # El codigo nuevo (domain/store/gnm/pipeline/app/tests) sigue estricto.
-"backend/modal_app.py" = ["BLE001", "F401", "TRY004"]
+# SLF001 en modal_app.py: _candidate_npz_paths preexistente (linea 122).
+# SLF001 en backend/tests: los tests son white-box por diseno y acceden a
+# bordes privados (_impl_fit, _use_real, _assets_dir); el gate SLF rige fuente.
+"backend/modal_app.py" = ["BLE001", "F401", "TRY004", "SLF001"]
+"backend/tests/*" = ["SLF001"]

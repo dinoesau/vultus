@@ -65,8 +65,10 @@ def _deterministic_fit(image: ImageBytes, landmarks: Landmarks) -> FitResult:
     camera_raw = _expand_floats(seed + b"camera", CAMERA_PARAMS_LEN, -1.0, 1.0)
     coeffs = parse_gnm_coeffs(list(coeffs_raw))
     camera = parse_camera_params(list(camera_raw))
-    assert isinstance(coeffs, Ok)
-    assert isinstance(camera, Ok)
+    # Sintesis interna con rangos finitos por construccion: el parse no puede
+    # fallar. Narrowing explicito (bug si falla), nunca assert de dominio.
+    if isinstance(coeffs, Err) or isinstance(camera, Err):
+        raise RuntimeError("synthetic fit produced out-of-range values")  # noqa: TRY004 - rama imposible de sintesis, no validacion de tipos
     return FitResult(coeffs=coeffs.value, camera=camera.value)
 
 
@@ -150,7 +152,7 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> FitResult:
     del image  # el fit geometrico solo usa landmarks; la imagen viaja al seam texture
     start = time.perf_counter()
     targets: NDArray[np.float64] = np.asarray(
-        mediapipe478_to_gnm68_targets(landmarks.as_bytes()), dtype=np.float64
+        mediapipe478_to_gnm68_targets(landmarks), dtype=np.float64
     )
     if targets.shape != (LANDMARKS68, 2):
         raise ValueError(f"targets shape {targets.shape} != {(LANDMARKS68, 2)}")
@@ -179,8 +181,10 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> FitResult:
     camera_parsed = parse_camera_params(
         [sx, 0.0, 0.0, tx, 0.0, sy, 0.0, ty, 0.0, 0.0, 0.0, 0.0]
     )
-    assert isinstance(coeffs_parsed, Ok)
-    assert isinstance(camera_parsed, Ok)
+    # Ridge recortada a [-3,3] con camara finita por construccion: el parse no
+    # puede fallar. Narrowing explicito (bug si falla), nunca assert de dominio.
+    if isinstance(coeffs_parsed, Err) or isinstance(camera_parsed, Err):
+        raise RuntimeError("ridge fit produced out-of-range values")  # noqa: TRY004 - rama imposible de sintesis, no validacion de tipos
     typed_coeffs: GnmCoeffs = coeffs_parsed.value
     return FitResult(coeffs=typed_coeffs, camera=camera_parsed.value)
 
@@ -234,11 +238,9 @@ def project(camera: CameraParams, points: NDArray[np.float64]) -> NDArray[np.flo
         raise ValueError(f"points shape {arr.shape} != (N, 3)")
     if not bool(np.all(np.isfinite(arr))):
         raise ValueError("points no finitos")
+    # La camara viaja probada (CameraParams: 12 finitos). Sin rechequeo:
+    # la regla vive en parse_camera_params, no aqui.
     c = camera.as_tuple()
-    if len(c) != 12:
-        raise ValueError(f"camera len {len(c)} != 12")
-    if not all(math.isfinite(v) for v in c):
-        raise ValueError("camera no finita")
     x = c[0] * arr[:, 0] + c[1] * arr[:, 1] + c[2] * arr[:, 2] + c[3]
     y = c[4] * arr[:, 0] + c[5] * arr[:, 1] + c[6] * arr[:, 2] + c[7]
     out: NDArray[np.float64] = np.stack([x, y], axis=1)

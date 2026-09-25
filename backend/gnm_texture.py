@@ -15,7 +15,6 @@ Sin pesos no hay retroproyeccion posible: gris completo determinista.
 from __future__ import annotations
 
 import io
-import json
 import logging
 import time
 from dataclasses import dataclass
@@ -235,23 +234,19 @@ def _points_in_hull(
 def _oval_px_from_landmarks(
     landmarks: Landmarks, photo_w: int, photo_h: int
 ) -> NDArray[np.float64] | None:
-    """Ovalo en px foto desde landmarks ya probados. None si no parsea.
+    """Ovalo en px foto desde landmarks ya probados. None si degenerado.
 
     Los landmarks cruzan probados (parse_landmarks en el borde); esto es
     parse-en-borde ya pagado, no revalidacion del core.
     """
-    try:
-        pts = json.loads(landmarks.as_bytes().decode("utf-8"))
-        oval = np.asarray(
-            [[float(pts[i][0]) * float(photo_w - 1), float(pts[i][1]) * float(photo_h - 1)] for i in OVAL_INDICES],
-            dtype=np.float64,
-        )
-        if oval.shape != (len(OVAL_INDICES), 2) or not bool(np.all(np.isfinite(oval))):
-            return None
-        return oval
-    except Exception as exc:  # noqa: BLE001 - sin ovalo se hornea igual, pero ruidoso
-        logger.warning("oval gate degradado: sin mascara de ovalo por %s", exc)
+    pts = landmarks.as_tuple()
+    oval = np.asarray(
+        [[pts[i][0] * float(photo_w - 1), pts[i][1] * float(photo_h - 1)] for i in OVAL_INDICES],
+        dtype=np.float64,
+    )
+    if oval.shape != (len(OVAL_INDICES), 2) or not bool(np.all(np.isfinite(oval))):
         return None
+    return oval
 
 
 def _photo_rgb(image: ImageBytes) -> NDArray[np.uint8]:
@@ -634,7 +629,7 @@ def bake_1024(
         gray = np.full((ATLAS_SIZE, ATLAS_SIZE, 3), NO_DATA, dtype=np.uint8)
         return gray, 0.0, (time.perf_counter() - start) * 1000.0, _empty_counters()
     photo = _photo_rgb(image)
-    mesh = np.asarray(eval_mesh(fit.coeffs.as_tuple()), dtype=np.float64)
+    mesh = np.asarray(eval_mesh(fit.coeffs), dtype=np.float64)
     normals = np.asarray(vertex_normals(mesh), dtype=np.float64)
     tris = np.asarray(head.triangles, dtype=np.int64)
     tri_uvs = np.asarray(head.triangle_uvs, dtype=np.float64)
@@ -706,9 +701,11 @@ def project_texture(image: ImageBytes, fit: FitResult) -> Ok[CompleteUv] | Err[D
             # Suave (diff 0) y determinista; deriva de la foto por marcador.
             v = raw[-1] if len(raw) else 0
             out = bytes([v]) * UV_LEN
-        assert len(out) == UV_LEN
+        if len(out) != UV_LEN:
+            return Err(MlFailed(detail=MlDecode(details=f"project len {len(out)} != {UV_LEN}")))
         parsed = parse_complete_uv(out)
-        assert isinstance(parsed, Ok)
+        if isinstance(parsed, Err):
+            return parsed
         return parsed
     except Exception as exc:  # noqa: BLE001 - la proyeccion nunca tumba sin causa
         return Err(MlFailed(detail=MlDecode(details=f"project failed: {exc}")))
@@ -718,7 +715,8 @@ def warp_with_landmarks(albedo: CompleteUv, landmarks: Landmarks) -> Ok[Complete
     try:
         _ = landmarks  # reservado para el warp TPS real (Fase 2); v1 es identidad
         parsed = parse_complete_uv(bytes(albedo.as_bytes()))
-        assert isinstance(parsed, Ok)
+        if isinstance(parsed, Err):
+            return parsed
         return parsed
     except Exception as exc:  # noqa: BLE001
         return Err(MlFailed(detail=MlDecode(details=f"warp failed: {exc}")))
@@ -735,7 +733,8 @@ def inpaint_occluded(albedo: CompleteUv, landmarks: Landmarks) -> Ok[CompleteUv]
     try:
         _ = landmarks  # reservado para la oclusion geometrica (Fase 2)
         parsed = parse_complete_uv(bytes(albedo.as_bytes()))
-        assert isinstance(parsed, Ok)
+        if isinstance(parsed, Err):
+            return parsed
         return parsed
     except Exception as exc:  # noqa: BLE001
         return Err(MlFailed(detail=MlDecode(details=f"inpaint failed: {exc}")))
@@ -752,9 +751,11 @@ def build_albedo(
             (UV_WIDTH, UV_HEIGHT), _Image.Resampling.BILINEAR
         )
         out = img.tobytes()
-        assert len(out) == UV_LEN
+        if len(out) != UV_LEN:
+            return Err(MlFailed(detail=MlDecode(details=f"bake len {len(out)} != {UV_LEN}")))
         parsed = parse_complete_uv(out)
-        assert isinstance(parsed, Ok)
+        if isinstance(parsed, Err):
+            return parsed
         return parsed
     except Exception as exc:  # noqa: BLE001 - el bake nunca tumba sin causa
         return Err(MlFailed(detail=MlDecode(details=f"bake failed: {exc}")))

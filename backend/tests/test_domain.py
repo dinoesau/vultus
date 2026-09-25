@@ -190,3 +190,63 @@ def test_new_stages_parse_and_old_stages_rejected() -> None:
     assert isinstance(parse_stage("flame"), Err)
     assert isinstance(parse_stage("freeuv"), Err)
     assert isinstance(parse_stage("bake"), Err)
+
+
+def _proven_texture_parts():  # type: ignore[no-untyped-def]
+    import json as _json
+
+    from backend.domain import (
+        FitResult as _FitResult,
+    )
+    from backend.domain import (
+        Ok as _Ok,
+    )
+    from backend.domain import (
+        parse_camera_params as _parse_cam,
+    )
+    from backend.domain import (
+        parse_gnm_coeffs as _parse_coeffs,
+    )
+
+    pts = [[0.0, 1.0, 2.0]] * LANDMARKS_LEN
+    lm = parse_landmarks(_json.dumps(pts).encode("utf-8"))
+    assert isinstance(lm, _Ok)
+    img = parse_image_bytes(_jpeg_min())
+    assert isinstance(img, _Ok)
+    coeffs = _parse_coeffs([0.0] * 253)
+    camera = _parse_cam([0.0] * 12)
+    assert isinstance(coeffs, _Ok)
+    assert isinstance(camera, _Ok)
+    fit = _FitResult(coeffs=coeffs.value, camera=camera.value)
+    return img.value, fit, lm.value
+
+
+def test_texture_request_codec_roundtrips_image_fit_landmarks() -> None:
+    from backend.pipeline_local import decode_texture_request, encode_texture_request
+
+    image, fit, landmarks = _proven_texture_parts()
+    blob = encode_texture_request(image, fit, landmarks)
+    back = decode_texture_request(blob)
+    assert isinstance(back, Ok)
+    back_image, back_fit, back_landmarks = back.value
+    assert back_image.as_bytes() == image.as_bytes()
+    assert back_landmarks.as_bytes() == landmarks.as_bytes()
+    assert back_fit.coeffs.as_tuple() == fit.coeffs.as_tuple()
+    assert back_fit.camera.as_tuple() == fit.camera.as_tuple()
+
+
+def test_texture_request_rejects_truncated_and_nonbytes() -> None:
+    from backend.domain import domain_to_status
+    from backend.pipeline_local import decode_texture_request, encode_texture_request
+
+    image, fit, landmarks = _proven_texture_parts()
+    valid = encode_texture_request(image, fit, landmarks)
+    assert isinstance(decode_texture_request(valid), Ok)
+    assert isinstance(decode_texture_request(b"\x00\x01"), Err)
+    assert isinstance(decode_texture_request(b""), Err)
+    assert isinstance(decode_texture_request(123), Err)
+    truncated = valid[:10]
+    assert len(truncated) < len(valid)
+    result = decode_texture_request(truncated)
+    assert isinstance(result, Err)
+    assert domain_to_status(result.error) == 500

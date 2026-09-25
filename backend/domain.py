@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Generic, TypeAlias, TypeVar
+from urllib.parse import unquote
 
 # La imagen Modal pina Python 3.10: nada de sintaxis 3.11+ aqui
 # (`type X =` PEP 695 ni `typing.Never`). Este modulo viaja a Modal
@@ -34,6 +35,8 @@ E_co = TypeVar("E_co", covariant=True)
 # --- Constantes canonicas (no inventar valores nuevos) ---
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+R2_MAX_LEN = 1024
 
 JPEG_MAGIC = b"\xff\xd8\xff"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -56,8 +59,25 @@ ZIP_UV_B = "uv_b.png"
 ZIP_HEATMAP = "heatmap.png"
 ZIP_MESH_A = "mesh_a.glb"
 ZIP_MESH_B = "mesh_b.glb"
+ZIP_PBR_A = "pbr_a.png"
+ZIP_PBR_B = "pbr_b.png"
 
 ZIP_NAMES = (ZIP_UV_A, ZIP_UV_B, ZIP_HEATMAP, ZIP_MESH_A, ZIP_MESH_B)
+
+ZIP_FULL = (*ZIP_NAMES, ZIP_PBR_A, ZIP_PBR_B)
+
+
+@dataclass(frozen=True, slots=True)
+class ZipBundle:
+    """Bundle 7 archivos en orden canonico ZIP_FULL. Solo via constructores shell."""
+
+    uv_a_png: bytes
+    uv_b_png: bytes
+    heatmap_png: bytes
+    mesh_a_glb: bytes
+    mesh_b_glb: bytes
+    pbr_a: bytes
+    pbr_b: bytes
 
 # GNM fit directo: 253 coeficientes finitos + camara 3x4 (12 finitos).
 GNM_COEFFS_LEN = 253
@@ -193,6 +213,11 @@ class InvalidJobId:
 
 
 @dataclass(frozen=True, slots=True)
+class InvalidR2Key:
+    detail: str = "invalid r2 key"
+
+
+@dataclass(frozen=True, slots=True)
 class InvalidProgress:
     detail: str = "invalid progress"
 
@@ -240,6 +265,7 @@ class Invariant:
 DomainError: TypeAlias = (
     InvalidImage
     | InvalidJobId
+    | InvalidR2Key
     | InvalidProgress
     | InvalidBaseUrl
     | InvalidCoeffs
@@ -253,7 +279,19 @@ DomainError: TypeAlias = (
 
 
 def domain_to_status(error: DomainError) -> int:
-    if isinstance(error, (InvalidImage, InvalidJobId, InvalidProgress, InvalidBaseUrl, EmptyPayload, InvalidCoeffs, InvalidCamera)):
+    if isinstance(
+        error,
+        (
+            InvalidImage,
+            InvalidJobId,
+            InvalidR2Key,
+            InvalidProgress,
+            InvalidBaseUrl,
+            EmptyPayload,
+            InvalidCoeffs,
+            InvalidCamera,
+        ),
+    ):
         return 400
     if isinstance(error, NotFound):
         return 404
@@ -270,6 +308,8 @@ def domain_to_message(error: DomainError) -> str:
         return "invalid image: not jpeg nor png"
     if isinstance(error, InvalidJobId):
         return "invalid job_id"
+    if isinstance(error, InvalidR2Key):
+        return "invalid r2 key"
     if isinstance(error, InvalidProgress):
         return "invalid progress"
     if isinstance(error, InvalidBaseUrl):
@@ -352,6 +392,128 @@ def parse_job_id(raw: object) -> Result[JobId, DomainError]:
     return Ok(JobId(_value=str(parsed)))
 
 
+def _has_controls(s: str) -> bool:
+    for ch in s:
+        code = ord(ch)
+        if code < 0x20 or code == 0x7F:
+            return True
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class R2Key:
+    """Solo via parse_r2_key."""
+
+    _value: str
+
+    def as_str(self) -> str:
+        return self._value
+
+    def __str__(self) -> str:
+        return self._value
+
+
+def parse_r2_key(raw: object) -> Result[R2Key, DomainError]:
+    if not isinstance(raw, str):
+        return Err(InvalidR2Key())
+    trimmed = raw.strip()
+    if not trimmed:
+        return Err(InvalidR2Key())
+    if len(trimmed) > R2_MAX_LEN:
+        return Err(InvalidR2Key())
+    if trimmed.startswith("/"):
+        return Err(InvalidR2Key())
+    if "\\" in trimmed:
+        return Err(InvalidR2Key())
+    if _has_controls(trimmed):
+        return Err(InvalidR2Key())
+    decoded = trimmed
+    for _ in range(2):
+        nxt = unquote(decoded)
+        if nxt == decoded:
+            break
+        decoded = nxt
+        if len(decoded) > R2_MAX_LEN:
+            return Err(InvalidR2Key())
+    if len(decoded) > R2_MAX_LEN:
+        return Err(InvalidR2Key())
+    if "%2e" in decoded.lower():
+        return Err(InvalidR2Key())
+    if "\\" in decoded:
+        return Err(InvalidR2Key())
+    if decoded.startswith("/"):
+        return Err(InvalidR2Key())
+    if _has_controls(decoded):
+        return Err(InvalidR2Key())
+    for seg in decoded.split("/"):
+        if seg in ("..", "."):
+            return Err(InvalidR2Key())
+    return Ok(R2Key(_value=trimmed))
+
+
+@dataclass(frozen=True, slots=True)
+class QueueJob:
+    """Producto borde cola: job + punteros R2. Solo via parse_queue_envelope.
+
+    Wave 5: sin campo `deprecated`; legacy `a/b` es Err, solo canonico.
+    """
+
+    job_id: JobId
+    r2_a: R2Key
+    r2_b: R2Key
+
+
+def parse_queue_envelope(raw: object) -> Result[QueueJob, DomainError]:
+    """Borde unico de cola. Solo canonico `job_id` + `r2_keys.image_a/image_b`.
+
+    Wave 5 flip: legacy `a/b` es Err InvalidR2Key, sin path deprecated.
+    Extras policy: legacy a/b -> Err; other unknown extras ignored for
+    forward-compat (no se rechazan claves desconocidas fuera de a/b).
+    `body`/`message` solo con fallback None-estricto: si `body` es None se
+    usa `message`; falsy no-None nunca cae al otro campo.
+    R2Key guarda el trim exacto; lo decodificado solo valida, no se almacena.
+    """
+    body: object = raw
+    if isinstance(raw, dict) and ("body" in raw or "message" in raw):
+        cand: object = raw.get("body")
+        if cand is None:
+            cand = raw.get("message")
+        if isinstance(cand, str):
+            try:
+                cand = json.loads(cand)
+            except json.JSONDecodeError:
+                return Err(InvalidJobId(detail="queue body not json"))
+        if not isinstance(cand, dict):
+            return Err(InvalidJobId(detail="queue body not object"))
+        body = cand
+    if not isinstance(body, dict):
+        return Err(InvalidJobId(detail="queue body not object"))
+    job_raw: object = body.get("job_id")
+    if job_raw is None:
+        job_raw = body.get("jobId")
+    job_result = parse_job_id(job_raw)
+    if isinstance(job_result, Err):
+        return job_result
+    keys_raw: object = body.get("r2_keys")
+    if keys_raw is None:
+        keys_raw = body.get("r2Keys")
+    if not isinstance(keys_raw, dict):
+        return Err(InvalidR2Key())
+    a_canon: object = keys_raw.get("image_a")
+    b_canon: object = keys_raw.get("image_b")
+    if "a" in keys_raw or "b" in keys_raw:
+        return Err(InvalidR2Key())
+    if not isinstance(a_canon, str) or not isinstance(b_canon, str):
+        return Err(InvalidR2Key())
+    a_parsed = parse_r2_key(a_canon)
+    if isinstance(a_parsed, Err):
+        return a_parsed
+    b_parsed = parse_r2_key(b_canon)
+    if isinstance(b_parsed, Err):
+        return b_parsed
+    return Ok(QueueJob(job_id=job_result.value, r2_a=a_parsed.value, r2_b=b_parsed.value))
+
+
 @dataclass(frozen=True, slots=True)
 class Progress:
     """Solo via parse_progress. Rango 0..1 finito."""
@@ -421,6 +583,10 @@ class Landmarks:
 
     def as_bytes(self) -> bytes:
         return self._value
+
+    def as_tuple(self) -> tuple[tuple[float, float, float], ...]:
+        pts: list[list[float]] = json.loads(self._value.decode("utf-8"))
+        return tuple((float(p[0]), float(p[1]), float(p[2])) for p in pts)
 
 
 def parse_landmarks(raw: object) -> Result[Landmarks, DomainError]:
@@ -660,6 +826,5 @@ def decode_fit_request(raw: object) -> Result[tuple[Landmarks, ImageBytes], Doma
         return lm_result
     img_result = parse_image_bytes(img_raw)
     if isinstance(img_result, Err):
-        detail = domain_to_message(img_result.error)
-        return Err(FitFailed(detail=MlDecode(details=detail)))
+        return Err(img_result.error)
     return Ok((lm_result.value, img_result.value))

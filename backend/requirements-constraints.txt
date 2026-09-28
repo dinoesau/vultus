@@ -1,0 +1,13 @@
+# Version anchors for backend/requirements.lock only (F2 unification).
+# requirements.txt stays torch-free BY DESIGN: the Modal recipe installs the
+# cu126 GPU build first (torch==2.13.0 + torchvision==0.28.0 from the cu126
+# index in backend/modal_app.py), and bare transitive torch requirements are
+# then already satisfied at image build time. These anchors force the same
+# torch VERSION into the PyPI lock so CI (--require-hashes) and Modal agree
+# on version; only the build variant differs (PyPI CPU in lock, cu126 in
+# Modal), which is the documented CI-vs-Modal split.
+# Regenerate with:
+#   uv pip compile --python-version 3.10 --generate-hashes \
+#     -c backend/requirements-constraints.txt \
+#     -o backend/requirements.lock backend/requirements.txt
+torch==2.13.0

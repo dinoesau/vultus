@@ -47,6 +47,7 @@ from backend.pipeline_local import (
     MlSidecarClient,
     ProgressSink,
     default_config,
+    resolve_pbr_pngs,
     run_pair,
 )
 from backend.shell_secrets import CfToken, SecretStr
@@ -232,15 +233,20 @@ class HttpProgressSink:
     def complete(self, result: CompareResult) -> Ok[None] | Err[DomainError]:
         uv_a_png = uv_to_png(result.uv_a)
         uv_b_png = uv_to_png(result.uv_b)
-        heatmap_png = uv_to_png(result.heatmap)
+        # PBR skin-duplicate (DAG v10 HIL dueno): ambos modos duplican el
+        # albedo (placeholder honesto, sin mapas reales; ojos en GLB).
+        # El Err se conserva para TODO mapas reales futuros; hoy siempre Ok.
+        pbr_resolved = resolve_pbr_pngs(result.uv_a, result.uv_b)
+        if isinstance(pbr_resolved, Err):
+            return Err(pbr_resolved.error)
+        pbr_a, pbr_b = pbr_resolved.value
         bundle = ZipBundle(
             uv_a_png=uv_a_png,
             uv_b_png=uv_b_png,
-            heatmap_png=heatmap_png,
             mesh_a_glb=result.mesh_a.as_bytes(),
             mesh_b_glb=result.mesh_b.as_bytes(),
-            pbr_a=uv_a_png,
-            pbr_b=uv_b_png,
+            pbr_a=pbr_a,
+            pbr_b=pbr_b,
         )
         blob = build_result_zip(bundle)
         base = _gateway_base()

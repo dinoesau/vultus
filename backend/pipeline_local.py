@@ -1,7 +1,7 @@
 """Orquestador local: paralelismo por cara, timeouts fijos y deadline total = TTL.
 
-Fit y textura via sidecar HTTP (`/ml/fit`, `/ml/texture`); assemble, heatmap
-y GLB son funciones puras CPU sin I/O via `gnm_fit`/`gnm_texture`/`gnm_assemble`.
+Fit y textura via sidecar HTTP (`/ml/fit`, `/ml/texture`); assemble FLAME
+y GLB son funciones puras CPU sin I/O via `gnm_assemble`.
 Solo bordes externos: cola, tiempo, filesystem efimero, sidecar.
 Logs solo con job id y duraciones, nunca bytes.
 """
@@ -20,6 +20,9 @@ from typing import Protocol
 import httpx
 
 from backend.domain import (
+    CODEC_VERSION_LEN,
+    VERSION_V1,
+    VERSION_V2,
     BaseUrl,
     CompareResult,
     CompleteUv,
@@ -38,7 +41,9 @@ from backend.domain import (
     NotFound,
     Ok,
     Progress,
+    RenderedImage,
     Stage,
+    VersionMismatch,
     encode_fit_request,
     parse_camera_params,
     parse_complete_uv,
@@ -46,7 +51,12 @@ from backend.domain import (
     parse_landmarks,
     parse_progress,
 )
-from backend.gnm import compute_heatmap
+from backend.flame_texture import (
+    EVIDENCE_MIN,
+    count_sentinel,
+    texture_evidence,
+)
+from backend.gnm import uv_to_png
 from backend.gnm_assemble import build_personalized_glb
 
 logger = logging.getLogger("vultus-pipeline")
@@ -72,6 +82,10 @@ class ProgressSink(Protocol):
 
     Los tests inyectan el sink en memoria; el runner local y los workers
     GPU lo implementan sobre HTTP. Misma forma en ambos entornos.
+
+    Retry/idempotencia: `complete` es idempotente por overwrite de la misma
+    key R2 (`jobs/{id}/result.zip`); reintentar un complete no duplica
+    resultados. `report` es best-effort; `fail` es terminal.
     """
 
     def report(self, progress: Progress, stage: Stage) -> Ok[None] | Err[DomainError]:
@@ -105,10 +119,15 @@ def default_config() -> PipelineConfig:
 
 # --- Contrato wire /ml/fit y /ml/texture (S8 lo espeja en modal_app) ---
 #
-# Fit request: encode_fit_request (u32 BE len + landmarks_json + image).
-# Fit response: 253 f32 LE + 12 f32 LE = 1060 bytes.
-# Texture request: u32 BE len(fit_request) + fit_request + fit_result(1060).
+# Fit request v2: VERSION u8 (VERSION_V2) + u32 BE len + landmarks_json + image.
+# Fit response: 253 f32 LE + 12 f32 LE = 1060 bytes (sin version, largo fijo).
+# Texture request v2: VERSION u8 + u32 BE len(fit_request_v2) + fit_request_v2
+#   + fit_result(1060), consumo exacto sin sobrantes.
 # Texture response: UV_LEN bytes crudos -> parse_complete_uv.
+# Flag-day incompatible por diseno: v1 (sin VERSION, primer byte 0x00) es
+# VersionMismatch 400, nunca parseo ni dual-read v1. Despliegue con drain de
+# cola TTL60/visibility180 (fit 10s dentro de TTL60).
+# Taxonomia: truncado FitFailed 500 vs trailing VersionMismatch 400.
 
 FIT_RESULT_LEN = 253 * 4 + 12 * 4
 
@@ -142,29 +161,47 @@ def parse_fit_result(raw: object) -> Ok[FitResult] | Err[DomainError]:
 
 
 def encode_texture_request(image: ImageBytes, fit: FitResult, landmarks: Landmarks) -> bytes:
+    """Wire v2: VERSION u8 + u32 BE len(fit_request_v2) + fit_request_v2 + fit_result."""
     fit_req = encode_fit_request(image, landmarks)
-    return len(fit_req).to_bytes(4, "big") + fit_req + encode_fit_result(fit)
+    return bytes((VERSION_V2,)) + len(fit_req).to_bytes(4, "big") + fit_req + encode_fit_result(fit)
 
 
 def decode_texture_request(raw: object) -> Ok[tuple[ImageBytes, FitResult, Landmarks]] | Err[DomainError]:
-    if not isinstance(raw, (bytes, bytearray, memoryview)):
-        return Err(FitFailed(detail=MlDecode(details="texture payload <4 bytes")))
-    data = bytes(raw)
-    if len(data) < 4:
-        return Err(FitFailed(detail=MlDecode(details="texture payload <4 bytes")))
-    size = int.from_bytes(data[0:4], "big")
-    if len(data) < 4 + size + FIT_RESULT_LEN:
-        return Err(FitFailed(detail=MlDecode(details="texture payload truncated")))
-    from backend.domain import decode_fit_request
+    """Borde versionado: pela VERSION primero con match exhaustivo.
 
-    fit_req = decode_fit_request(data[4 : 4 + size])
-    if isinstance(fit_req, Err):
-        return fit_req
-    fit_res = parse_fit_result(data[4 + size : 4 + size + FIT_RESULT_LEN])
-    if isinstance(fit_res, Err):
-        return fit_res
-    landmarks, image = fit_req.value
-    return Ok((image, fit_res.value, landmarks))
+    Flag-day incompatible: V2 exige consumo exacto (total == 1+4+len+1060)
+    sin dual-read v1; despliegue con drain TTL60/visibility180.
+    Truncado es FitFailed 500, sobrantes son VersionMismatch 400.
+    V1 y otros bytes son VersionMismatch 400.
+    """
+    if not isinstance(raw, (bytes, bytearray, memoryview)):
+        return Err(FitFailed(detail=MlDecode(details="texture payload <5 bytes")))
+    data = bytes(raw)
+    if len(data) < CODEC_VERSION_LEN + 4:
+        return Err(FitFailed(detail=MlDecode(details="texture payload <5 bytes")))
+    version = data[0]
+    match version:
+        case _ if version == VERSION_V2:
+            size = int.from_bytes(data[CODEC_VERSION_LEN : CODEC_VERSION_LEN + 4], "big")
+            expected = CODEC_VERSION_LEN + 4 + size + FIT_RESULT_LEN
+            if len(data) < expected:
+                return Err(FitFailed(detail=MlDecode(details="texture payload truncated")))
+            if len(data) > expected:
+                return Err(VersionMismatch(detail="texture payload has trailing bytes"))
+            from backend.domain import decode_fit_request
+
+            fit_req = decode_fit_request(data[CODEC_VERSION_LEN + 4 : CODEC_VERSION_LEN + 4 + size])
+            if isinstance(fit_req, Err):
+                return fit_req
+            fit_res = parse_fit_result(data[CODEC_VERSION_LEN + 4 + size : expected])
+            if isinstance(fit_res, Err):
+                return fit_res
+            landmarks, image = fit_req.value
+            return Ok((image, fit_res.value, landmarks))
+        case _ if version == VERSION_V1:
+            return Err(VersionMismatch(detail="texture codec v1 unsupported, use v2"))
+        case _:
+            return Err(VersionMismatch(detail="texture codec version unsupported"))
 
 
 class MlSidecarClient:
@@ -221,6 +258,21 @@ class MlSidecarClient:
         return parsed
 
 
+def resolve_pbr_pngs(
+    uv_a: CompleteUv | RenderedImage, uv_b: CompleteUv | RenderedImage
+) -> Ok[tuple[bytes, bytes]] | Err[DomainError]:
+    """PBR skin-duplicate placeholder (DAG v10 HIL dueno).
+
+    Ambos modos (dobles y real) duplican el albedo como `pbr_a/b`:
+    no hay mapas roughness/metalness reales; los ojos viven en el
+    GLB (2 primitivas SkinPBR+EyePBR, ojos en textura separada).
+    Placeholder honesto fijado por test en ambos modos.
+    TODO futuro: mapas PBR reales (roughness/metalness) -> pbr!=uv.
+    El `Err` se conserva para ese cableado futuro; hoy siempre `Ok`.
+    """
+    return Ok((uv_to_png(uv_a), uv_to_png(uv_b)))
+
+
 def run_pair(
     sink: ProgressSink,
     ml: MlSidecarClient,
@@ -241,6 +293,10 @@ def run_pair(
         return time.monotonic() > deadline
 
     def _fail(message: str) -> Err[DomainError]:
+        # Causa extraida una sola vez en el shell: el mensaje ya trae el
+        # detalle del dominio (`... failed: {error}` en callers) y aqui se
+        # loguea una vez; el cliente ve generico via domain_to_message.
+        # Sin refactor amplio (sin cause:Exception en el dominio).
         sink.fail()
         try:
             cleanup_job_dir(job_id)
@@ -341,6 +397,19 @@ def run_pair(
         return Err(NotFound(job_id=job_id.as_str()))
 
     assemble_start = time.monotonic()
+    # Wave 4 Step 5 (FLAME): sin mapa termico. La unica seam
+    # de ensamblaje es build_personalized_glb (PBR 2 materiales) + sink zip-6.
+    # Wave 4-fix P4: gate sentinel/evidence sobre salida seam textura.
+    # El albedo nunca trae SKIN_SENTINEL magenta; evidence>=EVIDENCE_MIN.
+    # PBR skin-duplicate (DAG v10 HIL dueno): el zip usa `resolve_pbr_pngs`
+    # que duplica el albedo en ambos modos (placeholder honesto, sin mapas
+    # roughness/metalness reales; ojos en GLB 2 primitivas). Ver
+    # local_runner.complete + modal_app._run_job_from_r2 que resuelven pbr
+    # via el mismo helper; TODO mapas reales futuros -> pbr!=uv.
+    for _uv_gate in (uv_a, uv_b):
+        _raw_gate = _uv_gate.as_bytes()
+        if count_sentinel(_raw_gate) != 0 or texture_evidence(_raw_gate) < EVIDENCE_MIN:
+            return _fail("texture sentinel/evidence gate failed")
     mesh_a_result = build_personalized_glb(fit_a, uv_a)
     if isinstance(mesh_a_result, Err):
         return _fail(f"assemble mesh_a failed: {mesh_a_result.error}")
@@ -349,16 +418,15 @@ def run_pair(
         return _fail(f"assemble mesh_b failed: {mesh_b_result.error}")
     mesh_a = mesh_a_result.value
     mesh_b = mesh_b_result.value
-    heatmap = compute_heatmap(uv_a, uv_b)
     assemble_ms = int((time.monotonic() - assemble_start) * 1000)
     logger.info(
-        "assemble gnm done job=%s assemble_ms=%d mesh_a_len=%d mesh_b_len=%d",
+        "assemble flame done job=%s assemble_ms=%d mesh_a_len=%d mesh_b_len=%d",
         job_id.as_str(),
         assemble_ms,
         len(mesh_a.as_bytes()),
         len(mesh_b.as_bytes()),
     )
-    output = CompareResult(uv_a=uv_a, uv_b=uv_b, heatmap=heatmap, mesh_a=mesh_a, mesh_b=mesh_b)
+    output = CompareResult(uv_a=uv_a, uv_b=uv_b, mesh_a=mesh_a, mesh_b=mesh_b)
     completed = sink.complete(output)
     if isinstance(completed, Err):
         cleanup_job_dir(job_id)

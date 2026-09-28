@@ -56,24 +56,24 @@ GLB_VERSION = 2
 
 ZIP_UV_A = "uv_a.png"
 ZIP_UV_B = "uv_b.png"
-ZIP_HEATMAP = "heatmap.png"
 ZIP_MESH_A = "mesh_a.glb"
 ZIP_MESH_B = "mesh_b.glb"
 ZIP_PBR_A = "pbr_a.png"
 ZIP_PBR_B = "pbr_b.png"
 
-ZIP_NAMES = (ZIP_UV_A, ZIP_UV_B, ZIP_HEATMAP, ZIP_MESH_A, ZIP_MESH_B)
+# Unica constante canonica zip-6 en orden canonico (espejo de edge/contract.ts ZIP_NAMES).
+# Sin heatmap (ADR-008 revoca ADR-002). No inventar literales fuera de aqui.
 
-ZIP_FULL = (*ZIP_NAMES, ZIP_PBR_A, ZIP_PBR_B)
+
+ZIP_NAMES = (ZIP_UV_A, ZIP_UV_B, ZIP_MESH_A, ZIP_MESH_B, ZIP_PBR_A, ZIP_PBR_B)
 
 
 @dataclass(frozen=True, slots=True)
 class ZipBundle:
-    """Bundle 7 archivos en orden canonico ZIP_FULL. Solo via constructores shell."""
+    """Bundle 6 archivos en orden canonico ZIP_NAMES. Solo via constructores shell."""
 
     uv_a_png: bytes
     uv_b_png: bytes
-    heatmap_png: bytes
     mesh_a_glb: bytes
     mesh_b_glb: bytes
     pbr_a: bytes
@@ -258,6 +258,13 @@ class NotFound:
 
 
 @dataclass(frozen=True, slots=True)
+class VersionMismatch:
+    """Codec o contrato versionado no soportado. Solo via borde versionado."""
+
+    detail: str = "version mismatch"
+
+
+@dataclass(frozen=True, slots=True)
 class Invariant:
     detail: str
 
@@ -274,6 +281,7 @@ DomainError: TypeAlias = (
     | MlFailed
     | FitFailed
     | NotFound
+    | VersionMismatch
     | Invariant
 )
 
@@ -290,6 +298,7 @@ def domain_to_status(error: DomainError) -> int:
             EmptyPayload,
             InvalidCoeffs,
             InvalidCamera,
+            VersionMismatch,
         ),
     ):
         return 400
@@ -320,6 +329,8 @@ def domain_to_message(error: DomainError) -> str:
         return "invalid camera params"
     if isinstance(error, EmptyPayload):
         return "empty payload"
+    if isinstance(error, VersionMismatch):
+        return f"version mismatch: {error.detail}"
     if isinstance(error, NotFound):
         return f"not found: {error.job_id}"
     if isinstance(error, (MlFailed, FitFailed, Invariant)):
@@ -629,7 +640,7 @@ def _parse_uv_bytes(raw: object, label: str) -> Result[bytes, DomainError]:
 
 @dataclass(frozen=True, slots=True)
 class CompleteUv:
-    """Solo via parse_complete_uv o mint tras bake probado."""
+    """Solo via parse_complete_uv (unica via, sin mint)."""
 
     _value: bytes
 
@@ -638,12 +649,6 @@ class CompleteUv:
 
     def __len__(self) -> int:
         return len(self._value)
-
-    @classmethod
-    def _mint_after_check(cls, raw: bytes) -> CompleteUv:
-        # Privado por convencion. Solo tras checks de longitud UV_LEN
-        # en modulos gnm-adjacentes (bake/compute). Revisar como `sudo`.
-        return cls(_value=raw)
 
 
 def parse_complete_uv(raw: object) -> Result[CompleteUv, DomainError]:
@@ -654,8 +659,11 @@ def parse_complete_uv(raw: object) -> Result[CompleteUv, DomainError]:
 
 
 @dataclass(frozen=True, slots=True)
-class Heatmap:
-    """Solo via parse_heatmap o mint tras compute probado."""
+class RenderedImage:
+    """Textura completada sin gris, piel total. Solo via parse_rendered_image (unica via, sin mint).
+
+    Disclosure pericial (ADR-008): la completion es visual, no evidencia.
+    """
 
     _value: bytes
 
@@ -665,18 +673,32 @@ class Heatmap:
     def __len__(self) -> int:
         return len(self._value)
 
-    @classmethod
-    def _mint_after_check(cls, raw: bytes) -> Heatmap:
-        # Privado por convencion. Solo tras checks de longitud UV_LEN
-        # en gnm.compute_heatmap (diff de dos CompleteUv probados).
-        return cls(_value=raw)
 
-
-def parse_heatmap(raw: object) -> Result[Heatmap, DomainError]:
-    result = _parse_uv_bytes(raw, "heatmap")
+def parse_rendered_image(raw: object) -> Result[RenderedImage, DomainError]:
+    result = _parse_uv_bytes(raw, "rendered")
     if isinstance(result, Err):
         return result
-    return Ok(Heatmap(_value=result.value))
+    return Ok(RenderedImage(_value=result.value))
+
+
+@dataclass(frozen=True, slots=True)
+class EyeTexture:
+    """Textura propia de ojos, separada de piel. Solo via parse_eye_texture (unica via)."""
+
+    _value: bytes
+
+    def as_bytes(self) -> bytes:
+        return self._value
+
+    def __len__(self) -> int:
+        return len(self._value)
+
+
+def parse_eye_texture(raw: object) -> Result[EyeTexture, DomainError]:
+    result = _parse_uv_bytes(raw, "eye")
+    if isinstance(result, Err):
+        return result
+    return Ok(EyeTexture(_value=result.value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -710,7 +732,6 @@ def parse_gnm_mesh(raw: object) -> Result[GnmMesh, DomainError]:
 class CompareResult:
     uv_a: CompleteUv
     uv_b: CompleteUv
-    heatmap: Heatmap
     mesh_a: GnmMesh
     mesh_b: GnmMesh
 
@@ -804,27 +825,51 @@ class FittedMesh:
     fit: FitResult
 
 
+# --- Codec wire versionado (Wave 2 Step 3) ---
+#
+# Framing: VERSION u8 + u32 BE len + body. Valores reservados fuera de los
+# primeros bytes de len validos: un len v1 valido empieza en 0x00 (payloads
+# <16MiB), asi que 0x01/0x02 como primer byte siempre es version, nunca len.
+CODEC_VERSION_LEN = 1
+VERSION_V1 = 0x01
+VERSION_V2 = 0x02
+
+
 def encode_fit_request(image: ImageBytes, landmarks: Landmarks) -> bytes:
+    """Wire v2: VERSION u8 + u32 BE len(landmarks_json) + landmarks + image."""
     lm = landmarks.as_bytes()
     img = image.as_bytes()
-    return len(lm).to_bytes(4, "big") + lm + img
+    return bytes((VERSION_V2,)) + len(lm).to_bytes(4, "big") + lm + img
 
 
 def decode_fit_request(raw: object) -> Result[tuple[Landmarks, ImageBytes], DomainError]:
+    """Borde versionado: pela VERSION primero con match exhaustivo.
+
+    V2 parsea el cuerpo; V1 y cualquier otro byte son VersionMismatch 400.
+    v1-tipico (0x00) cae al wildcard; v1-colision (0x01/0x02) cae a V1 o a
+    truncado en la rama V2. Sin version no hay parseo.
+    """
     if not isinstance(raw, (bytes, bytearray, memoryview)):
-        return Err(FitFailed(detail=MlDecode(details="fit payload <4 bytes")))
+        return Err(FitFailed(detail=MlDecode(details="fit payload <5 bytes (1 version + 4 len)")))
     data = bytes(raw)
-    if len(data) < 4:
-        return Err(FitFailed(detail=MlDecode(details="fit payload <4 bytes")))
-    size = int.from_bytes(data[0:4], "big")
-    if len(data) < 4 + size:
-        return Err(FitFailed(detail=MlDecode(details="fit payload truncated")))
-    lm_raw = data[4 : 4 + size]
-    img_raw = data[4 + size :]
-    lm_result = parse_landmarks(lm_raw)
-    if isinstance(lm_result, Err):
-        return lm_result
-    img_result = parse_image_bytes(img_raw)
-    if isinstance(img_result, Err):
-        return Err(img_result.error)
-    return Ok((lm_result.value, img_result.value))
+    if len(data) < CODEC_VERSION_LEN + 4:
+        return Err(FitFailed(detail=MlDecode(details="fit payload <5 bytes (1 version + 4 len)")))
+    version = data[0]
+    match version:
+        case _ if version == VERSION_V2:
+            size = int.from_bytes(data[CODEC_VERSION_LEN : CODEC_VERSION_LEN + 4], "big")
+            if len(data) < CODEC_VERSION_LEN + 4 + size:
+                return Err(FitFailed(detail=MlDecode(details="fit payload truncated")))
+            lm_raw = data[CODEC_VERSION_LEN + 4 : CODEC_VERSION_LEN + 4 + size]
+            img_raw = data[CODEC_VERSION_LEN + 4 + size :]
+            lm_result = parse_landmarks(lm_raw)
+            if isinstance(lm_result, Err):
+                return lm_result
+            img_result = parse_image_bytes(img_raw)
+            if isinstance(img_result, Err):
+                return Err(img_result.error)
+            return Ok((lm_result.value, img_result.value))
+        case _ if version == VERSION_V1:
+            return Err(VersionMismatch(detail="fit codec v1 unsupported, use v2"))
+        case _:
+            return Err(VersionMismatch(detail="fit codec version unsupported"))

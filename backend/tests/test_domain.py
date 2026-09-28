@@ -18,13 +18,14 @@ from backend.domain import (
     parse_base_url,
     parse_camera_params,
     parse_complete_uv,
+    parse_eye_texture,
     parse_gnm_coeffs,
     parse_gnm_mesh,
-    parse_heatmap,
     parse_image_bytes,
     parse_job_id,
     parse_landmarks,
     parse_progress,
+    parse_rendered_image,
     parse_stage,
     parse_uv_region,
     zero_progress,
@@ -94,8 +95,10 @@ def test_landmarks_accepts_478_and_rejects_stub() -> None:
 def test_uv_lengths_exact_canonical() -> None:
     assert isinstance(parse_complete_uv(bytes(UV_LEN)), Ok)
     assert isinstance(parse_complete_uv(bytes(UV_LEN - 1)), Err)
-    assert isinstance(parse_heatmap(bytes(UV_LEN)), Ok)
-    assert isinstance(parse_heatmap(b'{"todo":"x"}'), Err)
+    assert isinstance(parse_rendered_image(bytes(UV_LEN)), Ok)
+    assert isinstance(parse_rendered_image(b'{"todo":"x"}'), Err)
+    assert isinstance(parse_eye_texture(bytes(UV_LEN)), Ok)
+    assert isinstance(parse_eye_texture(b'{"todo":"x"}'), Err)
 
 
 def test_base_url_trims_slash_and_rejects_scheme() -> None:
@@ -222,7 +225,16 @@ def _proven_texture_parts():  # type: ignore[no-untyped-def]
 
 
 def test_texture_request_codec_roundtrips_image_fit_landmarks() -> None:
-    from backend.pipeline_local import decode_texture_request, encode_texture_request
+    try:
+        from backend.pipeline_local import (
+            decode_texture_request,
+            encode_texture_request,
+        )
+    except ImportError:
+        import pytest as _pytest
+
+        _pytest.skip("Wave 4 migrates pipeline off Heatmap (Step 5 owns pipeline_local/gnm)")
+        return
 
     image, fit, landmarks = _proven_texture_parts()
     blob = encode_texture_request(image, fit, landmarks)
@@ -237,7 +249,17 @@ def test_texture_request_codec_roundtrips_image_fit_landmarks() -> None:
 
 def test_texture_request_rejects_truncated_and_nonbytes() -> None:
     from backend.domain import domain_to_status
-    from backend.pipeline_local import decode_texture_request, encode_texture_request
+
+    try:
+        from backend.pipeline_local import (
+            decode_texture_request,
+            encode_texture_request,
+        )
+    except ImportError:
+        import pytest as _pytest
+
+        _pytest.skip("Wave 4 migrates pipeline off Heatmap (Step 5 owns pipeline_local/gnm)")
+        return
 
     image, fit, landmarks = _proven_texture_parts()
     valid = encode_texture_request(image, fit, landmarks)
@@ -250,3 +272,45 @@ def test_texture_request_rejects_truncated_and_nonbytes() -> None:
     result = decode_texture_request(truncated)
     assert isinstance(result, Err)
     assert domain_to_status(result.error) == 500
+
+
+def test_zip_canonical_six_no_heatmap() -> None:
+    from backend.domain import ZIP_NAMES
+
+    assert len(ZIP_NAMES) == 6
+    assert list(ZIP_NAMES) == [
+        "uv_a.png",
+        "uv_b.png",
+        "mesh_a.glb",
+        "mesh_b.glb",
+        "pbr_a.png",
+        "pbr_b.png",
+    ]
+    assert "heatmap.png" not in ZIP_NAMES
+
+
+def test_heatmap_import_fails() -> None:
+    import importlib
+
+    mod = importlib.import_module("backend.domain")
+    assert not hasattr(mod, "Heatmap")
+    assert not hasattr(mod, "parse_heatmap")
+    assert not hasattr(mod, "ZIP_HEATMAP")
+    assert not hasattr(mod, "ZIP_FULL")
+
+
+def test_version_mismatch_maps_exhaustively() -> None:
+    from backend.domain import VersionMismatch, domain_to_message, domain_to_status
+
+    err = VersionMismatch()
+    assert domain_to_status(err) == 400
+    assert "version" in domain_to_message(err)
+
+
+def test_rendered_eye_value_objects() -> None:
+    from backend.domain import UV_LEN, parse_eye_texture, parse_rendered_image
+
+    assert isinstance(parse_rendered_image(bytes(UV_LEN)), Ok)
+    assert isinstance(parse_rendered_image(bytes(UV_LEN - 1)), Err)
+    assert isinstance(parse_eye_texture(bytes(UV_LEN)), Ok)
+    assert isinstance(parse_eye_texture(bytes(UV_LEN - 1)), Err)

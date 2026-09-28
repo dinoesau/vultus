@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CONTRACT_VERSION,
   GNM_ISLANDS,
   MAX_IMAGE_BYTES,
   PROGRESS_ASSEMBLE,
@@ -12,12 +13,15 @@ import {
   TERMINAL_STATUSES,
   ZIP_MANIFEST,
   ZIP_NAMES,
+  checkContractVersion,
+  contractVersionToNumber,
   hasSupportedMagic,
   isJobStatus,
   isUuid,
   isValidProgress,
   isValidStage,
   jobIdToString,
+  parseContractVersion,
   parseJobId,
   parseJobStatus,
   parseProgress,
@@ -131,23 +135,53 @@ describe("contrato edge como fuente de verdad", () => {
     expect(PROGRESS_DONE).toBe(1.0);
   });
 
-  it("manifiesto zip versiona islas y PBR sin renombrar albedo", () => {
+  it("manifiesto zip-6 sin heatmap en orden canonico python", () => {
     expect([...GNM_ISLANDS]).toEqual([1, 2, 3, 4, 5]);
     expect(ZIP_MANIFEST.uvA).toBe("uv_a.png");
     expect(ZIP_MANIFEST.uvB).toBe("uv_b.png");
-    expect(ZIP_MANIFEST.heat).toBe("heatmap.png");
     expect(ZIP_MANIFEST.meshA).toBe("mesh_a.glb");
     expect(ZIP_MANIFEST.meshB).toBe("mesh_b.glb");
     expect(ZIP_MANIFEST.pbrA).toBe("pbr_a.png");
     expect(ZIP_MANIFEST.pbrB).toBe("pbr_b.png");
+    expect("heat" in ZIP_MANIFEST).toBe(false);
     expect([...ZIP_NAMES]).toEqual([
       "uv_a.png",
       "uv_b.png",
-      "heatmap.png",
       "mesh_a.glb",
       "mesh_b.glb",
       "pbr_a.png",
       "pbr_b.png",
     ]);
+    expect(ZIP_NAMES.length).toBe(6);
+    expect([...ZIP_NAMES].some((n) => n === "heatmap.png")).toBe(false);
+  });
+
+  it("contract_version brand con parse Result y mismatch ADT total", () => {
+    expect(contractVersionToNumber(CONTRACT_VERSION)).toBe(2);
+    const ok = parseContractVersion(2);
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(contractVersionToNumber(ok.value)).toBe(2);
+    expect(parseContractVersion(1).ok).toBe(true);
+    expect(parseContractVersion(0).ok).toBe(false);
+    expect(parseContractVersion(-1).ok).toBe(false);
+    expect(parseContractVersion(2.5).ok).toBe(false);
+    expect(parseContractVersion("2").ok).toBe(false);
+    expect(parseContractVersion(null).ok).toBe(false);
+    expect(parseContractVersion(undefined).ok).toBe(false);
+    expect(parseContractVersion(NaN).ok).toBe(false);
+    expect(() => parseContractVersion({})).not.toThrow();
+    const match = checkContractVersion(CONTRACT_VERSION);
+    expect(match.kind).toBe("Match");
+    const parsed1 = parseContractVersion(1);
+    if (parsed1.ok) {
+      const mismatch = checkContractVersion(parsed1.value);
+      expect(mismatch.kind).toBe("VersionMismatch");
+      if (mismatch.kind === "VersionMismatch") {
+        expect(contractVersionToNumber(mismatch.expected)).toBe(2);
+        expect(contractVersionToNumber(mismatch.received)).toBe(1);
+      }
+    } else {
+      expect.unreachable("parseContractVersion(1) debe ser Ok");
+    }
   });
 });

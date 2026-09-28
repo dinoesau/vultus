@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Smoke Fase 2 GNM + deploy vivo (UV + bake 3D): API + frontend + pipeline done + zip 5 archivos.
+# Smoke Fase 2 FLAME + deploy vivo (zip-6 + bake 3D): API + frontend + pipeline done + zip 6 archivos.
 # Patron: scripts/smoke-fase1.sh. Rapido por defecto (<70s por job); expiracion real
 # solo con SMOKE_TTL_TEST=1 (65s, afirma expired + result 404).
 # Expiracion logica sin espera larga esta cubierta por tests ManualClock TTL1.
@@ -49,7 +49,7 @@ def urlopen(url_or_req, timeout=None):
     return urllib.request.urlopen(url_or_req, timeout=timeout) if timeout else urllib.request.urlopen(url_or_req)
 
 PNG_MAGIC = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
-# Par distinto A/B para heatmap no trivial incluso con dobles: A ceros, B unos.
+# Par distinto A/B para zip no trivial incluso con dobles: A ceros, B unos.
 # Prod dorado real via GOLDEN_A/GOLDEN_B (JPEG LFW fuera de VC, ver fixtures/README).
 def load_or_default(path_env, default_bytes):
     p = os.environ.get(path_env, "")
@@ -167,7 +167,7 @@ if elapsed > slo:
 else:
     print(f"SLO warm ok: {elapsed:.1f}s < {slo:.0f}s")
 
-# Result zip Fase 2: 200 + application/zip + 3 PNG con magic + 2 GLB con magic + heatmap no trivial.
+# Result zip Fase 2: 200 + application/zip + 4 PNG con magic + 2 GLB FLAME con magic, sin heatmap.
 def fetch_result():
     with urlopen(f"{api}/v1/jobs/{job_id}/result") as r:
         assert r.status == 200, r.status
@@ -181,9 +181,9 @@ with open("/tmp/result.zip", "wb") as f:
     f.write(data)
 with zipfile.ZipFile("/tmp/result.zip") as z:
     names = set(z.namelist())
-    assert names == {"uv_a.png", "uv_b.png", "heatmap.png", "mesh_a.glb", "mesh_b.glb"}, names
+    assert names == {"uv_a.png", "uv_b.png", "mesh_a.glb", "mesh_b.glb", "pbr_a.png", "pbr_b.png"}, names
     blobs = {}
-    for n in ("uv_a.png", "uv_b.png", "heatmap.png"):
+    for n in ("uv_a.png", "uv_b.png", "pbr_a.png", "pbr_b.png"):
         blob = z.read(n)
         assert blob[:8] == PNG_MAGIC, f"{n} sin magic PNG"
         assert len(blob) > 1000, f"{n} demasiado chico ({len(blob)})"
@@ -197,17 +197,20 @@ with zipfile.ZipFile("/tmp/result.zip") as z:
         json_len = int.from_bytes(blob[12:16], "little")
         js = blob[20:20 + json_len]
         assert b"TEXCOORD_0" in js, f"{n} sin TEXCOORD_0"
-        assert b"baseColorTexture" in js, f"{n} sin textura ligada"
-        assert b'"count":4225' in js, f"{n} sin 4225"
-        assert b'"count":24576' in js, f"{n} sin 24576"
+        assert b"SkinPBR" in js, f"{n} sin material piel"
+        assert b"EyePBR" in js, f"{n} sin material ojos"
+        assert b"pbrMetallicRoughness" in js, f"{n} sin PBR real"
+        assert b"emissive" not in js, f"{n} con truco emisivo"
+        assert b'"count":5023' in js, f"{n} sin 5023 verts FLAME"
+        assert b'"count":24000' in js, f"{n} sin indices piel"
+        assert b'"count":5928' in js, f"{n} sin indices ojo"
         assert PNG_MAGIC in blob, f"{n} sin PNG embebido"
         blobs[n] = blob
-    # Heatmap no trivial: difiere de UVs y no es PNG solido (par A/B distinto).
-    assert blobs["heatmap.png"] != blobs["uv_a.png"], "heatmap identico a uv_a (trivial)"
+    # Zip no trivial: UVs y meshes difieren con par A/B distinto.
     assert blobs["uv_a.png"] != blobs["uv_b.png"], "uv_a identico a uv_b con A!=B (trivial)"
-    # Bake real: meshes difieren con A!=B (LUT no es identidad).
+    # Bake real: meshes difieren con A!=B (doble no es identidad).
     assert blobs["mesh_a.glb"] != blobs["mesh_b.glb"], "meshes identicos con A!=B (bake identidad)"
-print("result zip Fase 2 ok (3 PNG con magic + 2 GLB con magic, heatmap no trivial)")
+print("result zip Fase 2 ok (4 PNG con magic + 2 GLB FLAME con magic, sin heatmap)")
 
 # Segunda descarga tambien 200: multiple descargas permitidas.
 data2 = fetch_result()

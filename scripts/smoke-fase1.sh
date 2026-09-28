@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Smoke Fase 1 + deploy vivo (canonico UV): API + frontend + pipeline done + zip canonico.
+# Smoke Fase 1 + deploy vivo (zip-6 PNGs): API + frontend + pipeline done + zip canonico.
 # Patron: scripts/smoke-fase0.sh. Rapido por defecto (<70s por job); expiracion real
 # solo con SMOKE_TTL_TEST=1 (65s, afirma expired + result 404).
 # Expiracion logica sin espera larga esta cubierta por tests ManualClock TTL1.
@@ -49,7 +49,7 @@ def urlopen(url_or_req, timeout=None):
     return urllib.request.urlopen(url_or_req, timeout=timeout) if timeout else urllib.request.urlopen(url_or_req)
 
 PNG_MAGIC = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
-# Par distinto A/B para heatmap no trivial incluso con dobles: A ceros, B unos.
+# Par distinto A/B para zip no trivial incluso con dobles: A ceros, B unos.
 # Prod dorado real via GOLDEN_A/GOLDEN_B (JPEG LFW fuera de VC, ver fixtures/README).
 def load_or_default(path_env, default_bytes):
     p = os.environ.get(path_env, "")
@@ -167,7 +167,7 @@ if elapsed > slo:
 else:
     print(f"SLO warm ok: {elapsed:.1f}s < {slo:.0f}s")
 
-# Result zip canonico: 200 + application/zip + 3 PNG con magic + heatmap no trivial.
+# Result zip canonico: 200 + application/zip + 4 PNG con magic (uv_a/b + pbr_a/b, sin heatmap).
 def fetch_result():
     with urlopen(f"{api}/v1/jobs/{job_id}/result") as r:
         assert r.status == 200, r.status
@@ -180,17 +180,17 @@ with open("/tmp/result.zip", "wb") as f:
     f.write(data)
 with zipfile.ZipFile("/tmp/result.zip") as z:
     names = set(z.namelist())
-    assert names == {"uv_a.png", "uv_b.png", "heatmap.png"}, names
+    assert {"uv_a.png", "uv_b.png", "pbr_a.png", "pbr_b.png"} <= names, names
+    assert "heatmap.png" not in names, f"heatmap resucito: {names}"
     blobs = {}
-    for n in ("uv_a.png", "uv_b.png", "heatmap.png"):
+    for n in ("uv_a.png", "uv_b.png", "pbr_a.png", "pbr_b.png"):
         blob = z.read(n)
         assert blob[:8] == PNG_MAGIC, f"{n} sin magic PNG"
         assert len(blob) > 1000, f"{n} demasiado chico ({len(blob)})"
         blobs[n] = blob
-    # Heatmap no trivial: difiere de UVs y no es PNG solido (par A/B distinto).
-    assert blobs["heatmap.png"] != blobs["uv_a.png"], "heatmap identico a uv_a (trivial)"
+    # Zip no trivial: UVs difieren con par A/B distinto.
     assert blobs["uv_a.png"] != blobs["uv_b.png"], "uv_a identico a uv_b con A!=B (trivial)"
-print("result zip canonico ok (3 PNG con magic, heatmap no trivial)")
+print("result zip canonico ok (4 PNG con magic, sin heatmap)")
 
 # Segunda descarga tambien 200: multiple descargas permitidas.
 data2 = fetch_result()

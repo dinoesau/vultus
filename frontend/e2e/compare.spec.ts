@@ -39,7 +39,7 @@ test("compare upload 2 PNG returns queued job", async ({ page }) => {
   });
 });
 
-test("golden pair reaches done, slider responds and download starts", async ({
+test("golden pair reaches done, 4 panels plus 2 viewers, zero heatmap, download starts", async ({
   page,
 }) => {
   test.slow();
@@ -52,7 +52,8 @@ test("golden pair reaches done, slider responds and download starts", async ({
   await expect(page.locator("#status")).toContainText(/done/, {
     timeout: doneTimeout,
   });
-  for (const id of ["panel-uv-a", "panel-uv-b", "panel-heatmap"] as const) {
+  // Zip-6 sin heatmap (ADR-008): 4 paneles uv-a/uv-b/pbr-a/pbr-b con blob src.
+  for (const id of ["panel-uv-a", "panel-uv-b", "panel-pbr-a", "panel-pbr-b"] as const) {
     const img = page.getByTestId(id);
     await expect(img).toBeVisible();
     await expect(img).toHaveAttribute("src", /^blob:/);
@@ -60,22 +61,27 @@ test("golden pair reaches done, slider responds and download starts", async ({
       .poll(async () => img.evaluate((e) => (e as HTMLImageElement).naturalWidth))
       .toBeGreaterThan(0);
   }
-  await page.locator("#heatmap-opacity").evaluate((el) => {
-    const slider = el as HTMLInputElement;
-    slider.value = "20";
-    slider.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-  await expect(page.locator("#heatmap-opacity-value")).toContainText("20%");
-  await expect(page.getByTestId("panel-heatmap")).toHaveCSS("opacity", "0.2");
-  const viewer = page.getByTestId("viewer-3d");
-  await expect(viewer).toBeVisible();
-  await expect(page.locator("#viewer-3d-status")).toContainText(
-    /cara real|GLB parseado|meshes listos|mesh A cargado/,
-  );
-  // El loader debe parsear el GLB real: el canvas deja de ser fondo.
-  await expect(page.locator("#viewer-3d-status")).toContainText(/GLB parseado|mesh A cargado/);
-  const shot = await viewer.screenshot();
-  expect(shot.length).toBeGreaterThan(5000);
+  // Cero heatmap: ni panel ni slider sobreviven al corte (Wave 5).
+  await expect(page.getByTestId("panel-heatmap")).toHaveCount(0);
+  await expect(page.locator("#heatmap-opacity")).toHaveCount(0);
+  await expect(page.locator("#heatmap-opacity-value")).toHaveCount(0);
+  for (const id of ["viewer-3d-a", "viewer-3d-b"] as const) {
+    const viewer = page.getByTestId(id);
+    await expect(viewer).toBeVisible();
+  }
+  await expect(page.locator("#viewer-3d-status")).toContainText(/cara real lista/);
+  // El loader debe parsear los GLB reales con PBR: los canvas dejan de ser
+  // fondo. Gate estricto (Wave 6-fix): cada captura supera el umbral minimo
+  // de bytes (descarta canvas vacio o captura fallida) y las dos caras
+  // difieren entre si (varianza: dos triangulos sinteticos identicos darian
+  // bytes iguales y fallan; la evidencia de cara real vive en
+  // scripts/e2e-flame-real.py CHECK 7-ssim).
+  const MIN_CANVAS_PNG_BYTES = 1500;
+  const shotA = await page.getByTestId("viewer-3d-a").screenshot();
+  const shotB = await page.getByTestId("viewer-3d-b").screenshot();
+  expect(shotA.length).toBeGreaterThan(MIN_CANVAS_PNG_BYTES);
+  expect(shotB.length).toBeGreaterThan(MIN_CANVAS_PNG_BYTES);
+  expect(shotA.equals(shotB)).toBe(false);
   for (const id of ["download-mesh-a", "download-mesh-b"] as const) {
     const link = page.locator(`#${id}`);
     await expect(link).toBeVisible();

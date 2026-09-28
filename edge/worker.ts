@@ -15,7 +15,9 @@
  * distintas; el ciclo queued -> done vive en el DO.
  */
 import {
+  CONTRACT_VERSION,
   MAX_IMAGE_BYTES,
+  contractVersionToNumber,
   hasSupportedMagic,
   jobIdToString,
   parseJobId,
@@ -414,6 +416,7 @@ export default {
             queue: "ok",
             ttl_secs: ttlToNumber(ttl),
             ttl_error: "InvalidTtlSecs",
+            contract_version: contractVersionToNumber(CONTRACT_VERSION),
           },
           { headers: { ...CORS_HEADERS } },
         );
@@ -424,6 +427,7 @@ export default {
           gateway: "worker",
           queue: "ok",
           ttl_secs: ttlToNumber(ttl),
+          contract_version: contractVersionToNumber(CONTRACT_VERSION),
         },
         { headers: { ...CORS_HEADERS } },
       );

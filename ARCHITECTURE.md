@@ -3,8 +3,9 @@
 > Estado objetivo sin Rust ni API Python (plan-single-gateway-ts): un solo dueno por seam.
 > TypeScript es fuente de verdad del contrato HTTP y dueno del gateway (`edge/worker.ts`, entrada dev `edge/worker.dev.ts`).
 > Python es dueno del runner local (`backend/local_runner.py`), el orquestador (`backend/pipeline_local.py`) y el assemble CPU (`backend/gnm_assemble.py`).
-> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `mypy --strict backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py`,
+> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `mypy --strict backend/domain.py backend/flame_fit.py backend/flame_texture.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py backend/gnm_assemble.py`,
 > `pytest backend/tests -q`, `npx vitest run edge/contract.test.ts`, pool suite `npx vitest run --config vitest.pool.config.ts` (desde `frontend/`).
+> Gate visual: `python3 scripts/e2e-flame-real.py` (margen + SSIM con pesos reales) y `bash scripts/modal-weights-sync.sh --check` (puente + cutover + backup).
 
 ## 1. Objetivo
 
@@ -43,12 +44,13 @@ No se testea Queues/R2 interno de Cloudflare.
 
 ### Seam 3 - Worker Contract
 
-`&ImageBytes + &Landmarks -> FitResult (253 coefs + camara) -> CompleteUv (UV_LEN) -> Heatmap (UV_LEN)` vía `MlSidecarClient { landmarks, fit, texture }` + `BaseUrl` + wire `FitRequest`/`TextureRequest` espejado en `pipeline_local.py` y `modal_app.py`.
+`&ImageBytes + &Landmarks -> FitResult (253 coefs + camara, DECA feed-forward) -> RenderedImage (UV_LEN, piel completa) + EyeTexture (ojos separados)` vía `MlSidecarClient { landmarks, fit, texture }` + `BaseUrl` + wire versionado `FitRequest`/`TextureRequest` v2 (`VERSION u8 + u32 BE len + body`) espejado en `pipeline_local.py` y `modal_app.py`.
 Cada worker es caja negra.
-Input imagen golden (`ImageBytes::parse`), output `UV_LEN = 512x512x3 = 786432` verificable.
+Input imagen golden (`ImageBytes::parse`), output `UV_LEN = 512x512x3 = 786432` verificable, cero `SKIN_SENTINEL = (255,0,255)` en mascara skin, `evidence >= 0.99`.
 No se mockean `fit` ni `texture` entre sí.
+`VersionMismatch` (400) para wire v1 o version desconocida; consumo exacto sin bytes sobrantes.
 
-No son seams: `coeff_distance`, `project_uv`, islas y PBR internos, `compute_heatmap`.
+No son seams: `flame_distance`, `displaced_positions`, particion piel/ojo y PBR internos.
 Se cubren indirectamente vía Seam 3.
 
 ## 4. Módulos
@@ -102,26 +104,27 @@ Deps compute local: `httpx/Pillow/numpy` (ver `backend/requirements-api.txt`).
 ### 4.3 workers
 
 Cada worker es módulo deep con una sola responsabilidad.
-`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|fit|texture` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FitResult`, `-> CompleteUv`).
-`Worker 4 CPU` (`assemble`, `heatmap`, `report`) vive en `backend/gnm_assemble.py` con firmas `build_personalized_glb`, `pbr_from_albedo` y `compute_heatmap` en `backend/gnm.py` (sin dep `torch/diffusers/mediapipe`).
-`backend/gnm_head.py` es modulo profundo tras el seam (loader `17821/35324/253/68`, 5 islas reales `skin/left_eye/right_eye/teeth/tongue`).
-Extractor versionado `scripts/extract_gnm_template.py` congela `backend/assets/gnm_template.bin`.
-Layout UV es v2 (fronteras filas `[149, 248, 309, 358]`).
-Sin pesos el doble local sigue; con `VULTUS_REAL_ML=1` el fallo es ruidoso (`FitFailed`).
+`Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|fit|texture` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FitResult`, `-> RenderedImage`).
+`fit` es DECA feed-forward (`backend/flame_fit.py`, determinista x2, deadline 10s, `Result` total sin `raise`).
+`texture` es completion FFHQ-UV 1024 (`backend/flame_texture.py`, `SKIN_SENTINEL` const en codigo, `evidence >= 0.99`, `concurrency_limit=1`).
+`Worker 4 CPU` (`assemble`) vive en `backend/gnm_assemble.py`: malla FLAME `VERT_COUNT = 5023`, ojos `[EYE_VERT_START:EYE_VERT_END) = [3931:5023)` (1092 verts) con material propio, 2 primitivas PBR real (`SkinPBR` + `EyePBR`, sin emisivo), `build_personalized_glb(fit, albedo) -> GnmMesh`, zip-6 via `build_result_zip` en `backend/gnm.py` (sin dep `torch/diffusers/mediapipe`).
+Loader GNM `17821/35324` se conserva solo hasta el cutover (ver ADR-008); el bake gris legacy (`gnm_texture.build_albedo`) falla ruidoso sin pesos, sin caller productivo.
+Sin pesos los dobles locales siguen (gateway en verde); con `VULTUS_REAL_ML=1` el fallo es ruidoso (`FitFailed`/`MlFailed`).
 Reciben tipos ya probados, escriben a `/tmp/{job_id}` en tmpfs, retornan tipos con `UV_LEN`.
 No conocen HTTP ni frontend.
 
 ### 4.4 models
 
 Adaptadores a librerías externas.
-Python: sidecar `backend/modal_app.py` (`/ml/landmarks|fit|texture`, delegados a `backend/gnm_fit.py` y `backend/gnm_texture.py`) y assemble CPU `backend/gnm_assemble.py` (`build_personalized_glb`, `pbr_from_albedo`, `build_full_zip` de 7 nombres).
-Son los únicos lugares donde viven esas dependencias.
+Python: sidecar `backend/modal_app.py` (`/ml/landmarks|fit|texture`, delegados a `backend/flame_fit.py` y `backend/flame_texture.py`) y assemble CPU `backend/gnm_assemble.py` (`build_personalized_glb`, `build_result_zip` de 6 nombres).
+Son los únicos lugares donde viven esas dependencias (`torch/mediapipe` solo vía `modal_app.py` + `flame_*`; `diffusers` sigue pineado en `requirements.txt` pero ningun modulo lo importa: candidato a retirar junto a los pesos GNM).
 
 ### 4.5 frontend
 
 Astro 4 con React islands desplegado en `Cloudflare Pages` en prod (static, free, global CDN).
-Islas: `UploadDrop`, `ProgressBar`, `UVViewer`, `HeatmapViewer`, `ThreeViewer`.
+Islas: subida + progreso, `UvViewers` (paneles `uv_a/uv_b` + `pbr_a/pbr_b`, sin heatmap ni slider), `ThreeViewer` (estudio blanco, 2 canvas `viewer-3d-a/b`, conserva materiales GLB + fallback PBR).
 Comunicación solo vía Seam 1 (en prod `Pages -> Workers` via `wrangler.toml` routing).
+`/health` expone `contract_version` (v2 = zip-6); el frontend valida y muestra `actualiza` ante mismatch, cero panel roto.
 
 ## 5. Dependencias
 
@@ -131,9 +134,9 @@ graph LR
     API --> CORE
     CORE --> W1 & W2 & W3 & W4
     W1 --> M1[mediapipe]
-    W2 --> M2[3DDFA_V3/DECA]
-    W3 --> M3[diffusers SD1.5 + CLIP]
-    W4 --> M4[GNM]
+    W2 --> M2[DECA feed-forward]
+    W3 --> M3[FFHQ-UV completion]
+    W4 --> M4[FLAME]
 ```
 
 Dirección siempre hacia adentro.
@@ -202,9 +205,10 @@ Se pierde cache y re-descarga desde servidor, pero se gana privacidad y simplici
 
 ### ADR-006 Parse-don-t-validate con tipos probados + goldens
 
-**Decisión:** Dominio con tipos probados que prueban en `parse` (`ImageBytes`, `JobId` trim, `R2Key`, `Landmarks` 478 JSON, `GnmCoeffs` 253 finitos, `CameraParams` 12 finitos, `UvRegion` 1-5, `CompleteUv` / `Heatmap` con `UV_LEN`, `BaseUrl`, `TtlSecs`) y ciclo con estados separados.
-Errores taxonómicos `CoreError` (+ `ImageError`, `BaseUrlError`, `MlError`, `QueueError`, `InvalidCoeffs`, `InvalidCamera`, `FitFailed`) con mapeo fijo `AppError -> 400|404|500`.
-Goldens literales a mano (`Progress`, `TtlSecs`, `R2Key`, heatmap `[6,10]`, albedo `[116, 118, 70, 200]`), relojes manuales sin sleeps.
+**Decisión:** Dominio con tipos probados que prueban en `parse` (`ImageBytes`, `JobId` trim, `R2Key`, `Landmarks` 478 JSON, `GnmCoeffs` 253 finitos, `CameraParams` 12 finitos, `UvRegion` 1-5, `CompleteUv`/`RenderedImage`/`EyeTexture` con `UV_LEN`, `BaseUrl`, `TtlSecs`, `ContractVersion`) y ciclo con estados separados.
+Errores taxonómicos `CoreError` (+ `ImageError`, `BaseUrlError`, `MlError`, `QueueError`, `InvalidCoeffs`, `InvalidCamera`, `FitFailed`, `VersionMismatch`) con mapeo fijo `AppError -> 400|404|500`.
+Goldens literales a mano (`Progress`, `TtlSecs`, `R2Key`, zip-6 sin heatmap, `SKIN_SENTINEL` ausente + `evidence >= 0.99`, eye slice 1092, GLB magic FLAME 5023), relojes manuales sin sleeps.
+`Heatmap`/`parse_heatmap`/`compute_heatmap` retirados (ADR-008); `CompleteUv` sobrevive solo como parsing legacy del wire, el seam produce `RenderedImage`.
 
 **Contexto:** El diff mostraba `Vec<u8>` y `&str` sueltos cruzando seams (`enqueue(a,b)`, `stage: &str`, `job.status String`, `base_url String`).
 Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
@@ -225,6 +229,21 @@ Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
 - `POST /v1/compare` hace `/init` en el DO; `GET` hace `/status`; `WS` va al DO directo.
 - DO sin `init` responde `404`, tras `alarm` 2xTTL purga y vuelve a `404`. Paridad con `Store::purge_expired`.
 - `wrangler dev` sin binding sigue con fallback `queued` solo para smoke local, nunca en prod.
+
+### ADR-008 Corte heatmap y gris honesto, Seam 3 sin Heatmap (revoca ADR-002)
+
+**Decisión (plan-flame-deca-render Wave 1):** se abandona el gris honesto y el heatmap en el mismo corte. La textura se completa hasta piel total, los ojos van a textura separada, el material pasa a PBR real y el visor a estudio blanco. Revoca ADR-002 (ver `ARCHITECTURE.md:152`, Fit GNM directo con `Compare = distancia de coefs + diferencia de albedo; el heatmap sobrevive`): el heatmap ya no sobrevive.
+
+**Contexto:** el comparador producía UV con gris medio en ocluidas y un heatmap que nadie quiere mirar. El atlas disperso nunca se vería como la referencia por más que se arregle el particionado. Mantener ambos a medias cuesta más que quitarlos.
+
+**Redefinición de Seam 3:** `&ImageBytes + &Landmarks -> FitResult (253 coefs + camara) -> RenderedImage (UV_LEN, piel completa) + EyeTexture (UV_LEN, ojos separados)` vía `MlSidecarClient { landmarks, fit, texture }`. `compute_heatmap` deja de ser parte del seam y se retira; `CompareResult` pierde `heatmap`; el zip canónico pasa a 6 piezas sin `heatmap.png`. Lo local conserva gateway en verde con dobles; lo visual solo se valida en Modal con el zip real.
+
+**Disclosure pericial:** la completion es visual, distinta de evidencia. El gris honesto marcaba oclusión como ausencia de dato; la piel completada alucina plausibilidad y no debe leerse como medición forense. El perito debe saber que el corte fue intencional.
+
+**Consecuencias:**
+- `backend/domain.py` es dueño del zip-6 sin `Heatmap`; `edge/contract.ts` espeja los 6 nombres.
+- `VersionMismatch` es variante frozen con mapeo exhaustivo para codec versionado (Wave 2).
+- Borrado seguro posterior: puente nuevo, cutover de código, y solo entonces borrado de pesos GNM del Volume, nunca antes.
 
 ## 7. Data Flow
 
@@ -254,7 +273,8 @@ Métricas expuestas para `OpenTelemetry`.
 
 Seam 1 con suite pool en runtime real (6 tests) + WS real.
 Seam 2 con sink en memoria (`report` ordenado, `complete`, `fail`).
-Seam 3 con golden `UV_LEN` (`[10,200] vs [4,210] -> [6,10]`, `GLB magic` `17821/35324` layout v2) y `Landmarks` 478.
+Seam 3 con golden `UV_LEN` (fit v2 `VERSION + u32 BE`, `GLB magic` FLAME `5023` verts + `SkinPBR`/`EyePBR` sin emisivo, eye slice `1092`, cero sentinel) + `Landmarks` 478 rechaza stubs.
 Goldens literales y tipos probados en el borde.
 Nada de unit tests al pipeline interno.
+Gate visual: `python3 scripts/e2e-flame-real.py` (margen estricto + SSIM misma>distinta, landmarks reales, fotos congeladas por sha256) y `bash scripts/modal-weights-sync.sh --check` (puente + cutover + backup por contenido).
 Ver `CONTEXT.md` y `PIPELINE.md` para contratos.

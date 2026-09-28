@@ -617,17 +617,20 @@ def _sample_atlas(
 def bake_1024(
     image: ImageBytes, fit: FitResult, landmarks: Landmarks | None = None
 ) -> tuple[NDArray[np.uint8], float, float, BakeCounters]:
-    """Hornea el atlas 1024 + evidencia + tiempo + contadores. Sin pesos: gris completo.
+    """Hornea el atlas 1024 + evidencia + tiempo + contadores.
 
     `landmarks` alimenta solo la compuerta `in_oval` (hull + margen); None la
     omite (compat con callers viejos y fixtures sin landmarks).
+
+    Sin pesos GNM el bake es loud (RuntimeError con causa), nunca gris
+    silencioso: el gris honesto se abandono por ADR-008, la completion
+    visual vive en `flame_texture`. Sin caller productivo (solo tests).
     """
     start = time.perf_counter()
     try:
         head = load_gnm_head()
-    except RuntimeError:
-        gray = np.full((ATLAS_SIZE, ATLAS_SIZE, 3), NO_DATA, dtype=np.uint8)
-        return gray, 0.0, (time.perf_counter() - start) * 1000.0, _empty_counters()
+    except RuntimeError as exc:
+        raise RuntimeError(f"gnm bake requires weights: {exc}") from exc
     photo = _photo_rgb(image)
     mesh = np.asarray(eval_mesh(fit.coeffs), dtype=np.float64)
     normals = np.asarray(vertex_normals(mesh), dtype=np.float64)
@@ -683,61 +686,6 @@ def bake_1024(
         bake_ms,
     )
     return atlas, float(evidence), bake_ms, counters
-
-
-def project_texture(image: ImageBytes, fit: FitResult) -> Ok[CompleteUv] | Err[DomainError]:
-    try:
-        del fit  # la proyeccion foto->UV v1 no usa la geometria; el warp TPS (Fase 2) si lo hara
-        raw = image.as_bytes()
-        try:
-            from PIL import Image as _Image
-
-            img = _Image.open(io.BytesIO(raw)).convert("RGB").resize((UV_WIDTH, UV_HEIGHT))
-            out = img.tobytes()
-        except Exception:  # noqa: BLE001 - fallback documentado para stubs no-PIL
-            # Fallback para stubs sinteticos de tests (magic PNG + bytes de
-            # marcador, no decodificables por PIL): color solido derivado del
-            # ultimo byte (los primeros son el magic, identicos entre stubs).
-            # Suave (diff 0) y determinista; deriva de la foto por marcador.
-            v = raw[-1] if len(raw) else 0
-            out = bytes([v]) * UV_LEN
-        if len(out) != UV_LEN:
-            return Err(MlFailed(detail=MlDecode(details=f"project len {len(out)} != {UV_LEN}")))
-        parsed = parse_complete_uv(out)
-        if isinstance(parsed, Err):
-            return parsed
-        return parsed
-    except Exception as exc:  # noqa: BLE001 - la proyeccion nunca tumba sin causa
-        return Err(MlFailed(detail=MlDecode(details=f"project failed: {exc}")))
-
-
-def warp_with_landmarks(albedo: CompleteUv, landmarks: Landmarks) -> Ok[CompleteUv] | Err[DomainError]:
-    try:
-        _ = landmarks  # reservado para el warp TPS real (Fase 2); v1 es identidad
-        parsed = parse_complete_uv(bytes(albedo.as_bytes()))
-        if isinstance(parsed, Err):
-            return parsed
-        return parsed
-    except Exception as exc:  # noqa: BLE001
-        return Err(MlFailed(detail=MlDecode(details=f"warp failed: {exc}")))
-
-
-def inpaint_occluded(albedo: CompleteUv, landmarks: Landmarks) -> Ok[CompleteUv] | Err[DomainError]:
-    """Identidad hasta que la oclusion geometrica real aterrice (Fase 2).
-
-    La mascara hash anterior tocaba 1/8 texels con periodo 32B y dejaba un
-    peine visible sobre fotos reales; ningun gate byte-nivel lo detectaba.
-    Se prohibe reintroducir muestreo por hash aqui: la oclusion debe derivar
-    de geometria (normales, visibilidad) cuando se implemente.
-    """
-    try:
-        _ = landmarks  # reservado para la oclusion geometrica (Fase 2)
-        parsed = parse_complete_uv(bytes(albedo.as_bytes()))
-        if isinstance(parsed, Err):
-            return parsed
-        return parsed
-    except Exception as exc:  # noqa: BLE001
-        return Err(MlFailed(detail=MlDecode(details=f"inpaint failed: {exc}")))
 
 
 def build_albedo(

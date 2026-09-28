@@ -1,7 +1,8 @@
 ---
-// Isla presentacional: progreso + visores UV/heatmap + descarga.
-// Sin lógica de red aquí; el wiring vive en el script de index.astro
-// que importa los helpers de compare-client.ts.
+ // Isla presentacional: progreso + visores UV/PBR + descarga.
+ // Sin lógica de red aquí; el wiring vive en el script de index.astro
+ // que importa los helpers de compare-client.ts.
+ // Zip-6 v2: 2 UV canónicos + 2 PBR de piel; sin panel de diferencias.
 ---
 
 <section aria-label="Progreso del análisis" class="panel">
@@ -17,7 +18,7 @@
   <p id="stage-text" role="status">sin job</p>
 </section>
 
-<section aria-label="Visores UV y heatmap" class="panel">
+<section aria-label="Visores UV y PBR" class="panel">
   <h2>Visores</h2>
   <div class="viewers">
     <figure>
@@ -39,35 +40,24 @@
       <p class="placeholder">pendiente de resultado</p>
     </figure>
     <figure>
-      <figcaption>Fusión forense</figcaption>
-      {
-        /* Por qué overlay y no solo heatmap suelto: el heatmap |a-b| sin
-           referencia anatómica pierde contexto espacial. Superponerlo sobre
-           UV A con opacidad ajustable conserva ambas lecturas. */
-      }
-      <div class="fusion">
-        <img id="fusion-base" alt="" aria-hidden="true" hidden />
-        <img
-          data-testid="panel-heatmap"
-          alt="Heatmap de diferencias superpuesto sobre UV A"
-          hidden
-        />
-      </div>
+      <figcaption>PBR A piel</figcaption>
+      <img
+        data-testid="panel-pbr-a"
+        alt="Textura PBR de piel de la cara A"
+        hidden
+      />
+      <p class="placeholder">pendiente de resultado</p>
+    </figure>
+    <figure>
+      <figcaption>PBR B piel</figcaption>
+      <img
+        data-testid="panel-pbr-b"
+        alt="Textura PBR de piel de la cara B"
+        hidden
+      />
       <p class="placeholder">pendiente de resultado</p>
     </figure>
   </div>
-  <label class="opacity" for="heatmap-opacity">
-    Opacidad heatmap
-    <input
-      id="heatmap-opacity"
-      type="range"
-      min="0"
-      max="100"
-      value="65"
-      aria-label="Opacidad del heatmap sobre UV A"
-    />
-    <output id="heatmap-opacity-value" for="heatmap-opacity">65%</output>
-  </label>
   <p class="download-row">
     <a id="download-zip" hidden download="">Descargar zip</a>
   </p>
@@ -105,10 +95,15 @@
   }
   .viewers {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 1rem;
   }
-  @media (max-width: 760px) {
+  @media (max-width: 960px) {
+    .viewers {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+  @media (max-width: 560px) {
     .viewers {
       grid-template-columns: 1fr;
     }
@@ -131,33 +126,16 @@
     width: 100%;
     aspect-ratio: 1;
     object-fit: contain;
-    background: #0c141d;
+    background: #ffffff;
+  }
+  figure img[hidden] {
+    display: none;
   }
   .placeholder {
     font-size: 0.85rem;
     color: #6b7684;
     padding: 0.5rem 0.75rem;
     margin: 0;
-  }
-  .fusion {
-    position: relative;
-  }
-  .fusion img[data-testid="panel-heatmap"] {
-    position: absolute;
-    inset: 0;
-    opacity: 0.65;
-  }
-  .opacity {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-top: 1rem;
-    font-size: 0.9rem;
-    font-weight: 600;
-  }
-  .opacity input[type="range"] {
-    flex: 1;
-    accent-color: #c2410c;
   }
   .download-row {
     margin: 1rem 0 0;

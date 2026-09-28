@@ -69,17 +69,19 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
     <script>
       import {
         API_PATHS,
+        contractVersionMessage,
         errorDetail,
-        extractResultImages,
-        extractResultMeshes,
         isRetryableResultStatus,
         isTerminal,
         parseCompareResponse,
+        parseHealthContractVersion,
         parseJobEvent,
         parsePollStatus,
         statusMessage,
         toWsUrl,
+        tryExtractViewerBlobs,
       } from "../components/compare-client.ts";
+      import type { HealthVersionError, Result } from "../components/compare-client.ts";
 
       const api = document.body.dataset.apiUrl ?? "http://localhost:8000";
       const form = document.getElementById("compare") as HTMLFormElement;
@@ -88,8 +90,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       const stageEl = document.getElementById("stage-text") as HTMLElement;
       const downloadEl = document.getElementById("download-zip") as HTMLAnchorElement;
       const errorEl = document.getElementById("result-error") as HTMLElement;
-      const slider = document.getElementById("heatmap-opacity") as HTMLInputElement;
-      const sliderOut = document.getElementById("heatmap-opacity-value") as HTMLOutputElement;
 
       // Blob URL del zip en memoria: permite re-descarga local sin volver
       // al servidor (cumple stateless + TTL: tras 60s el servidor olvida).
@@ -123,6 +123,38 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         errorEl.textContent = msg;
       }
 
+      // Salud del contrato: mismatch o ilegible muestra actualiza, nunca panel roto.
+      // Solo el fallo de red al pedir /health es fail-open con Ok(true): el POST
+      // posterior mostrara su error real. Un JSON roto es InvalidHealthVersion y
+      // bloquea con mensaje actualiza (nunca fail-open silencioso).
+      async function checkContractHealth(): Promise<Result<boolean, HealthVersionError>> {
+        let res: Response;
+        try {
+          res = await fetch(`${api}/health`);
+        } catch {
+          // Network fail-open: sin red el POST ya mostrara su error.
+          return { ok: true, value: true };
+        }
+        let raw: unknown;
+        try {
+          raw = await res.json();
+        } catch {
+          const error = { kind: "InvalidHealthVersion" } as const;
+          const msg = contractVersionMessage(error);
+          showError(msg);
+          statusEl.textContent = msg;
+          stageEl.textContent = msg;
+          return { ok: false, error };
+        }
+        const parsed = parseHealthContractVersion(raw);
+        if (parsed.ok) return { ok: true, value: true };
+        const msg = contractVersionMessage(parsed.error);
+        showError(msg);
+        statusEl.textContent = msg;
+        stageEl.textContent = msg;
+        return { ok: false, error: parsed.error };
+      }
+
       function clearResult(): void {
         if (zipUrl) URL.revokeObjectURL(zipUrl);
         for (const u of imgUrls) URL.revokeObjectURL(u);
@@ -134,7 +166,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         errorEl.hidden = true;
         errorEl.textContent = "";
         for (const img of document.querySelectorAll<HTMLImageElement>(
-          'img[data-testid="panel-uv-a"], img[data-testid="panel-uv-b"], img[data-testid="panel-heatmap"], #fusion-base',
+          'img[data-testid="panel-uv-a"], img[data-testid="panel-uv-b"], img[data-testid="panel-pbr-a"], img[data-testid="panel-pbr-b"]',
         )) {
           img.hidden = true;
           img.removeAttribute("src");
@@ -177,22 +209,20 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         downloadEl.download = `result-${jobId}.zip`;
         downloadEl.textContent = `Descargar zip (result-${jobId}.zip)`;
         downloadEl.hidden = false;
-        const { uvA, uvB, heat } = await extractResultImages(zipBlob);
+        const parsed = await tryExtractViewerBlobs(zipBlob);
         if (myGen !== gen) return;
+        if (!parsed.ok) {
+          showError(`job ${jobId}: zip sin piezas (falta ${parsed.error.name}).`);
+          return;
+        }
+        const { uvA, uvB, pbrA, pbrB, meshA, meshB } = parsed.value;
         setImage('[data-testid="panel-uv-a"]', uvA);
         setImage('[data-testid="panel-uv-b"]', uvB);
-        setImage('[data-testid="panel-heatmap"]', heat);
-        setImage("#fusion-base", uvA);
-        try {
-          const { meshA, meshB } = await extractResultMeshes(zipBlob);
-          if (myGen !== gen) return;
-          window.dispatchEvent(
-            new CustomEvent("vultus:meshes", { detail: { meshA, meshB } }),
-          );
-        } catch (err) {
-          const why = err instanceof Error ? err.message : String(err);
-          showError(`job ${jobId}: zip sin meshes (${why}).`);
-        }
+        setImage('[data-testid="panel-pbr-a"]', pbrA);
+        setImage('[data-testid="panel-pbr-b"]', pbrB);
+        window.dispatchEvent(
+          new CustomEvent("vultus:meshes", { detail: { meshA, meshB, pbrA, pbrB } }),
+        );
         stageEl.textContent = `job ${jobId}: listo. Zip guardado en memoria para re-descarga local.`;
         statusEl.textContent = `job ${jobId}: done (zip en memoria)`;
         setProgress(100);
@@ -203,6 +233,11 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       // 409 = not-yet-done (prod vivo), 404 = zip aun no visible o job purgado.
       async function fetchResult(jobId: string, myGen: number, attempt = 0): Promise<void> {
         if (myGen !== gen) return;
+        if (attempt === 0) {
+          const healthy = await checkContractHealth();
+          if (!healthy.ok) return;
+          if (myGen !== gen) return;
+        }
         let res: Response;
         try {
           res = await fetch(`${api}${API_PATHS.result(jobId)}`);
@@ -335,14 +370,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         socket.addEventListener("close", onDrop);
       }
 
-      slider.addEventListener("input", () => {
-        const overlay = document.querySelector<HTMLImageElement>(
-          'img[data-testid="panel-heatmap"]',
-        );
-        if (overlay) overlay.style.opacity = String(Number(slider.value) / 100);
-        sliderOut.textContent = `${slider.value}%`;
-      });
-
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         lastFd = new FormData(form);
@@ -358,6 +385,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         statusEl.textContent = "enviando...";
         stageEl.textContent = "enviando...";
         setProgress(0);
+        const healthy = await checkContractHealth();
+        if (!healthy.ok) return;
+        if (myGen !== gen) return;
         const res = await fetch(`${api}${API_PATHS.compare}`, { method: "POST", body: fd });
         let rawBody: unknown;
         try {

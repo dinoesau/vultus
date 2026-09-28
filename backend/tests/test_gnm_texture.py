@@ -10,15 +10,11 @@ import numpy as np
 from backend.domain import UV_LEN, Err, Ok, parse_image_bytes, parse_landmarks
 from backend.gnm_fit import fit_gnm
 from backend.gnm_texture import (
-    ATLAS_SIZE,
     NO_DATA,
     BakeCounters,
     _sample_atlas,
     bake_1024,
     build_albedo,
-    inpaint_occluded,
-    project_texture,
-    warp_with_landmarks,
 )
 
 
@@ -483,27 +479,14 @@ def test_micro_occluded_layer_stays_gray() -> None:
     assert list(atlas[2, 1]) == [5, 5, 5]
 
 
-def test_build_albedo_sin_pesos_es_gris_honesto() -> None:
-    try:
-        from backend.gnm_head import load_gnm_head
+def test_bake_sin_pesos_es_loud_no_gris() -> None:
+    """Sin pesos el bake GNM legacy es loud, nunca gris silencioso (ADR-008).
 
-        load_gnm_head()
-        has_weights = True
-    except RuntimeError:
-        has_weights = False
-    if has_weights:
-        import pytest
+    Gris honesto abandonado: sin caller productivo (solo tests), el fallback
+    gris se borro. La completion visual vive en `flame_texture`.
+    """
+    import pytest as _pytest
 
-        pytest.skip("con pesos el bake muestrea de verdad; este golden es solo CI sin pesos")
-    out = build_albedo(_image(0xA1), _fit(), _landmarks())
-    assert isinstance(out, Ok)
-    raw = out.value.as_bytes()
-    assert len(raw) == UV_LEN
-    assert list(raw[:3]) == [128, 128, 128]
-    assert set(raw) == {128}
-
-
-def test_bake_sin_pesos_gris_completo() -> None:
     try:
         from backend.gnm_head import load_gnm_head
 
@@ -515,10 +498,8 @@ def test_bake_sin_pesos_gris_completo() -> None:
         import pytest
 
         pytest.skip("solo CI sin pesos")
-    atlas, evidence, _, _ = bake_1024(_image(0xA1), _fit())
-    assert atlas.shape == (ATLAS_SIZE, ATLAS_SIZE, 3)
-    assert evidence == 0.0
-    assert bool((atlas == 128).all())
+    with _pytest.raises(RuntimeError, match="requires weights"):
+        bake_1024(_image(0xA1), _fit())
 
 
 def test_albedo_derives_from_real_photo_not_hallucinated() -> None:
@@ -542,47 +523,332 @@ def test_albedo_derives_from_real_photo_not_hallucinated() -> None:
     assert a.value.as_bytes() != b.value.as_bytes()
 
 
-def test_inpaint_is_identity_never_adds_comb() -> None:
-    """Regresion del peine de prod: el inpaint no toca ningun byte.
+def test_garbage_lengths_rejected_at_parse() -> None:
+    assert isinstance(parse_image_bytes(bytes([1, 2, 3])), Err)
 
-    El hash anterior corrompia 1/8 texels con periodo 32B y ningun gate lo
-    veia porque los stubs solidos son punto fijo del promediado. Por eso el
-    input es estructurado (gradiente + alterno): cualquier muestreo parcial
-    dejaria diff != 0 o periodicidad a lag 32.
-    """
-    from backend.domain import parse_complete_uv
 
+# --- Wave 3 Step 4: textura FFHQ-UV sin gris (flame_texture) ---
+# Seam run_pair+sink preferida (ver test_pipeline.py); aqui unidad del bake:
+# double/fixture da albedo sin SKIN_SENTINEL, bytes-identicos-x2.
+
+
+def _flame_fit_value():  # type: ignore[no-untyped-def]
+    from backend.flame_fit import fit_flame
+
+    fit = fit_flame(_image(0xA1), _landmarks())
+    assert isinstance(fit, Ok)
+    return fit.value
+
+
+def test_flame_bake_deterministic_bytes_identical_x2() -> None:
+    from backend.flame_texture import bake_flame
+
+    fit = _flame_fit_value()
     landmarks = _landmarks()
-    structured = bytes((i * 7 + (i // 3) * 13) % 256 for i in range(UV_LEN))
-    parsed = parse_complete_uv(structured)
-    assert isinstance(parsed, Ok)
-    inpainted = inpaint_occluded(parsed.value, landmarks)
-    assert isinstance(inpainted, Ok)
-    assert inpainted.value.as_bytes() == structured
-
-
-def test_warp_is_deterministic() -> None:
-    fit = _fit()
-    landmarks = _landmarks()
-    projected = project_texture(_image(0xA1), fit)
-    assert isinstance(projected, Ok)
-    first = warp_with_landmarks(projected.value, landmarks)
-    second = warp_with_landmarks(projected.value, landmarks)
+    first = bake_flame(_image(0xA1), fit, landmarks)
+    second = bake_flame(_image(0xA1), fit, landmarks)
     assert isinstance(first, Ok)
     assert isinstance(second, Ok)
     assert first.value.as_bytes() == second.value.as_bytes()
+    assert len(first.value.as_bytes()) == UV_LEN
 
 
-def test_warp_is_identity_until_tps_lands() -> None:
-    fit = _fit()
+def test_flame_bake_zero_sentinel_in_skin() -> None:
+    from backend.flame_texture import SKIN_SENTINEL, bake_flame, count_sentinel
+
+    fit = _flame_fit_value()
+    out = bake_flame(_image(0xA1), fit, _landmarks())
+    assert isinstance(out, Ok)
+    raw = out.value.as_bytes()
+    assert count_sentinel(raw) == 0
+    # Barrido independiente: ningun triple es el magenta fuera de gama.
+    sr, sg, sb = SKIN_SENTINEL
+    for i in range(0, len(raw), 3):
+        assert not (raw[i] == sr and raw[i + 1] == sg and raw[i + 2] == sb)
+
+
+def test_flame_bake_evidence_over_threshold() -> None:
+    from backend.flame_texture import EVIDENCE_MIN, bake_flame, texture_evidence
+
+    fit = _flame_fit_value()
+    out = bake_flame(_image(0xA1), fit, _landmarks())
+    assert isinstance(out, Ok)
+    evidence = texture_evidence(out.value.as_bytes())
+    assert evidence >= EVIDENCE_MIN
+    assert evidence > 0.0
+
+
+def test_flame_bake_differs_per_identity() -> None:
+    from backend.flame_texture import bake_flame
+
+    fit = _flame_fit_value()
     landmarks = _landmarks()
-    projected = project_texture(_image(0xA1), fit)
-    assert isinstance(projected, Ok)
-    warped = warp_with_landmarks(projected.value, landmarks)
-    assert isinstance(warped, Ok)
-    assert warped.value.as_bytes() == projected.value.as_bytes()
+    a = bake_flame(_image(0xA1), fit, landmarks)
+    b = bake_flame(_image(0xB2), fit, landmarks)
+    assert isinstance(a, Ok)
+    assert isinstance(b, Ok)
+    assert a.value.as_bytes() != b.value.as_bytes()
 
 
-def test_garbage_lengths_rejected_at_parse() -> None:
-    assert isinstance(project_texture(_image(0xA1), _fit()), Ok)
-    assert isinstance(parse_image_bytes(bytes([1, 2, 3])), Err)
+def test_flame_bake_request_bad_payload_fails_loudly() -> None:
+    from backend.flame_texture import bake_flame_from_request
+
+    assert isinstance(bake_flame_from_request(b"\x00\x01"), Err)
+    assert isinstance(bake_flame_from_request(b""), Err)
+
+
+def test_flame_bake_request_v2_roundtrip_ok() -> None:
+    from backend.flame_fit import fit_flame
+    from backend.flame_texture import bake_flame_from_request
+    from backend.pipeline_local import encode_texture_request
+
+    fit_res = fit_flame(_image(0xA1), _landmarks())
+    assert isinstance(fit_res, Ok)
+    blob = encode_texture_request(_image(0xA1), fit_res.value, _landmarks())
+    assert isinstance(bake_flame_from_request(blob), Ok)
+
+
+def test_flame_bake_real_required_without_weights_fails_loudly(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from backend.domain import domain_to_status
+    from backend.flame_texture import bake_flame
+
+    # Fit valido antes de forzar REAL=1 (fit_flame tambien falla loud con REAL=1 sin pesos).
+    fit = _flame_fit_value()
+    landmarks = _landmarks()
+    image = _image(0xA1)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("VULTUS_REAL_ML", "1")
+    monkeypatch.setenv("FFHQ_UV_DIR", str(empty))
+    result = bake_flame(image, fit, landmarks)
+    assert isinstance(result, Err)
+    assert domain_to_status(result.error) == 500
+
+
+def test_flame_determinism_flags_and_fallback_diff() -> None:
+    from backend.flame_texture import (
+        bake_flame,
+        ensure_deterministic_texture,
+        max_abs_diff,
+    )
+
+    # Sin torch el ensure es no-op total; con torch aplica flags sin tumbar.
+    ensure_deterministic_texture()
+    fit = _flame_fit_value()
+    a = bake_flame(_image(0xA1), fit, _landmarks())
+    b = bake_flame(_image(0xA1), fit, _landmarks())
+    assert isinstance(a, Ok)
+    assert isinstance(b, Ok)
+    assert max_abs_diff(a.value.as_bytes(), b.value.as_bytes()) == 0
+    assert max_abs_diff(bytes([0, 10, 20]), bytes([1, 12, 19])) == 2
+
+
+# --- Wave 6-fix Lane A: vectores reales (completion FFHQ-UV) vs dobles ---
+# Dobles (sin VULTUS_REAL_ML/LANDMARKS_REAL): solo propiedades
+# deterministicas (x2 identico, cero sentinel, evidence>=MIN, s_self==1.0).
+# Reales (ambos flags + puente canonico + triple LFW + MediaPipe):
+# albedo de la foto con SSIM(misma)>SSIM(distinta) y ojos en bake
+# separado con el mapa real (pbr != uv a nivel de modulo).
+# Sin flags o sin assets los tests reales hacen skip con motivo; el gate
+# prod (scripts/e2e-flame-real.py, Lane B) los exige en verde.
+
+
+def _require_real_texture_vectors(monkeypatch):  # type: ignore[no-untyped-def]
+    """Activa el puente FFHQ-UV y devuelve el triple LFW, o skip con motivo."""
+    import os as _os
+    from pathlib import Path as _Path
+
+    if _os.environ.get("VULTUS_REAL_ML") != "1" or _os.environ.get("LANDMARKS_REAL") != "1":
+        import pytest
+
+        pytest.skip("vectores reales solo con VULTUS_REAL_ML=1 + LANDMARKS_REAL=1")
+    home = _Path.home()
+    monkeypatch.setenv("DECA_DIR", _os.environ.get("DECA_DIR", str(home / "Code" / "weights" / "deca")))
+    monkeypatch.setenv(
+        "FLAME_ASSETS_DIR",
+        _os.environ.get("FLAME_ASSETS_DIR", str(home / "Code" / "weights" / "flame")),
+    )
+    monkeypatch.setenv(
+        "FFHQ_UV_DIR",
+        _os.environ.get("FFHQ_UV_DIR", str(home / "Code" / "weights" / "ffhq-uv")),
+    )
+    from backend.flame_texture import weights_present
+
+    if not weights_present():
+        import pytest
+
+        pytest.skip("sin puente FFHQ-UV canonico no hay completion real local")
+    dataset = _Path("/Users/esau.martinez/Code/datasets/lfw")
+    paths = {
+        "A": dataset / "George_W_Bush" / "George_W_Bush_0001.jpg",
+        "B": dataset / "George_W_Bush" / "George_W_Bush_0002.jpg",
+        "C": dataset / "Aaron_Eckhart" / "Aaron_Eckhart_0001.jpg",
+    }
+    for tag, path in paths.items():
+        if not path.is_file():
+            import pytest as _pytest
+
+            _pytest.skip(f"sin triple LFW no hay vectores reales ({tag})")
+    return {tag: path.read_bytes() for tag, path in paths.items()}
+
+
+def _ssim_global(a: bytes, b: bytes) -> float:
+    """SSIM global self-contained (mirror del gate e2e, sin skimage)."""
+    import numpy as _np
+
+    if len(a) != len(b) or len(a) == 0:
+        return 0.0
+    x = _np.frombuffer(a, dtype=_np.uint8).astype(_np.float64)
+    y = _np.frombuffer(b, dtype=_np.uint8).astype(_np.float64)
+    c1 = (0.01 * 255.0) ** 2
+    c2 = (0.03 * 255.0) ** 2
+    mx = float(x.mean())
+    my = float(y.mean())
+    vx = float(((x - mx) ** 2).mean())
+    vy = float(((y - my) ** 2).mean())
+    cov = float(((x - mx) * (y - my)).mean())
+    num = (2.0 * mx * my + c1) * (2.0 * cov + c2)
+    den = (mx * mx + my * my + c1) * (vx + vy + c2)
+    if den == 0.0:
+        return 1.0 if num == 0.0 else 0.0
+    return num / den
+
+
+def test_flame_double_ssim_self_is_one() -> None:
+    """Propiedad doble: SSIM de un albedo consigo mismo es 1.0."""
+    from backend.flame_texture import bake_flame
+
+    fit = _flame_fit_value()
+    out = bake_flame(_image(0xA1), fit, _landmarks())
+    assert isinstance(out, Ok)
+    assert _ssim_global(out.value.as_bytes(), out.value.as_bytes()) == 1.0
+
+
+def test_flame_texture_junk_weights_not_real(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Junk files no habilitan el real: solo obj UV + mapa ocular."""
+    from backend.flame_texture import weights_present
+
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    (junk / "random.txt").write_text("junk")
+    monkeypatch.setenv("FFHQ_UV_DIR", str(junk))
+    assert weights_present() is False
+
+
+def test_flame_eye_bake_missing_weights_loud(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Ojos sin puente fallan loud 500, nunca sintetico."""
+    from backend.domain import domain_to_status
+    from backend.flame_texture import bake_eye_texture
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("FFHQ_UV_DIR", str(empty))
+    result = bake_eye_texture()
+    assert isinstance(result, Err)
+    assert domain_to_status(result.error) == 500
+
+
+def _real_fit_and_landmarks(raw: bytes):  # type: ignore[no-untyped-def]
+    """Fit real + landmarks reales sobre un JPEG del triple."""
+    import io as _io
+    import json as _json
+
+    try:
+        import mediapipe as _mp
+        from mediapipe.tasks.python import BaseOptions as _BaseOptions
+        from mediapipe.tasks.python import vision as _vision
+    except ImportError:
+        import pytest
+
+        pytest.skip("sin mediapipe no hay landmarks reales")
+    from pathlib import Path as _Path
+
+    import numpy as _np
+    from PIL import Image as _Image
+
+    from backend.flame_fit import fit_flame
+
+    task = _Path.home() / "Code" / "weights" / "mediapipe" / "face_landmarker.task"
+    if not task.is_file():
+        import pytest
+
+        pytest.skip("sin face_landmarker.task no hay landmarks reales")
+    parsed_img = parse_image_bytes(raw)
+    assert isinstance(parsed_img, Ok)
+    rgb = _np.asarray(_Image.open(_io.BytesIO(raw)).convert("RGB"))
+    opts = _vision.FaceLandmarkerOptions(
+        base_options=_BaseOptions(model_asset_path=str(task)),
+        running_mode=_vision.RunningMode.IMAGE,
+        num_faces=1,
+    )
+    with _vision.FaceLandmarker.create_from_options(opts) as landmarker:
+        result = landmarker.detect(_mp.Image(image_format=_mp.ImageFormat.SRGB, data=rgb))
+    assert result.face_landmarks, "MediaPipe sin cara en foto congelada (gate rojo)"
+    parsed_lm = parse_landmarks(
+        _json.dumps([[float(p.x), float(p.y), float(p.z)] for p in result.face_landmarks[0]]).encode(
+            "utf-8"
+        )
+    )
+    assert isinstance(parsed_lm, Ok)
+    out = fit_flame(parsed_img.value, parsed_lm.value)
+    assert isinstance(out, Ok)
+    return parsed_img.value, out.value, parsed_lm.value
+
+
+def test_flame_real_bake_zero_sentinel_evidence_x2(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Bake real: cero sentinel, evidence>=MIN, bytes-identicos-x2."""
+    from backend.flame_texture import (
+        EVIDENCE_MIN,
+        bake_flame,
+        count_sentinel,
+        max_abs_diff,
+        texture_evidence,
+    )
+
+    raws = _require_real_texture_vectors(monkeypatch)
+    image, fit, landmarks = _real_fit_and_landmarks(raws["A"])
+    first = bake_flame(image, fit, landmarks)
+    second = bake_flame(image, fit, landmarks)
+    assert isinstance(first, Ok)
+    assert isinstance(second, Ok)
+    raw = first.value.as_bytes()
+    assert len(raw) == UV_LEN
+    assert count_sentinel(raw) == 0
+    assert texture_evidence(raw) >= EVIDENCE_MIN
+    assert max_abs_diff(raw, second.value.as_bytes()) == 0
+    assert raw == second.value.as_bytes()
+
+
+def test_flame_real_ssim_same_beats_diff(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Evidencia real: SSIM(misma)>SSIM(distinta), self==1.0."""
+    from backend.flame_texture import bake_flame
+
+    raws = _require_real_texture_vectors(monkeypatch)
+    albedos = {}
+    for tag in ("A", "B", "C"):
+        image, fit, landmarks = _real_fit_and_landmarks(raws[tag])
+        out = bake_flame(image, fit, landmarks)
+        assert isinstance(out, Ok)
+        albedos[tag] = out.value.as_bytes()
+    s_self = _ssim_global(albedos["A"], albedos["A"])
+    s_same = _ssim_global(albedos["A"], albedos["B"])
+    s_diff = _ssim_global(albedos["A"], albedos["C"])
+    assert s_self >= 0.999
+    assert s_same > s_diff
+
+
+def test_flame_eye_bake_real_map_differs_from_skin(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Segundo bake ocular: mapa real, x2 identico, pbr != uv en modulo."""
+    from backend.flame_texture import bake_eye_texture, bake_flame, max_abs_diff
+
+    raws = _require_real_texture_vectors(monkeypatch)
+    image, fit, landmarks = _real_fit_and_landmarks(raws["A"])
+    skin = bake_flame(image, fit, landmarks)
+    assert isinstance(skin, Ok)
+    first = bake_eye_texture()
+    second = bake_eye_texture()
+    assert isinstance(first, Ok)
+    assert isinstance(second, Ok)
+    assert len(first.value.as_bytes()) == UV_LEN
+    assert first.value.as_bytes() == second.value.as_bytes()
+    assert max_abs_diff(first.value.as_bytes(), skin.value.as_bytes()) > 0

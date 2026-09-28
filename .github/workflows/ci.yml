@@ -92,6 +92,29 @@ jobs:
           recursive: true
           failure-threshold: error
 
+  lock-check:
+    # F2: el lock es la fuente reproducible (torch 2.13.0 unificado + hashes).
+    # Verifica frescura (recompila y exige cero diff) e instalabilidad con
+    # hashes exigidos en Python 3.10 (el de la imagen Modal). La variante GPU
+    # (cu126) la instala la receta Modal; aqui se valida version + hashes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: fast
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: lock freshness
+        run: |
+          pip install "uv==0.12.*"
+          uv pip compile --python-version 3.10 --generate-hashes -c backend/requirements-constraints.txt -o backend/requirements.lock backend/requirements.txt
+          git diff --exit-code -- backend/requirements.lock
+      - name: lock install with hashes
+        run: pip install --require-hashes -r backend/requirements.lock
+      - name: assert unified torch
+        run: python -c "import torch; assert torch.__version__.split('+')[0] == '2.13.0', torch.__version__"
+
   docker-cpu:
     runs-on: ubuntu-latest
     timeout-minutes: 20

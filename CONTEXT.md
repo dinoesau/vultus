@@ -34,49 +34,52 @@ Tipo `Landmarks::parse(Vec<u8>)` exige JSON `[[x,y,z], ...]` con `LANDMARKS_LEN 
 Rechaza stubs `{"todo":...}` y bytes aleatorios con `Ml::Decode`.
 Producido solo por `MlSidecarClient::landmarks(&JobId, &ImageBytes) -> Landmarks`.
 
-- **mesh**: malla 3D de cabeza humana personalizada por fit GNM.
-Template real `17821` verts / `35324` tris (`TEMPLATE_VERTS/TRIS`).
-Cada cara deforma el template con identidad `253` + camara `12`.
+- **mesh**: malla 3D de cabeza humana personalizada por fit DECA sobre template FLAME.
+Template FLAME `VERT_COUNT = 5023` verts; ojos `[EYE_VERT_START:EYE_VERT_END) = [3931:5023)` (1092 verts) con material propio.
+Cada cara deforma el template con identidad antropometrica + detalle del puente.
 Expresion es neutra fija.
-`383` expresivos quedan fuera de alcance.
+2 primitivas PBR real (`SkinPBR` + `EyePBR`, sin emisivo), offsets `byteOffset % 4 == 0`.
+Loader GNM `17821/35324` conservado solo hasta el cutover (ADR-008).
 
 - **uv**: textura canónica desplegada de 512x512.
 Espacio donde ocurre la comparación.
-Proveniente de la textura GNM (proyeccion foto + warp + inpaint ocluido).
+Proveniente de la completion FLAME (foto-derivada, piel total).
 Dims canónicas `UV_WIDTH = 512`, `UV_HEIGHT = 512`, `UV_CHANNELS = 3`, `UV_LEN = 786432`.
 
 - **fit-result**: seam fit->texture `{ coeffs, camera }` ya probados.
 Tipos `GnmCoeffs` (`parse` exige 253 floats finitos, error `InvalidCoeffs`) y
 `CameraParams` (matriz 3x4 aplanada, 12 finitos, error `InvalidCamera`).
 Producido por `MlSidecarClient::fit(&JobId, &ImageBytes, &Landmarks) -> FitResult`
-vía `FitRequest` (`u32 BE len + landmarks_json + image_bytes`) sobre `POST /ml/fit`;
+vía `FitRequest` v2 (`VERSION u8 + u32 BE len + landmarks_json + image_bytes`) sobre `POST /ml/fit`;
 respuesta `253 f32 LE + 12 f32 LE` (fallo ruidoso `FitFailed`).
-Fit real es ridge identidad + camara con expresion neutra.
-Seam `fit_gnm` sin cambios.
-Dobles sha256 solo como fallback local sin pesos.
+Wire v1 o version desconocida es `VersionMismatch` (400); consumo exacto sin sobrantes.
+Fit real es DECA feed-forward determinista (deadline 10s, `Result` total).
+Dobles sha256 solo como fallback local sin pesos (sin margen de identidad; el margen estricto `d(A,A)=0 < d(A,B) < d(A,C)` solo se exige con pesos reales).
 
-- **complete-uv**: albedo tras bake real 1024 reducido a 512.
-Tipo `CompleteUv::parse` exige exactamente `UV_LEN` bytes.
-Producida por `MlSidecarClient::texture(&JobId, &ImageBytes, &FitResult, &Landmarks) -> CompleteUv`
+- **rendered-image**: albedo tras completion FFHQ-UV 1024 con piel total.
+Tipo `RenderedImage::parse` exige exactamente `UV_LEN` bytes.
+Producida por `MlSidecarClient::texture(&JobId, &ImageBytes, &FitResult, &Landmarks) -> RenderedImage`
 sobre `POST /ml/texture`.
-El bake (`backend/gnm_texture.py`, `ATLAS_SIZE = 1024`) rasteriza `triangle_uvs`
-por baricentricas, proyecta cada texel con `gnm_fit.project` y muestrea la foto
-solo si pasa visibilidad triple (facing + `GRAZING_COS_MIN = 0.3` + z-buffer
-con `win_tri`); lo no visible queda en gris honesto `NO_DATA = (128,128,128)`,
-sin relleno ni inpaint.
-Sin pesos no hay retroproyeccion: gris completo determinista.
-El contrato 512 no cambia; 1024 vive en el bake y en `atlas_png` opcional del GLB.
+El bake (`backend/flame_texture.py`, seed pineado + flags deterministicos torch) deriva cada texel de la foto;
+cero pixeles `SKIN_SENTINEL = (255,0,255)` en mascara skin, `evidence >= 0.99`, bytes identicos x2 en mismo digest.
+Sin pesos el bake falla ruidoso (`MlFailed`); el gris honesto legacy (`NO_DATA`, `build_albedo`) no tiene caller productivo.
+El contrato 512 no cambia; 1024 vive en el bake.
+`CompleteUv` sobrevive solo como parsing legacy del wire; el seam produce `RenderedImage`.
+Disclosure pericial (ADR-008): la completion es visual, distinta de evidencia.
 
-- **heatmap**: imagen `|UV_A - UV_B|` por región.
-Visualiza diferencias de textura.
-Tipo `Heatmap::parse` exige `UV_LEN` bytes.
-Producida solo por `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` (infallible, longitudes ya probadas).
+- **eye-texture**: textura propia de ojos, separada de piel.
+Tipo `EyeTexture::parse` exige `UV_LEN` bytes.
+Vive embebida en el GLB (primitiva `EyePBR`); el zip lleva `pbr_a/b.png` como duplicado documentado de piel
+(placeholder hasta mapas roughness/metalness reales; ojos nunca mezclados con piel en malla ni material).
 
-- **assemble**: ensamblaje CPU de 5 islas GNM + PBR + GLB personalizado.
-Islas reales `UvRegion` 1-5 (`skin/left_eye/right_eye/teeth/tongue`, layout v2).
-PBR se deriva del albedo.
-Firma `build_personalized_glb(&FitResult, &CompleteUv) -> GnmMesh` y
-`build_full_zip` con 7 nombres del manifiesto (`edge/contract.ts` fuente unica).
+- **zip-6**: bundle canonico de 6 piezas en orden `ZIP_NAMES`: `uv_a.png, uv_b.png, mesh_a.glb, mesh_b.glb, pbr_a.png, pbr_b.png`.
+Sin `heatmap.png` (ADR-008). `edge/contract.ts` es fuente unica; `CONTRACT_VERSION = 2` viaja en `/health`.
+
+- **assemble**: ensamblaje CPU FLAME + PBR + GLB personalizado + zip-6.
+Mascara skin excluye `[3931:5023)`; tris a caballo son `Err` (nunca drop silencioso); padding a 4 por seccion.
+Firma `build_personalized_glb(fit, albedo) -> GnmMesh` y
+`build_result_zip` con 6 nombres del manifiesto (`edge/contract.ts` fuente unica).
+Stubs identidad (`project_texture`/`warp_with_landmarks`/`inpaint_occluded`) borrados; sus callers migrados.
 
 - **stateless**: propiedad de no persistir nada tras entrega.
 Local: DO TTL 60s con purga a 2xTTL y `/tmp` tmpfs en runner. Prod: R2 `lifecycle 1d (jobs/ expire 1 dia, red de seguridad)` + Queues 24h retención (TTL lógico 60s) y `/tmp` tmpfs en Modal.
@@ -90,8 +93,8 @@ Nunca bytes sueltos cruzando el seam HTTP.
 - **enqueued-job**: recibo `{job_id, r2_keys}` en la queue.
 El consumer dev lo reenvia al webhook del runner; en prod lo consume el `HTTP Pull Consumer` de Modal.
 
-- **report**: PDF con imágenes originales, UVs, heatmap y tabla de distancias antropométricas.
-Incluye disclaimer de no identificación automática.
+- **report**: bundle zip-6 (UVs + meshes + PBR) para visor estudio blanco + tabla de distancias antropométricas.
+Incluye disclaimer de no identificación automática y disclosure de completion visual (ADR-008).
 
 ## Verbos
 
@@ -107,14 +110,15 @@ Prohibido `&str` suelto en `Queue::set_progress`.
 - **base-url**: `BaseUrl::parse(&str)` exige `http(s)://`, recorta `/` final (`BadScheme | Empty`).
 `MlSidecarClient::new(BaseUrl)` une con `join("/ml/...")` sin doble slash.
 
-- **fit-request**: `encode_fit_request(&ImageBytes, &Landmarks) -> Vec<u8>` y `decode_fit_request(Vec<u8>) -> (Landmarks, ImageBytes)` con formato `u32 BE len + landmarks_json + image_bytes`.
+- **fit-request**: `encode_fit_request(&ImageBytes, &Landmarks) -> Vec<u8>` y `decode_fit_request(Vec<u8>) -> (Landmarks, ImageBytes)` con formato v2 `VERSION u8 (0x02) + u32 BE len + landmarks_json + image_bytes` (`CODEC_VERSION_LEN = 1`, `VERSION_V1 = 0x01`, `VERSION_V2 = 0x02`, match exhaustivo con guards nombrados).
 Respuesta fit: `253 f32 LE + 12 f32 LE`.
-Request texture: `u32 BE len(fit_request) + fit_request + fit_result(1060)`.
+Request texture: `VERSION u8 + u32 BE len(fit_request) + fit_request + fit_result(1060)`, consumo exacto.
 Contrato wire espejado en `pipeline_local.py` y `modal_app.py` (un solo contrato).
+v1 en vuelo durante deploy es `VersionMismatch` 400 por diseno (flag-day con drain TTL60/visibility180, sin dual-read).
 
-- **unwrap**: proyectar textura de mesh a UV.
+- **unwrap**: proyectar textura de mesh a UV (legacy GNM; el path productivo es completion FFHQ-UV).
 
-- **inpaint**: completar solo texeles ocluidos (mascara de landmarks).
+- **inpaint**: legacy GNM (stubs identidad borrados en Wave 4). La oclusion hoy se resuelve con completion foto-derivada, no con relleno.
 
 - **normalize**: llevar cara a pose y expresión neutra canónica.
 
@@ -129,8 +133,8 @@ Mapeo HTTP: `400` validación, `404` desconocido, `500` infra (`{"detail":...}`)
 
 ## Errores
 
-- `DomainError` es taxonomía ML/compute: `InvalidImage(ImageError)`, `InvalidJobId`, `InvalidProgress`, `InvalidBaseUrl(BaseUrlError)`, `InvalidCoeffs`, `InvalidCamera`, `EmptyPayload`, `Ml(MlError::{Transport, BadStatus, Decode, Empty})`, `FitFailed(MlError)`, `NotFound`, `Invariant`.
-Helpers `domain_to_status` / `domain_to_message`.
+- `DomainError` es taxonomía ML/compute: `InvalidImage(ImageError)`, `InvalidJobId`, `InvalidProgress`, `InvalidBaseUrl(BaseUrlError)`, `InvalidCoeffs`, `InvalidCamera`, `EmptyPayload`, `Ml(MlError::{Transport, BadStatus, Decode, Empty})`, `FitFailed(MlError)`, `NotFound`, `VersionMismatch`, `Invariant`.
+Helpers `domain_to_status` / `domain_to_message` (`VersionMismatch` -> 400 con mensaje `actualiza`).
 `ImageError::{SizeOutOfRange, UnsupportedFormat}`, `BaseUrlError::{BadScheme, Empty}`.
 El runner sirve `:8001` con `http.server` stdlib; el gateway sirve `:8000` vía worker runtime.
 Nunca `unwrap` en request path; multipart inválido es `400`.
@@ -144,10 +148,10 @@ Nunca `unwrap` en request path; multipart inválido es `400`.
 Local: `HttpProgressSink` en el runner (mismo seam HTTP que prod) e `InMemorySink` en tests.
 Prod: workers GPU al mismo seam HTTP + R2 directo.
 
-- **Seam 3 Worker**: contrato tipado `&ImageBytes + &Landmarks -> FitResult -> CompleteUv -> Heatmap` (fit y textura vía `MlSidecarClient` + `BaseUrl` sobre `POST /ml/fit|texture`, assemble CPU local, prod GPU vía Modal).
+- **Seam 3 Worker**: contrato tipado `&ImageBytes + &Landmarks -> FitResult -> RenderedImage + EyeTexture` (fit DECA y textura FFHQ-UV vía `MlSidecarClient` + `BaseUrl` sobre `POST /ml/fit|texture` con wire v2, assemble CPU FLAME local, prod GPU vía Modal).
 UVs exigen `UV_LEN`, `Landmarks` exige 478 JSON, coefs exigen 253 finitos.
 
-Fuera de seams: `coeff_distance`, `project_uv`, islas y PBR internos.
+Fuera de seams: particion piel/ojo, `displaced_positions` y PBR internos.
 No se testean directo.
 
 ## Convenciones de tests
@@ -156,6 +160,5 @@ Nombre de test describe WHAT no HOW.
 Ejemplo bueno: `test_frontal_face_produces_512_uv`.
 Ejemplo malo: `test_worker_calls_texture`.
 Valor esperado viene de literal golden verificado manualmente, no de recomputar con misma función.
-Golden UV es cabeza literal (`[10, 200]` vs `[4, 210]` -> `[6, 10]`).
-Goldens literales para `Progress`, `JobId`, JPEG/PNG con filler.
+Goldens literales para `Progress`, `JobId`, zip-6 sin heatmap, cero `SKIN_SENTINEL` + `evidence >= 0.99`, eye slice 1092, GLB magic FLAME.
 Seam 1 tiene 14 tests pool en runtime (`edge/worker.http.test.ts`: 6 base + 8 TTL; base: snapshot `queued`, `400` imagen/uuid, `404` desconocido + `409` pre-done, health `ttl_secs`, ws snapshot + handshake `404`, backdoor dev `404` con vars prod; TTL: resolve default 60, health-ttl_error compare logs, health silent + ttl_error sin log, DO-400-behavior `400` sin store/alarma incl absent ttl_secs (null query) is InvalidTtlSecs 400 by design, DO-400-fake-storage unit sin setAlarm, parity-60 `60` ambos lados, compare-502-cleanup `!ok` 502 sin R2/Queue, storage-corrupto-throttled revalida 60 load() revalidation only throttled por instancia (mismo job mismo valor) + load() absent (undefined key) is silent 60 y alarma 60s/120s, queue-send-throw-orphan).

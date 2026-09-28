@@ -2,8 +2,9 @@
 
 > Estado objetivo sin Rust ni API Python: gateway unico TS en `edge/`
 > (prod `wrangler.toml`, dev `wrangler.dev.toml`), runner local Python en `backend/local_runner.py`
-> (sink HTTP + timeouts landmarks 5s/fit 10s/texture 30s/total 60s=TTL), assemble CPU en `backend/gnm_assemble.py`.
-> Comandos nuevos: `pytest backend/tests/test_pipeline.py -q`, `bash scripts/smoke-fase0.sh`.
+> (sink HTTP + timeouts landmarks 5s/fit 10s/texture 30s/total 60s=TTL), assemble FLAME CPU en `backend/gnm_assemble.py`.
+> Comandos nuevos: `pytest backend/tests/test_pipeline.py -q`, `bash scripts/smoke-fase0.sh`,
+> gate visual `python3 scripts/e2e-flame-real.py`, `bash scripts/modal-weights-sync.sh --check`.
 
 ## 1. Resumen
 
@@ -22,12 +23,12 @@ graph TD
     C -->|ok| D["Enqueue {job_id, r2_keys} a Queues"]
     C -->|fail| E[400 Bad Request]
     D --> F[Runner local via webhook dev / Modal Worker 1 - MediaPipe 478 landmarks]
-    F --> G[Fit GNM GPU - 253 coefs + camara]
-    G --> H[Textura GNM GPU - albedo solo ocluidas]
-    H --> I[Assemble CPU - 5 islas + PBR + GLB + Heatmap]
+    F --> G[Fit DECA feed-forward - 253 coefs + camara]
+    G --> H[Textura FFHQ-UV completion - piel total sin gris]
+    H --> I[Assemble FLAME CPU - piel/ojos + PBR + GLB + zip-6]
     I --> J[Result bytes TTL 60s (R2 prod / PUT dev local)]
     J --> K[Worker StreamingResponse zip]
-    K --> L[Cliente descarga - UV_A UV_B heatmap mesh PBR]
+    K --> L[Cliente descarga - UV_A UV_B mesh PBR + visor estudio]
     J -. lifecycle 60s .-> M[Olvido total - tmpfs wipe + R2 DEL + Queue 24h]
     D -. progress .-> N[Durable Objects WS /v1/jobs/id/events]
     N --> A
@@ -40,11 +41,11 @@ Esta sección muestra como se encadenan los 4 stages y que dato produce cada uno
 ```mermaid
 graph LR
     I["Imagen 512x512"] --> M["MediaPipe<br/>Tasks Vision<br/>CPU 25ms"]
-    M -->|"478 landmarks 3D"| F["Fit GNM<br/>253 coefs + camara<br/>GPU"]
-    F -->|"FitResult"| U["Textura GNM<br/>proyeccion + warp + inpaint<br/>GPU"]
-    U -->|"albedo 512"| G["Assemble<br/>5 islas + PBR + GLB<br/>CPU 150ms"]
-    G -->|"mesh personalizado + PBR"| H["Heatmap + Report<br/>CPU 200ms"]
-    H --> O["Salida: uv_a, uv_b, heatmap, mesh.glb, pbr, report.pdf"]
+    M -->|"478 landmarks 3D"| F["Fit DECA<br/>feed-forward + camara<br/>GPU"]
+    F -->|"FitResult"| U["Textura FFHQ-UV<br/>completion piel total<br/>GPU"]
+    U -->|"RenderedImage 512"| G["Assemble FLAME<br/>piel/ojos + PBR + GLB<br/>CPU 150ms"]
+    G -->|"mesh personalizado + PBR"| H["Zip-6 + viewers<br/>estudio blanco<br/>CPU 200ms"]
+    H --> O["Salida: uv_a, uv_b, mesh_a/b.glb, pbr_a/b.png"]
 
     style M fill:#e3f2fd
     style F fill:#fff3e0
@@ -59,55 +60,52 @@ Dependencias por modelo:
 No depende de nadie.
 Salida `landmarks 478` alimenta al fit.
 
-- **Fit GNM** depende de `image + landmarks`.
+- **Fit DECA** depende de `image + landmarks`.
 Salida `FitResult { 253 coefs + camara 3x4 }` (falla ruidoso sin cara).
+Determinista x2, deadline 10s dentro de TTL 60.
 Sin landmarks no puede estimar pose.
 
-- **Textura GNM** depende de `image + fit + landmarks`.
-Salida `albedo` con detalle foto-real; lo no visible queda en gris honesto.
-Es el cuello de botella y corre 2 veces en paralelo, una por cara.
-Vocabulario del bake: evidencia (texeles muestreados de la foto) vs gris.
-El gate E2E (`scripts/e2e-gnm-real.py` CHECK 5) ancla la punta de la nariz
-(distancia de color < 60) y exige evidencia >= 0.15; el overlay
-`scripts/render_diag.py --photo <jpg> --out <png>` muestra detected-68 en
-verde vs projected-68 en rojo con el error medio en px.
+- **Textura FFHQ-UV** depende de `image + fit + landmarks`.
+Salida `RenderedImage` con piel total foto-derivada; cero `SKIN_SENTINEL`, `evidence >= 0.99`.
+Es el cuello de botella (`concurrency_limit=1` en Modal) y corre 2 veces en paralelo, una por cara.
+Vocabulario del bake: evidencia (texeles derivados de la foto) vs sentinel.
+El gate E2E (`scripts/e2e-flame-real.py` CHECK 2/5/7) exige cero sentinel + margen estricto `d(A,A)=0 < d(A,B) < d(A,C)` + SSIM misma>distinta con landmarks reales y fotos congeladas por sha256.
 
 - **Assemble** depende de `fit + albedo` por cara.
-Ensambla 5 islas GNM, deriva PBR y exporta GLB personalizado con seams reales
-(vertices partidos por `(v, vt)` unico, 18437 con pesos) y material emisivo.
-Salida `mesh GNM` con geometria de la persona.
+Ensambla malla FLAME 5023 con ojos `[3931:5023)` en material propio, 2 primitivas PBR real sin emisivo.
+Salida `mesh` con geometria de la persona + zip-6.
 
-- **Heatmap + Report** depende de `complete-uv A y B` ya en mismo espacio canónico.
-Calcula `|UV_A - UV_B|` y distancias antropométricas.
+- **Viewers** dependen del zip-6 ya en mismo espacio canónico.
+`UvViewers` muestra `uv_a/uv_b` + `pbr_a/pbr_b`; `ThreeViewer` pinta ambos GLB en estudio blanco (fondo + 3 luces, conserva materiales embebidos) con estado `cara real lista`.
 
 ```mermaid
 sequenceDiagram
     participant I as Imagen
     participant MP as MediaPipe
-    participant FIT as Fit GNM
-    participant TX as Textura GNM
-    participant ASM as Assemble
-    participant HR as Heatmap/Report
+    participant FIT as Fit DECA
+    participant TX as Textura FFHQ-UV
+    participant ASM as Assemble FLAME
+    participant VW as Viewers
 
     I->>MP: bytes jpg
     MP-->>FIT: landmarks 478
     I->>FIT: bytes jpg
-    FIT->>FIT: fit 253 coefs + camara
+    FIT->>FIT: feed-forward 253 coefs + camara
     FIT-->>TX: FitResult
     I->>TX: bytes jpg
-    TX->>TX: proyeccion + warp + inpaint ocluido
-    TX-->>ASM: albedo 512
-    ASM->>ASM: 5 islas + PBR + GLB personalizado
-    ASM-->>HR: mesh + albedo
-    HR->>HR: diff + metricas
-    HR-->>I: output bundle
+    TX->>TX: completion piel total
+    TX-->>ASM: RenderedImage 512
+    ASM->>ASM: FLAME 5023 + piel/ojos + PBR + zip-6
+    ASM-->>VW: uv + mesh + pbr
+    VW->>VW: estudio blanco + 2 GLB
+    VW-->>I: output bundle
 ```
 
 Paralelización:
 
 - Cara A y cara B se procesan en paralelo en `MediaPipe -> fit -> texture`.
 - Cada cara usa su propio chain.
-- `Assemble` y `Heatmap` esperan a que ambas ramas terminen y hacen join.
+- `Assemble` y `Viewers` esperan a que ambas ramas terminen y hacen join.
 
 ## 4. Secuencia detallada end-to-end
 
@@ -119,9 +117,9 @@ sequenceDiagram
     participant Q as Cloudflare Queues
     participant MO as Modal Workers
     participant W1 as Worker MediaPipe
-    participant W2 as Worker Fit
-    participant W3 as Worker Textura
-    participant W4 as Worker GNM/Report
+    participant W2 as Worker Fit DECA
+    participant W3 as Worker Textura FFHQ-UV
+    participant W4 as Worker FLAME/PBR
     participant DO as Durable Objects WS
 
     FE->>CF: POST /v1/compare multipart 2 images
@@ -177,38 +175,38 @@ Runtime CPU, 20-30ms por cara.
 Si el sidecar retorna stub `{"todo":...}` o largo wrong, `Landmarks::parse` falla con `Ml::Decode`.
 Escribe landmarks a `/tmp/{job_id}/landmarks.json` en tmpfs.
 
-### 5.4 Worker 2 - Fit GNM
+### 5.4 Worker 2 - Fit DECA
 
 Input: `&ImageBytes + &Landmarks`.
 Output: `FitResult` (253 coefs + camara 3x4 = 1060 bytes).
-Firma `MlSidecarClient::fit(&JobId, &ImageBytes, &Landmarks) -> FitResult` con `encode_fit_request` (`u32 BE len + landmarks_json + image_bytes`) sobre `POST /ml/fit`.
-Fit real es ridge identidad + camara con expresion neutra (3 iters, clip `[-3, 3]`).
+Firma `MlSidecarClient::fit(&JobId, &ImageBytes, &Landmarks) -> FitResult` con `encode_fit_request` v2 (`VERSION u8 + u32 BE len + landmarks_json + image_bytes`) sobre `POST /ml/fit`.
+Fit real es DECA feed-forward determinista (deadline 10s, `Result` total).
 Estima identidad y pose; sin cara falla ruidoso (`FitFailed`).
-Gate LFW Bush exige `d(A,A)=0 < d(A,B misma) < d(A,C distinta)` (`scripts/e2e-gnm-real.py`).
+Gate LFW exige `d(A,A)=0 < d(A,B misma) < d(A,C distinta)` (`scripts/e2e-flame-real.py` CHECK 5, landmarks reales).
 
-### 5.5 Worker 3 - Textura GNM
+### 5.5 Worker 3 - Textura FFHQ-UV
 
 Input: `&ImageBytes + &FitResult + &Landmarks`.
-Output: `CompleteUv` (`UV_LEN`).
-Firma `MlSidecarClient::texture(&JobId, &ImageBytes, &FitResult, &Landmarks) -> CompleteUv` sobre `POST /ml/texture`.
-Proyecta la foto real, aplica warp TPS de landmarks e inpaintea solo ocluidas.
-Es la etapa más costosa.
-`BaseUrl::parse` exige `http(s)://` y recorta `/`; payload vacío es `Ml::Empty`, status no-2xx es `Ml::BadStatus`, truncate es `Ml::Decode`.
+Output: `RenderedImage` (`UV_LEN`) + ojos a textura separada.
+Firma `MlSidecarClient::texture(&JobId, &ImageBytes, &FitResult, &Landmarks) -> RenderedImage` sobre `POST /ml/texture`.
+Completion foto-derivada con piel total; cero `SKIN_SENTINEL`, `evidence >= 0.99`, bytes identicos x2.
+Es la etapa más costosa (`concurrency_limit=1` en Modal).
+`BaseUrl::parse` exige `http(s)://` y recorta `/`; payload vacío es `Ml::Empty`, status no-2xx es `Ml::BadStatus`, truncate es `Ml::Decode`, version ajena es `VersionMismatch` (400).
 
-### 5.6 Worker 4 - Assemble, Heatmap y Report
+### 5.6 Worker 4 - Assemble FLAME y zip-6
 
-Input: `&FitResult + &CompleteUv` por cara (`UV_LEN` ya probado).
-Pasos: `assemble_islands` (5 islas layout v2, fronteras filas `[149, 248, 309, 358]`), `pbr_from_albedo`, `build_personalized_glb(&FitResult, &CompleteUv) -> GnmMesh`, `compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap` (`|a-b|` por byte), cálculo de distancias antropométricas normalizadas por interpupilar en UV canónico, generación de `report.pdf` con imágenes originales, UVs, heatmap y tabla de métricas con disclaimer.
-Output: `uv_a.png, uv_b.png, heatmap.png, mesh_a.glb, mesh_b.glb, pbr_a.png, pbr_b.png`.
+Input: `fit + RenderedImage` por cara (`UV_LEN` ya probado).
+Pasos: particion piel/ojos (`EYE_VERT_START = 3931` inclusivo, `EYE_VERT_END = 5023` exclusivo, tris a caballo son `Err`), `build_personalized_glb(fit, albedo) -> GnmMesh` (2 primitivas `SkinPBR`/`EyePBR` sin emisivo, padding a 4 por seccion), `build_result_zip` con 6 nombres, cálculo de distancias antropométricas normalizadas por interpupilar en UV canónico.
+Output: `uv_a.png, uv_b.png, mesh_a.glb, mesh_b.glb, pbr_a.png, pbr_b.png` (pbr duplicado documentado de piel hasta mapas reales; ojos viven en el GLB).
 Runtime CPU 300-500ms.
 Todo se escribe a `/tmp/{job_id}/` y se retorna como dict de bytes.
-Sin dep `image` en assemble; tipos `FitResult` / `CompleteUv` / `Heatmap` cruzan el seam.
+Tipos `FitResult` / `RenderedImage` / `EyeTexture` cruzan el seam.
 
 ### 5.7 Entrega - GET /v1/jobs/{id}/result
 
 El frontend pide el resultado tras recibir `WS done` (Durable Objects en prod y dev).
 El Worker hace `R2 GetObject(job_id/result.zip)` y arma un `StreamingResponse` con `Content-Type: application/zip` y `Content-Disposition: attachment`.
-El zip contiene `uv_a.png, uv_b.png, heatmap.png, mesh_a.glb, mesh_b.glb, pbr_a.png, pbr_b.png` en memoria, sin escribir a disco.
+El zip contiene `uv_a.png, uv_b.png, mesh_a.glb, mesh_b.glb, pbr_a.png, pbr_b.png` en memoria, sin escribir a disco.
 Tras el stream, en prod `R2 lifecycle 60s` borra solo y en local el DO purga a 2xTTL.
 El frontend crea `URL.createObjectURL` para descarga y ofrece re-descarga local desde memoria sin volver al servidor.
 
@@ -222,8 +220,8 @@ Verificación: el pipeline inexorablemente limpia `tmpfs` (tests) y el DO expone
 ## 6. Contratos de datos
 
 Job enqueue: `{job_id, r2_keys jobs/{id}/a|b}` en la queue (patrón `R2 pointer`, límite Queues 128KB).
-Worker return tipado: `Landmarks -> FitResult -> CompleteUv -> Heatmap` (cada `parse` exige forma, `Ml::Decode` si no).
-`FitRequest` es `u32 BE len + landmarks_json + image_bytes`; respuesta fit `253 f32 LE + 12 f32 LE`; request texture `u32 BE len + fit_request + fit_result`.
+Worker return tipado: `Landmarks -> FitResult -> RenderedImage + EyeTexture` (cada `parse` exige forma, `Ml::Decode` si no).
+`FitRequest` v2 es `VERSION u8 + u32 BE len + landmarks_json + image_bytes`; respuesta fit `253 f32 LE + 12 f32 LE`; request texture `VERSION u8 + u32 BE len + fit_request + fit_result`; v1 es `VersionMismatch` 400.
 Progress events WS: `{job_id, progress: Progress 0.0-1.0, stage: Stage queued|fit|texture|assemble|done}` vía `Durable Objects` en prod y dev.
 Error HTTP: `400` validación (imagen, uuid, progreso, multipart), `404` desconocido, `500` infra con `{"detail":...}`.
 
@@ -233,6 +231,8 @@ Imagen inválida: `400 {"detail":...}` inmediato sin encolar (`InvalidImage`).
 Faltante / multipart roto: `400` (`BadRequest`).
 UUID roto: `400` (`InvalidJobId` con `trim`).
 Job desconocido: `404` (`NotFound`).
+Wire v1 o version ajena: `400 VersionMismatch` con mensaje `actualiza` (flag-day con drain TTL60/visibility180, sin dual-read).
+`/health` expone `contract_version`; el frontend lo valida antes de pedir resultado.
 No face / UV wrong / stub: `Ml::Decode` (500 infra, solo desde sidecar, nunca cliente directo).
 Sidecar caído / status no-2xx / vacío: `Ml::{Transport, BadStatus, Empty}` (500 `internal error` al cliente, detalle en logs con `job_id`).
 Invariante rota (`TtlSecs`, `assert_ok`): `Invariant` (500, pagina al dev).

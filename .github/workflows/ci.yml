@@ -107,8 +107,8 @@ jobs:
           python-version: '3.10'
       - name: lock freshness
         run: |
-          pip install "uv==0.12.*"
-          uv pip compile --python-version 3.10 --generate-hashes -c backend/requirements-constraints.txt -o backend/requirements.lock backend/requirements.txt
+          pip install "uv==0.12.19"
+          uv pip compile --python-version 3.10 --python-platform x86_64-unknown-linux-gnu --torch-backend cpu --generate-hashes -c backend/requirements-constraints.txt -o backend/requirements.lock backend/requirements.txt
           git diff --exit-code -- backend/requirements.lock
       - name: lock install with hashes
         run: pip install --require-hashes -r backend/requirements.lock

@@ -85,7 +85,9 @@ def _lock_torch_hashes() -> int:
 
 
 def test_lock_pins_torch_unified_with_hashes() -> None:
-    assert _lock_torch_version() == "2.13.0"
+    # El lock pinea el build CPU (`2.13.0+cpu`, diseno PyPI-CPU-en-lock);
+    # la variante cu126 vive solo en la receta Modal. Se compara sin sufijo local.
+    assert _lock_torch_version().split("+")[0] == "2.13.0"
     assert _lock_torch_hashes() >= 2, "el pin de torch en el lock debe traer hashes"
 
 

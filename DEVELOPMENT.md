@@ -213,7 +213,7 @@ Verifica `tmpfs` vacío tras cada par (`job_dir` no existe) y TTL canónico en e
 Si no tienes GPU local, corre `pytest backend/tests -q` (CPU puro con dobles deterministas).
 En CI los workers GPU corren solo en runner con GPU o se skippean.
 En prod usa `Modal` para fit/textura GPU sin hardware local y consume tus `$30/mes free` (~50h T4).
-El lock (`requirements.lock`, torch 2.13.0) se verifica en CI con `pip install --require-hashes`; si el lock driftea, regen con `uv pip compile --python-version 3.10 --generate-hashes -c backend/requirements-constraints.txt`.
+El lock (`requirements.lock`, torch 2.13.0+cpu) se verifica en CI con `pip install --require-hashes`; si el lock driftea, regen con uv 0.12.19 (la misma que CI): `uv pip compile --python-version 3.10 --python-platform x86_64-unknown-linux-gnu --torch-backend cpu --generate-hashes -c backend/requirements-constraints.txt -o backend/requirements.lock backend/requirements.txt`.
 
 ## 9. Lint y formato
 

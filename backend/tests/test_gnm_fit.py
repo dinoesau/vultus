@@ -183,3 +183,256 @@ def test_estimate_camera_recovers_opposite_y_sign() -> None:
     assert abs(ty - 0.9) < 1e-9
     assert sx > 0.0
     assert sy < 0.0
+
+
+# --- Wave 2 Step 3: fit FLAME feed-forward (replay determinista local) ---
+# Paridad firmada no-visual: mismo input dos veces da mismos bytes, hash
+# difiere por identidad en el doble local (d(A,A)=0 < d(A,B)). El doble local
+# no tiene margen de identidad; el margen real DECA es gate prod Wave 6.
+# Lo visual solo se valida en Modal.
+
+
+def test_flame_fit_deterministic_bytes_identical_x2() -> None:
+    from backend.flame_fit import fit_flame
+    from backend.pipeline_local import encode_fit_result
+
+    image = _image(0xA1)
+    landmarks = _landmarks()
+    first = fit_flame(image, landmarks)
+    second = fit_flame(image, landmarks)
+    assert isinstance(first, Ok)
+    assert isinstance(second, Ok)
+    assert first.value.coeffs.as_tuple() == second.value.coeffs.as_tuple()
+    assert first.value.camera.as_tuple() == second.value.camera.as_tuple()
+    assert len(first.value.coeffs.as_tuple()) == 253
+    assert len(first.value.camera.as_tuple()) == 12
+    assert all(math.isfinite(v) for v in first.value.coeffs.as_tuple())
+    assert all(math.isfinite(v) for v in first.value.camera.as_tuple())
+    assert encode_fit_result(first.value) == encode_fit_result(second.value)
+
+
+def test_flame_fit_differs_per_identity_and_hash_differs() -> None:
+    from backend.flame_fit import fit_flame, flame_distance
+
+    image = _image(0xA1)
+    landmarks_a = _landmarks_variant(False)
+    landmarks_b = _landmarks_variant(True)
+    ra = fit_flame(image, landmarks_a)
+    rb = fit_flame(image, landmarks_b)
+    assert isinstance(ra, Ok)
+    assert isinstance(rb, Ok)
+    assert ra.value.coeffs.as_tuple() != rb.value.coeffs.as_tuple()
+    assert flame_distance(ra.value.coeffs, rb.value.coeffs) > 0.0
+    assert flame_distance(ra.value.coeffs, ra.value.coeffs) == 0.0
+
+
+def test_flame_fit_request_bad_payload_fails_loudly() -> None:
+    from backend.flame_fit import fit_flame_from_request
+
+    assert isinstance(fit_flame_from_request(b"\x00\x01"), Err)
+    assert isinstance(fit_flame_from_request(b""), Err)
+
+
+def test_flame_fit_request_v2_roundtrip_ok() -> None:
+    from backend.domain import encode_fit_request
+    from backend.flame_fit import fit_flame_from_request
+
+    blob = encode_fit_request(_image(0xA1), _landmarks())
+    assert isinstance(fit_flame_from_request(blob), Ok)
+
+
+def test_flame_fit_real_required_without_weights_fails_loudly(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from backend.domain import domain_to_status
+    from backend.flame_fit import fit_flame
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("VULTUS_REAL_ML", "1")
+    monkeypatch.setenv("DECA_DIR", str(empty))
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(empty))
+    result = fit_flame(_image(0xA1), _landmarks())
+    assert isinstance(result, Err)
+    assert domain_to_status(result.error) == 500
+
+
+def test_flame_fit_p95_inside_fit_timeout() -> None:
+    from backend.domain import FIT_TIMEOUT_SECS
+    from backend.flame_fit import fit_flame
+
+    image = _image(0xA1)
+    landmarks = _landmarks_variant(False)
+    durations: list[float] = []
+    for _ in range(21):
+        start = time.perf_counter()
+        out = fit_flame(image, landmarks)
+        durations.append(time.perf_counter() - start)
+        assert isinstance(out, Ok)
+    durations.sort()
+    p95 = durations[int(0.95 * (len(durations) - 1))]
+    assert p95 < FIT_TIMEOUT_SECS
+
+
+# --- Wave 6-fix Lane A: vectores reales (forward DECA) vs dobles ---
+# Dobles (sin VULTUS_REAL_ML/LANDMARKS_REAL): solo propiedades
+# deterministicas (x2 identico, d(A,A)==0<d(A,B) por hash, sin margen de
+# identidad). Reales (VULTUS_REAL_ML=1 + LANDMARKS_REAL=1 + puente
+# canonico + triple LFW + MediaPipe): margen estricto
+# d(A,A)==0 < d(A,Bmisma) < d(A,Cdistinta) con fotos congeladas.
+# Sin flags o sin assets los tests reales hacen skip con motivo; el gate
+# prod (scripts/e2e-flame-real.py, Lane B) los exige en verde.
+
+
+def _real_bridge_dirs(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import os as _os
+    from pathlib import Path as _Path
+
+    home = _Path.home()
+    monkeypatch.setenv("DECA_DIR", _os.environ.get("DECA_DIR", str(home / "Code" / "weights" / "deca")))
+    monkeypatch.setenv(
+        "FLAME_ASSETS_DIR",
+        _os.environ.get("FLAME_ASSETS_DIR", str(home / "Code" / "weights" / "flame")),
+    )
+    monkeypatch.setenv(
+        "FFHQ_UV_DIR",
+        _os.environ.get("FFHQ_UV_DIR", str(home / "Code" / "weights" / "ffhq-uv")),
+    )
+
+
+def _require_real_fit_vectors(monkeypatch) -> dict[str, bytes]:  # type: ignore[no-untyped-def]
+    """Activa el puente y devuelve el triple LFW, o hace skip con motivo."""
+    import os as _os
+    from pathlib import Path as _Path
+
+    if _os.environ.get("VULTUS_REAL_ML") != "1" or _os.environ.get("LANDMARKS_REAL") != "1":
+        pytest.skip("vectores reales solo con VULTUS_REAL_ML=1 + LANDMARKS_REAL=1")
+    _real_bridge_dirs(monkeypatch)
+    from backend.flame_fit import weights_present
+
+    if not weights_present():
+        pytest.skip("sin puente DECA/FLAME canonico no hay forward real local")
+    dataset = _Path("/Users/esau.martinez/Code/datasets/lfw")
+    paths = {
+        "A": dataset / "George_W_Bush" / "George_W_Bush_0001.jpg",
+        "B": dataset / "George_W_Bush" / "George_W_Bush_0002.jpg",
+        "C": dataset / "Aaron_Eckhart" / "Aaron_Eckhart_0001.jpg",
+    }
+    for tag, path in paths.items():
+        if not path.is_file():
+            pytest.skip(f"sin triple LFW no hay vectores reales ({tag})")
+    return {tag: path.read_bytes() for tag, path in paths.items()}
+
+
+def _real_landmarks_for(jpg: bytes) -> Landmarks:
+    """Landmarks MediaPipe reales 478 sobre JPEG, o skip/fallo loud."""
+    import io as _io
+
+    try:
+        import mediapipe as _mp
+        from mediapipe.tasks.python import BaseOptions as _BaseOptions
+        from mediapipe.tasks.python import vision as _vision
+    except ImportError:
+        pytest.skip("sin mediapipe no hay landmarks reales")
+    from pathlib import Path as _Path
+
+    import numpy as _np
+    from PIL import Image as _Image
+
+    task = _Path.home() / "Code" / "weights" / "mediapipe" / "face_landmarker.task"
+    if not task.is_file():
+        pytest.skip("sin face_landmarker.task no hay landmarks reales")
+    rgb = _np.asarray(_Image.open(_io.BytesIO(jpg)).convert("RGB"))
+    opts = _vision.FaceLandmarkerOptions(
+        base_options=_BaseOptions(model_asset_path=str(task)),
+        running_mode=_vision.RunningMode.IMAGE,
+        num_faces=1,
+    )
+    with _vision.FaceLandmarker.create_from_options(opts) as landmarker:
+        result = landmarker.detect(_mp.Image(image_format=_mp.ImageFormat.SRGB, data=rgb))
+    assert result.face_landmarks, "MediaPipe sin cara en foto congelada (gate rojo)"
+    face = result.face_landmarks[0]
+    assert len(face) == 478, f"se esperaban 478 puntos, llegaron {len(face)}"
+    parsed = parse_landmarks(
+        json.dumps([[float(p.x), float(p.y), float(p.z)] for p in face]).encode("utf-8")
+    )
+    assert isinstance(parsed, Ok)
+    return parsed.value
+
+
+def test_flame_weights_require_canonical_bridge_files(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Junk files no habilitan el real: solo deca_model.tar + pkl FLAME."""
+    from backend.flame_fit import weights_present
+
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    (junk / "random.txt").write_text("junk")
+    (junk / "model.bin").write_bytes(bytes(64))
+    monkeypatch.setenv("DECA_DIR", str(junk))
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(junk))
+    assert weights_present() is False
+
+
+def test_flame_real_with_junk_weights_fails_loud(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """REAL=1 con junk (sin canonicos) falla loud 500, nunca doble."""
+    from backend.domain import domain_to_status
+    from backend.flame_fit import fit_flame
+
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    (junk / "random.txt").write_text("junk")
+    monkeypatch.setenv("VULTUS_REAL_ML", "1")
+    monkeypatch.setenv("DECA_DIR", str(junk))
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(junk))
+    result = fit_flame(_image(0xA1), _landmarks())
+    assert isinstance(result, Err)
+    assert domain_to_status(result.error) == 500
+
+
+def test_flame_real_fit_margin_strict_with_real_vectors(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Margen estricto real: d(A,A)==0 < d(A,Bmisma) < d(A,Cdistinta)."""
+    import time as _time
+
+    from backend.domain import FIT_TIMEOUT_SECS
+    from backend.flame_fit import fit_flame, flame_distance
+
+    raws = _require_real_fit_vectors(monkeypatch)
+    images = {}
+    for tag, raw in raws.items():
+        parsed = parse_image_bytes(raw)
+        assert isinstance(parsed, Ok)
+        images[tag] = parsed.value
+    landmarks = {tag: _real_landmarks_for(raw) for tag, raw in raws.items()}
+    start = _time.perf_counter()
+    fits = {}
+    for tag in ("A", "B", "C"):
+        out = fit_flame(images[tag], landmarks[tag])
+        assert isinstance(out, Ok)
+        assert len(out.value.coeffs.as_tuple()) == 253
+        assert len(out.value.camera.as_tuple()) == 12
+        assert all(math.isfinite(v) for v in out.value.coeffs.as_tuple())
+        fits[tag] = out.value
+    assert _time.perf_counter() - start < FIT_TIMEOUT_SECS
+    rerun = fit_flame(images["A"], landmarks["A"])
+    assert isinstance(rerun, Ok)
+    d_self = flame_distance(fits["A"].coeffs, rerun.value.coeffs)
+    d_same = flame_distance(fits["A"].coeffs, fits["B"].coeffs)
+    d_diff = flame_distance(fits["A"].coeffs, fits["C"].coeffs)
+    assert d_self == 0.0
+    assert d_self < d_same < d_diff
+
+
+def test_flame_real_fit_deterministic_x2_with_real_vectors(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Forward real repetible: mismo input dos veces da mismos bytes."""
+    from backend.flame_fit import fit_flame
+    from backend.pipeline_local import encode_fit_result
+
+    raws = _require_real_fit_vectors(monkeypatch)
+    parsed = parse_image_bytes(raws["A"])
+    assert isinstance(parsed, Ok)
+    landmarks = _real_landmarks_for(raws["A"])
+    first = fit_flame(parsed.value, landmarks)
+    second = fit_flame(parsed.value, landmarks)
+    assert isinstance(first, Ok)
+    assert isinstance(second, Ok)
+    assert first.value.coeffs.as_tuple() == second.value.coeffs.as_tuple()
+    assert first.value.camera.as_tuple() == second.value.camera.as_tuple()
+    assert encode_fit_result(first.value) == encode_fit_result(second.value)

@@ -157,8 +157,8 @@ def test_texture_bad_landmarks_maps_via_domain_table_no_leak() -> None:
     tex_bad = len(bad_fit_req).to_bytes(4, "big") + bad_fit_req + fit_bytes
     result = decode_texture_request(tex_bad)
     assert isinstance(result, _Err)
-    assert domain_to_message(result.error) == "internal error"
-    assert domain_to_status(result.error) == 500
+    assert domain_to_status(result.error) == 400
+    assert "version mismatch" in domain_to_message(result.error)
     assert "landmarks" not in domain_to_message(result.error)
 
     good_lm = parse_landmarks(_json.dumps([[0.0, 1.0, 2.0]] * 478).encode("utf-8"))

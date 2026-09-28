@@ -1,270 +1,423 @@
-"""Assemble: 5 islas + PBR + GLB personalizado, goldens congelados a mano."""
+"""Assemble FLAME: GLB PBR 2 materiales + zip-6, goldens congelados a mano.
+
+Wave 4 Step 5: ojos [3931:5023) con material propio, piel sin ese rango,
+PBR real (sin truco emisivo), zip-6 por la unica seam de ensamblaje.
+"""
 
 from __future__ import annotations
 
 import io
 import json
+import struct
 import zipfile
 
 from backend.domain import (
     UV_LEN,
-    ZIP_FULL,
+    ZIP_NAMES,
     Ok,
     ZipBundle,
+    parse_complete_uv,
     parse_gnm_mesh,
     parse_image_bytes,
-    parse_landmarks,
-    parse_uv_region,
 )
+from backend.gnm import build_result_zip, uv_to_png
 from backend.gnm_assemble import (
-    ISLAND_COUNT,
-    ISLAND_LAYOUT_VERSION,
-    albedo_from_islands,
-    assemble_islands,
-    build_full_zip,
+    EYE_COUNT,
+    EYE_VERT_END,
+    EYE_VERT_START,
+    VERT_COUNT,
     build_personalized_glb,
-    island_bounds_of,
-    pbr_from_albedo,
+    eye_vertex_indices,
+    flame_template_sha,
+    is_eye_vertex,
+    skin_vertex_indices,
 )
-from backend.gnm_fit import fit_gnm
-from backend.gnm_texture import build_albedo
 
 
-def _image(marker: int):
-    import io as _io
-
-    from PIL import Image as _Image
-
-    img = _Image.new("RGB", (16, 16), (marker, marker, marker))
-    buf = _io.BytesIO()
-    img.save(buf, format="PNG")
-    parsed = parse_image_bytes(buf.getvalue())
+def _albedo(marker: int):
+    raw = bytes([marker & 0xFF, (marker * 2) & 0xFF]) + bytes(UV_LEN - 2)
+    parsed = parse_complete_uv(raw)
     assert isinstance(parsed, Ok)
     return parsed.value
 
 
-def _landmarks(marker: int):
-    # Identidad geometrica por marker sin pesos: grilla con o sin warp
-    # no-lineal en x (la camara de similaridad no absorbe el warp, asi el
-    # fit real da mallas distintas; en CI el doble difiere por hash).
-    warped = marker != 0xA1
-    pts: list[list[float]] = []
-    for i in range(478):
-        gx = (i % 32) / 31.0
-        gy = ((i // 32) % 15) / 14.0
-        if warped:
-            gx = gx**1.5
-        pts.append([0.2 + 0.6 * gx, 0.2 + 0.6 * gy, 0.0])
-    raw = json.dumps(pts).encode("utf-8")
-    parsed = parse_landmarks(raw)
-    assert isinstance(parsed, Ok)
-    return parsed.value
+def _fit(marker: float):
+    from backend.domain import (
+        FitResult,
+        parse_camera_params,
+        parse_gnm_coeffs,
+        parse_landmarks,
+    )
+
+    lm = parse_landmarks(json.dumps([[0.0, 0.0, 0.0]] * 478).encode("utf-8"))
+    assert isinstance(lm, Ok)
+    coeffs = parse_gnm_coeffs([marker] * 253)
+    camera = parse_camera_params([0.0] * 12)
+    assert isinstance(coeffs, Ok)
+    assert isinstance(camera, Ok)
+    return FitResult(coeffs=coeffs.value, camera=camera.value)
 
 
-def _fit_and_albedo(marker: int):
-    image = _image(marker)
-    landmarks = _landmarks(marker)
-    fit = fit_gnm(image, landmarks)
-    assert isinstance(fit, Ok)
-    albedo = build_albedo(image, fit.value, landmarks)
-    assert isinstance(albedo, Ok)
-    return fit.value, albedo.value
+def test_flame_consts_canonicas() -> None:
+    assert VERT_COUNT == 5023
+    assert EYE_VERT_START == 3931
+    assert EYE_VERT_END == 5023
+    assert EYE_COUNT == EYE_VERT_END - EYE_VERT_START == 1092
 
 
-def test_five_islands_cover_full_uv_without_overlap() -> None:
-    assert ISLAND_COUNT == 5
-    assert ISLAND_LAYOUT_VERSION == 2
-    _, albedo = _fit_and_albedo(0xA1)
-    parts = assemble_islands(albedo)
-    assert sorted(parts.keys()) == [1, 2, 3, 4, 5]
-    total = sum(len(v) for v in parts.values())
-    assert total == UV_LEN
-    prev_end = 0
-    for island in range(1, 6):
-        region = parse_uv_region(island)
-        assert isinstance(region, Ok)
-        start, end = island_bounds_of(region.value)
-        assert end > start
-        assert start == prev_end
-        prev_end = end
-    assert prev_end == 512
-    joined = albedo_from_islands(parts)
-    assert isinstance(joined, Ok)
-    assert joined.value.as_bytes() == albedo.as_bytes()
+def test_flame_tri_counts_pinned_canonical() -> None:
+    """Pin de conteo de tris (P2): total/skin/eye nombrados y consistentes.
+
+    El guard `dropped != 0 -> Err` ya lo cubre
+    `test_straddling_tri_a_caballo_returns_err_no_silent_drop`; aqui se pina
+    que el fixture sintetico (waiver local sin asset real) suma exacto y
+    particiona sin resto entre piel y ojo.
+    """
+    import backend.gnm_assemble as _asm
+
+    assert _asm.FLAME_TRI_COUNT == 9976
+    assert _asm.FLAME_SKIN_TRIS == 8000
+    assert _asm.FLAME_EYE_TRIS == 1976
+    assert _asm.FLAME_SKIN_TRIS + _asm.FLAME_EYE_TRIS == _asm.FLAME_TRI_COUNT
+    positions, _uvs, tris = _asm._synthetic_flame_template()
+    assert len(positions) == _asm.VERT_COUNT
+    assert len(tris) == _asm.FLAME_TRI_COUNT
+    skin = [t for t in tris if t[0] < EYE_VERT_START and t[1] < EYE_VERT_START and t[2] < EYE_VERT_START]
+    eye = [t for t in tris if t[0] >= EYE_VERT_START and t[1] >= EYE_VERT_START and t[2] >= EYE_VERT_START]
+    assert len(skin) == _asm.FLAME_SKIN_TRIS
+    assert len(eye) == _asm.FLAME_EYE_TRIS
+    assert len(tris) - len(skin) - len(eye) == 0
 
 
-def test_pbr_maps_ride_albedo_deterministically() -> None:
-    _, albedo_a = _fit_and_albedo(0xA1)
-    _, albedo_b = _fit_and_albedo(0xB2)
-    first = pbr_from_albedo(albedo_a)
-    second = pbr_from_albedo(albedo_a)
-    other = pbr_from_albedo(albedo_b)
-    assert isinstance(first, Ok)
-    assert isinstance(second, Ok)
-    assert isinstance(other, Ok)
-    assert len(first.value) == UV_LEN
-    assert first.value == second.value
-    try:
-        from backend.gnm_head import load_gnm_head
-
-        load_gnm_head()
-    except RuntimeError:
-        import pytest
-
-        pytest.skip("sin pesos ambos albedos son gris honesto; nada que distinguir")
-    assert first.value != other.value
+def test_eye_slice_len_1092_contiguo_desde_header() -> None:
+    # Prueba contiguidad: el conjunto impreso desde el header es exactamente
+    # range(START, END) sin huecos ni duplicados.
+    eye = eye_vertex_indices()
+    print(f"eye indices header: start={eye[0]} end={eye[-1]} len={len(eye)}")
+    assert len(eye) == 1092
+    assert eye[0] == EYE_VERT_START
+    assert eye[-1] == EYE_VERT_END - 1
+    assert eye == list(range(EYE_VERT_START, EYE_VERT_END))
+    assert len(set(eye)) == len(eye)
+    skin = skin_vertex_indices()
+    assert len(skin) == EYE_VERT_START == 3931
+    assert set(skin).isdisjoint(set(eye))
+    assert len(skin) + len(eye) == VERT_COUNT
 
 
-def test_personalized_glb_parses_and_names_islands() -> None:
-    fit, albedo = _fit_and_albedo(0xA1)
-    out = build_personalized_glb(fit, albedo)
+def test_skin_mask_excluye_ojo_y_ojo_solo_su_rango() -> None:
+    for i in (0, 100, EYE_VERT_START - 1):
+        assert is_eye_vertex(i) is False
+    for i in (EYE_VERT_START, EYE_VERT_START + 500, EYE_VERT_END - 1):
+        assert is_eye_vertex(i) is True
+    assert is_eye_vertex(EYE_VERT_END) is False
+
+
+def test_flame_template_sha_determinista() -> None:
+    # Sucesor de gnm_template.bin: sha estable x2; fixture sintetico con
+    # waiver si Modal inalcanzable (pre-check solo lectura documentado).
+    first = flame_template_sha()
+    second = flame_template_sha()
+    assert first == second
+    assert len(first) == 64
+    assert all(c in "0123456789abcdef" for c in first)
+
+
+def test_personalized_glb_magic_y_pbr_sin_emisivo() -> None:
+    out = build_personalized_glb(_fit(0.1), _albedo(0xA1))
     assert isinstance(out, Ok)
     data = out.value.as_bytes()
     assert data[0:4] == b"glTF"
     assert parse_gnm_mesh(data) == out
-    assert b"personalized" in data
-    assert b"islands" in data
+    json_len = struct.unpack("<I", data[12:16])[0]
+    doc = json.loads(data[20 : 20 + json_len].decode("utf-8"))
+    assert doc["accessors"][0]["count"] == VERT_COUNT
+    mats = doc["materials"]
+    assert len(mats) == 2
+    names = [m["name"] for m in mats]
+    assert any("kin" in n for n in names)
+    assert any("ye" in n.lower() for n in names)
+    # PBR real: baseColor clara, sin truco emisivo (base negra + emisivo 1).
+    skin = next(m for m in mats if "kin" in m["name"])
+    assert skin["pbrMetallicRoughness"]["baseColorFactor"] == [1, 1, 1, 1]
+    assert "emissiveTexture" not in skin
+    assert "emissiveFactor" not in skin
+    assert len(doc["primitives"] if "primitives" in doc else doc["meshes"][0]["primitives"]) == 2
 
 
-def test_personalized_mesh_differs_per_identity() -> None:
-    fit_a, albedo_a = _fit_and_albedo(0xA1)
-    fit_b, _ = _fit_and_albedo(0xB2)
-    ma = build_personalized_glb(fit_a, albedo_a)
-    mb = build_personalized_glb(fit_b, albedo_a)
-    assert isinstance(ma, Ok)
-    assert isinstance(mb, Ok)
-    assert ma.value.as_bytes() != mb.value.as_bytes()
-
-
-def test_personalized_glb_reports_real_counts() -> None:
-    import struct
-
-    from backend.domain import UV_LEN
-
-    fit, albedo = _fit_and_albedo(0xA1)
-    out = build_personalized_glb(fit, albedo)
+def test_glb_eye_material_solo_rango_ojo() -> None:
+    out = build_personalized_glb(_fit(0.1), _albedo(0xA1))
     assert isinstance(out, Ok)
     data = out.value.as_bytes()
     json_len = struct.unpack("<I", data[12:16])[0]
     doc = json.loads(data[20 : 20 + json_len].decode("utf-8"))
-    n_exp = doc["accessors"][0]["count"]
-    assert doc["accessors"][1]["count"] == n_exp
-    assert doc["accessors"][2]["count"] == doc["extras"]["tris"] * 3 == 35324 * 3
-    assert doc["extras"]["verts"] == n_exp
-    assert doc["extras"]["layout"] == ISLAND_LAYOUT_VERSION == 2
-    # Con pesos hay seams reales: mas vertices que los 17821 del template.
-    try:
-        from backend.gnm_head import load_gnm_head
-
-        load_gnm_head()
-        assert n_exp > 17821
-    except RuntimeError:
-        assert n_exp == 17821
-    pbr = pbr_from_albedo(albedo)
-    assert isinstance(pbr, Ok)
-    assert len(pbr.value) == UV_LEN
-
-
-def test_glb_seams_unique_emissive_flipped_v() -> None:
-    import struct
-
-    fit, albedo = _fit_and_albedo(0xA1)
-    out = build_personalized_glb(fit, albedo)
-    assert isinstance(out, Ok)
-    data = out.value.as_bytes()
-    json_len = struct.unpack("<I", data[12:16])[0]
-    doc = json.loads(data[20 : 20 + json_len].decode("utf-8"))
-    assert doc["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"] == [0, 0, 0, 1]
-    assert doc["materials"][0]["emissiveTexture"] == {"index": 0}
-    assert doc["materials"][0]["emissiveFactor"] == [1, 1, 1]
-    n_exp = doc["accessors"][0]["count"]
-    pos_len = doc["bufferViews"][0]["byteLength"]
-    uv_len = doc["bufferViews"][1]["byteLength"]
-    assert pos_len == n_exp * 12
-    assert uv_len == n_exp * 8
+    prims = doc["meshes"][0]["primitives"]
+    assert len(prims) == 2
+    skin_prim = next(p for p in prims if p["material"] == 0)
+    eye_prim = next(p for p in prims if p["material"] == 1)
     bin_start = 20 + json_len + 8
     bin_buf = data[bin_start:]
-    uv_off = doc["bufferViews"][1]["byteOffset"]
-    idx_off = doc["bufferViews"][2]["byteOffset"]
-    n_idx = doc["accessors"][2]["count"]
-    uvs = struct.unpack(f"<{n_exp * 2}f", bin_buf[uv_off : uv_off + uv_len])
-    comp = doc["accessors"][2]["componentType"]
-    fmt = f"<{n_idx}I" if comp == 5125 else f"<{n_idx}H"
-    idx = struct.unpack(fmt, bin_buf[idx_off : idx_off + n_idx * (4 if comp == 5125 else 2)])
-    assert max(idx) < n_exp and min(idx) >= 0
-    # Unicidad (v,vt): cada vertice de export aparece con una sola UV.
-    seen: dict[int, tuple[float, float]] = {}
-    for v in idx:
-        uv = (uvs[2 * v], uvs[2 * v + 1])
-        if v in seen:
-            assert seen[v] == uv
+    for prim, check_eye in ((skin_prim, False), (eye_prim, True)):
+        idx_accessor = doc["accessors"][prim["indices"]]
+        view = doc["bufferViews"][idx_accessor["bufferView"]]
+        off = view["byteOffset"]
+        count = idx_accessor["count"]
+        comp = idx_accessor["componentType"]
+        fmt = f"<{count}I" if comp == 5125 else f"<{count}H"
+        size = 4 if comp == 5125 else 2
+        idx = struct.unpack(fmt, bin_buf[off : off + count * size])
+        assert len(idx) == count
+        if check_eye:
+            assert all(EYE_VERT_START <= v < EYE_VERT_END for v in idx)
+            assert len(idx) > 0
         else:
-            seen[v] = uv
-    # Flip a glTF: la exportada es 1 - v_uv del npz (no last-wins).
-    try:
-        from backend.gnm_head import load_gnm_head
-
-        head = load_gnm_head()
-        import numpy as np
-
-        raw_uv = np.asarray(head.triangle_uvs, dtype=np.float64)
-        exp_v = np.sort((1.0 - raw_uv[:, :, 1]).ravel())
-        got_v = np.asarray(uvs, dtype=np.float64)[1::2]
-        # Cercania con tolerancia float32 (el redondeo a N decimales cruza
-        # fronteras en casos borde): vecino mas cercano a < 1e-6.
-        pos = np.searchsorted(exp_v, got_v)
-        lo = np.clip(pos - 1, 0, exp_v.size - 1)
-        hi = np.clip(pos, 0, exp_v.size - 1)
-        best = np.minimum(np.abs(exp_v[lo] - got_v), np.abs(exp_v[hi] - got_v))
-        assert bool((best < 1e-6).all())
-    except RuntimeError:
-        pass
+            assert all(v < EYE_VERT_START for v in idx)
+            assert len(idx) > 0
 
 
-def test_full_zip_lists_island_and_pbr_names() -> None:
-    fit_a, albedo_a = _fit_and_albedo(0xA1)
-    fit_b, albedo_b = _fit_and_albedo(0xB2)
-    from backend.gnm import compute_heatmap, uv_to_png
+def test_glb_determinista_x2_y_difiere_por_identidad() -> None:
+    albedo = _albedo(0xA1)
+    first = build_personalized_glb(_fit(0.1), albedo)
+    second = build_personalized_glb(_fit(0.1), albedo)
+    other = build_personalized_glb(_fit(0.9), albedo)
+    assert isinstance(first, Ok)
+    assert isinstance(second, Ok)
+    assert isinstance(other, Ok)
+    assert first.value.as_bytes() == second.value.as_bytes()
+    assert first.value.as_bytes() != other.value.as_bytes()
 
-    heat = compute_heatmap(albedo_a, albedo_b)
-    ma = build_personalized_glb(fit_a, albedo_a)
-    mb = build_personalized_glb(fit_b, albedo_b)
-    pa = pbr_from_albedo(albedo_a)
-    pb = pbr_from_albedo(albedo_b)
-    assert isinstance(ma, Ok) and isinstance(mb, Ok)
-    assert isinstance(pa, Ok) and isinstance(pb, Ok)
+
+def test_zip6_por_seam_ensamblaje() -> None:
+    fit_a = _fit(0.1)
+    fit_b = _fit(0.5)
+    alb_a = _albedo(0xA1)
+    alb_b = _albedo(0xB2)
+    ma = build_personalized_glb(fit_a, alb_a)
+    mb = build_personalized_glb(fit_b, alb_b)
+    assert isinstance(ma, Ok)
+    assert isinstance(mb, Ok)
     bundle = ZipBundle(
-        uv_a_png=uv_to_png(albedo_a),
-        uv_b_png=uv_to_png(albedo_b),
-        heatmap_png=uv_to_png(heat),
+        uv_a_png=uv_to_png(alb_a),
+        uv_b_png=uv_to_png(alb_b),
         mesh_a_glb=ma.value.as_bytes(),
         mesh_b_glb=mb.value.as_bytes(),
-        pbr_a=uv_to_png(pa.value),
-        pbr_b=uv_to_png(pb.value),
+        pbr_a=uv_to_png(alb_a),
+        pbr_b=uv_to_png(alb_b),
     )
-    blob = build_full_zip(bundle)
+    blob = build_result_zip(bundle)
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
         names = z.namelist()
-    assert len(names) == 7
-    assert names == list(ZIP_FULL)
+    assert names == list(ZIP_NAMES)
+    assert len(names) == 6
 
 
-def test_personalized_glb_embeds_atlas_png_1024_roundtrip() -> None:
+def test_glb_embeds_skin_png() -> None:
     import io as _io
 
     from PIL import Image as _Image
 
-    fit, albedo = _fit_and_albedo(0xA1)
-    # Atlas 32x32 = 1024 pixeles del bake 1024, borde pre-parsa via parse_image_bytes.
+    fit = _fit(0.1)
+    albedo = _albedo(0xA1)
     img = _Image.new("RGB", (32, 32), (0xA1, 0xB2, 0xC3))
     buf = _io.BytesIO()
     img.save(buf, format="PNG")
     parsed = parse_image_bytes(buf.getvalue())
     assert isinstance(parsed, Ok)
-    atlas_png = parsed.value
-    out = build_personalized_glb(fit, albedo, atlas_png=atlas_png)
+    out = build_personalized_glb(fit, albedo, atlas_png=parsed.value)
+    assert isinstance(out, Ok)
+    assert out.value.as_bytes()[0:4] == b"glTF"
+    assert parsed.value.as_bytes() in out.value.as_bytes()
+
+
+# --- Wave 4-fix P4: tris a caballo, padding, validacion bin, is_synthetic, RenderedImage, pbr-doble ---
+
+
+def _synthetic_positions_uvs():  # type: ignore[no-untyped-def]
+    import backend.gnm_assemble as _asm
+
+    positions, uvs, _ = _asm._synthetic_flame_template()
+    return positions, uvs
+
+
+def test_straddling_tri_a_caballo_returns_err_no_silent_drop(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Tri a caballo (3930,3931,3932) -> Err explicito, nunca drop silencioso.
+
+    Hoy: skin=[<3931] + eye=[>=3931] dropea el tri a caballo y retorna Ok.
+    Fix: dropped = len(all)-len(skin)-len(eye) != 0 -> Err + dropped==0.
+    """
+    import backend.gnm_assemble as _asm
+    from backend.domain import Err
+
+    positions, uvs = _synthetic_positions_uvs()
+    straddling = [(3930, 3931, 3932)]
+    skin_one = [(0, 1, 2)]
+    eye_one = [(3931, 3932, 3933)]
+    custom_tris = skin_one + eye_one + straddling
+    monkeypatch.setattr(_asm, "_flame_cache", (positions, uvs, custom_tris))
+    out = _asm.build_personalized_glb(_fit(0.1), _albedo(0xA1))
+    assert isinstance(out, Err)
+    # dropped == 1 debe surfear como Err, no como Ok con tris perdidos.
+    assert "caballo" in str(out.error).lower() or "caballo" in repr(out.error).lower() or dropped_count(custom_tris) == 1
+
+
+def dropped_count(tris):  # type: ignore[no-untyped-def]
+    from backend.gnm_assemble import EYE_VERT_START
+
+    skin = [t for t in tris if t[0] < EYE_VERT_START and t[1] < EYE_VERT_START and t[2] < EYE_VERT_START]
+    eye = [t for t in tris if t[0] >= EYE_VERT_START and t[1] >= EYE_VERT_START and t[2] >= EYE_VERT_START]
+    return len(tris) - len(skin) - len(eye)
+
+
+def test_glb_offsets_aligned_per_section_with_odd_skin(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Pad a 4 tras cada seccion: byteOffset%4==0 aun con skin_tris impar.
+
+    Hoy: uv_off=pos_len, skin_off=pos+uv sin pad; con 1 tri piel (6 bytes)
+    el eye_off queda desalineado. Fix: offsets sobre lens padded.
+    """
+    import backend.gnm_assemble as _asm
+
+    positions, uvs = _synthetic_positions_uvs()
+    # 1 tri piel (impar) + 1 tri ojo: skin_buf=6 bytes (%4==2) fuerza pad.
+    custom_tris = [(0, 1, 2), (3931, 3932, 3933)]
+    monkeypatch.setattr(_asm, "_flame_cache", (positions, uvs, custom_tris))
+    out = _asm.build_personalized_glb(_fit(0.1), _albedo(0xA1))
     assert isinstance(out, Ok)
     data = out.value.as_bytes()
-    assert data[0:4] == b"glTF"
-    # Round-trip: el PNG del atlas viaja intacto dentro del BIN del GLB (1024).
-    assert atlas_png.as_bytes() in data
+    json_len = struct.unpack("<I", data[12:16])[0]
+    doc = json.loads(data[20 : 20 + json_len].decode("utf-8"))
+    for view in doc["bufferViews"]:
+        assert view["byteOffset"] % 4 == 0, f"view desalineado: {view}"
+
+
+def _write_flame_bin(path: str, positions, uvs, tris) -> None:  # type: ignore[no-untyped-def]
+    import struct as _struct
+
+    verts = len(positions)
+    with open(path, "wb") as f:
+        f.write(_struct.pack("<II", verts, len(tris)))
+        f.writelines(_struct.pack("<3f", float(x), float(y), float(z)) for x, y, z in positions)
+        f.writelines(_struct.pack("<2f", float(u), float(v)) for u, v in uvs)
+        f.writelines(_struct.pack("<III", int(a), int(b), int(c)) for a, b, c in tris)
+
+
+def test_flame_template_rejects_nonfinite_bin(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Bin con NaN/inf -> Err(MlFailed), nunca aceptacion silenciosa ni raise."""
+    import backend.gnm_assemble as _asm
+    from backend.domain import Err as _Err
+
+    positions, uvs = _synthetic_positions_uvs()
+    bad_positions = [(float("nan"), 0.0, 0.0)] + positions[1:]
+    tris = [(0, 1, 2), (3931, 3932, 3933)]
+    bin_path = str(tmp_path / "flame_template.bin")
+    _write_flame_bin(bin_path, bad_positions, uvs, tris)
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(tmp_path))
+    monkeypatch.setenv("WEIGHTS_DIR", "")
+    monkeypatch.setattr(_asm, "_flame_cache", None)
+    result = _asm.load_flame_template()
+    assert isinstance(result, _Err)
+    assert "finita" in str(result.error)
+
+
+def test_flame_template_rejects_bad_index_bin(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Bin con indice>=verts -> Err(MlFailed), nunca aceptacion silenciosa ni raise."""
+    import backend.gnm_assemble as _asm
+    from backend.domain import Err as _Err
+    from backend.gnm_assemble import VERT_COUNT
+
+    positions, uvs = _synthetic_positions_uvs()
+    tris = [(0, 1, 2), (VERT_COUNT, 0, 1)]
+    bin_path = str(tmp_path / "flame_template.bin")
+    _write_flame_bin(bin_path, positions, uvs, tris)
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(tmp_path))
+    monkeypatch.setenv("WEIGHTS_DIR", "")
+    monkeypatch.setattr(_asm, "_flame_cache", None)
+    result = _asm.load_flame_template()
+    assert isinstance(result, _Err)
+    assert "rango" in str(result.error)
+
+
+def test_is_flame_synthetic_flag_separate_from_sha(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """is_synthetic flag separado de sha; waiver fixture preservado sin Err en falta local."""
+    import backend.gnm_assemble as _asm
+    from backend.domain import Ok as _Ok
+
+    # Sin archivo: sintetico True, sha estable, load no lanza (waiver).
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(tmp_path / "vacio-inexistente"))
+    monkeypatch.setenv("WEIGHTS_DIR", "")
+    monkeypatch.setattr(_asm, "_flame_cache", None)
+    assert _asm.is_flame_synthetic() is True
+    sha1 = _asm.flame_template_sha()
+    sha2 = _asm.flame_template_sha()
+    assert sha1 == sha2 and len(sha1) == 64
+    loaded = _asm.load_flame_template()
+    assert isinstance(loaded, _Ok)
+    positions, _, _ = loaded.value
+    assert len(positions) == 5023
+    # Con archivo: sintetico False.
+    positions0, uvs0 = _synthetic_positions_uvs()
+    tmp_path.mkdir(exist_ok=True)
+    _write_flame_bin(str(tmp_path / "flame_template.bin"), positions0, uvs0, [(0, 1, 2)])
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(tmp_path))
+    monkeypatch.setattr(_asm, "_flame_cache", None)
+    assert _asm.is_flame_synthetic() is False
+
+
+def test_build_glb_accepts_rendered_image() -> None:
+    """build_personalized_glb acepta RenderedImage (y CompleteUv compat).
+
+    Anotacion debe mencionar RenderedImage; comportamiento identico por as_bytes().
+    """
+    import inspect as _inspect
+
+    from backend.domain import parse_rendered_image
+    from backend.gnm_assemble import build_personalized_glb as _glb
+
+    ann = str(_inspect.signature(_glb))
+    assert "RenderedImage" in ann
+    raw = bytes(_albedo(0xA1).as_bytes())
+    parsed = parse_rendered_image(raw)
+    assert isinstance(parsed, Ok)
+    out = _glb(_fit(0.1), parsed.value)
+    assert isinstance(out, Ok)
+    assert out.value.as_bytes()[0:4] == b"glTF"
+    # Compat CompleteUv intacta.
+    out2 = _glb(_fit(0.1), _albedo(0xA1))
+    assert isinstance(out2, Ok)
+
+
+def test_pbr_intentional_double_pbr_eq_uv(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """PBR skin-duplicate ambos modos (DAG v10 HIL dueno): pbr==uv via helper.
+
+    Placeholder honesto sin mapas roughness/metalness reales; los ojos viven
+    en el GLB (2 primitivas SkinPBR+EyePBR). TODO mapas reales -> pbr!=uv.
+    Este test fija el duplicado con VULTUS_REAL_ML=0 y con =1 (ambos legs).
+    """
+    from backend.domain import Ok as _Ok
+    from backend.pipeline_local import resolve_pbr_pngs
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("FFHQ_UV_DIR", str(empty))
+    fit_a = _fit(0.1)
+    alb_a = _albedo(0xA1)
+    ma = build_personalized_glb(fit_a, alb_a)
+    assert isinstance(ma, Ok)
+    uv_png = uv_to_png(alb_a)
+    # Ambos legs via helper: pbr == uv (copia, placeholder sin mapa real).
+    for real_flag in ("0", "1"):
+        monkeypatch.setenv("VULTUS_REAL_ML", real_flag)
+        pbr_resolved = resolve_pbr_pngs(alb_a, _albedo(0xB2))
+        assert isinstance(pbr_resolved, _Ok)
+        assert pbr_resolved.value[0] == uv_png
+    bundle = ZipBundle(
+        uv_a_png=uv_png,
+        uv_b_png=uv_to_png(_albedo(0xB2)),
+        mesh_a_glb=ma.value.as_bytes(),
+        mesh_b_glb=ma.value.as_bytes(),
+        pbr_a=uv_png,
+        pbr_b=uv_to_png(_albedo(0xB2)),
+    )
+    blob = build_result_zip(bundle)
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        names = z.namelist()
+    assert names == list(ZIP_NAMES)

@@ -194,12 +194,14 @@ def test_impl_fit_guard_blocks_silent_double(monkeypatch, tmp_path):
 
 
 def test_impl_fit_err_mapping(monkeypatch):
+    from backend import flame_fit
+
     monkeypatch.setattr(modal_app, "REAL_MODE", "0")
     image = _proven_image()
     landmarks = _proven_landmarks()
     monkeypatch.setattr(
-        gnm_fit,
-        "fit_gnm",
+        flame_fit,
+        "fit_flame",
         lambda _i, _l: Err(FitFailed(detail=MlDecode(details="boom"))),
     )
     result = modal_app._impl_fit(image, landmarks)
@@ -208,7 +210,7 @@ def test_impl_fit_err_mapping(monkeypatch):
     assert domain_to_message(result.error) == "internal error"
     assert "boom" not in domain_to_message(result.error)
     monkeypatch.setattr(
-        gnm_fit, "fit_gnm", lambda _i, _l: Err(EmptyPayload())
+        flame_fit, "fit_flame", lambda _i, _l: Err(EmptyPayload())
     )
     empty = modal_app._impl_fit(image, landmarks)
     assert isinstance(empty, Err)
@@ -217,15 +219,15 @@ def test_impl_fit_err_mapping(monkeypatch):
 
 
 def test_impl_texture_mapping(monkeypatch):
-    from backend import gnm_texture
+    from backend import flame_texture
 
     monkeypatch.setattr(modal_app, "REAL_MODE", "0")
     image = _proven_image()
     landmarks = _proven_landmarks()
     fit = _proven_fit_result()
     monkeypatch.setattr(
-        gnm_texture,
-        "build_albedo",
+        flame_texture,
+        "bake_flame",
         lambda _i, _f, _l: Err(MlFailed(detail=MlDecode(details="tex boom"))),
     )
     result = modal_app._impl_texture(image, fit, landmarks)

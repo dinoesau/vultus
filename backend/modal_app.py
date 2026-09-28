@@ -8,9 +8,10 @@ Arquitectura (sin Rust):
   La API nunca importa torch/diffusers/mediapipe; los consume vía HTTP:
   `MlSidecarClient { landmarks, fit, texture }` -> `POST /ml/*`.
 
-Cadena GNM (plan-gnm-fit-texture-pbr):
+Cadena FLAME (plan-flame-deca-render Wave 2):
 - landmarks: MediaPipe Tasks `face_landmarker.task`, 478 puntos.
-- fit: fitter GNM directo -> 253 coefs + camara 3x4 (1060 bytes).
+- fit: fit FLAME feed-forward (DECA en Modal, replay local) -> 253 coefs
+  + camara 3x4 (1060 bytes). Request v2: VERSION u8 + u32 BE len + body.
 - texture: proyeccion foto + warp TPS + inpaint solo ocluidas -> albedo 512.
 - Sin CUDA ni pesos, los dobles deterministas siguen respondiendo el
   mismo contrato para regresión rápida local (CPU).
@@ -67,16 +68,31 @@ UV_HEIGHT = 512
 UV_CHANNELS = 3
 UV_LEN = UV_WIDTH * UV_HEIGHT * UV_CHANNELS  # 786432
 # Env con defaults seguros, nada hardcodeado.
+def _env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
 ML_PORT = int(os.environ.get("ML_PORT", "8081"))
-WEIGHTS_DIR = os.environ.get("WEIGHTS_DIR", "/weights")
-# Ruta de assets GNM: template + islas en Volume.
-GNM_ASSETS_DIR = os.environ.get("GNM_ASSETS_DIR", os.path.join(WEIGHTS_DIR, "gnm"))
+# Raiz del Volume montado (F4): todo mount path deriva de aqui por env.
+# Sin cambio por defecto: WEIGHTS_ROOT=/weights y cada *_DIR apunta al
+# literal historico (/weights/gnm, /weights/ffhq-uv, ...). WEIGHTS_DIR se
+# conserva como alias compat (tests y gnm_assemble lo leen).
+WEIGHTS_ROOT = _env("WEIGHTS_ROOT", _env("WEIGHTS_DIR", "/weights")) or "/weights"
+WEIGHTS_DIR = WEIGHTS_ROOT
+# Rutas de assets: template + islas en Volume, solo por env con default.
+GNM_ASSETS_DIR = _env("GNM_ASSETS_DIR", os.path.join(WEIGHTS_ROOT, "gnm")) or os.path.join(WEIGHTS_ROOT, "gnm")
+FFHQ_UV_DIR = _env("FFHQ_UV_DIR", os.path.join(WEIGHTS_ROOT, "ffhq-uv")) or os.path.join(WEIGHTS_ROOT, "ffhq-uv")
+DECA_DIR = _env("DECA_DIR", os.path.join(WEIGHTS_ROOT, "deca")) or os.path.join(WEIGHTS_ROOT, "deca")
+FLAME_ASSETS_DIR = _env("FLAME_ASSETS_DIR", os.path.join(WEIGHTS_ROOT, "flame")) or os.path.join(
+    WEIGHTS_ROOT, "flame"
+)
+# Nombre del Volume (Factor III: config por env, ver .env.example).
+MODAL_VOLUME_NAME = _env("MODAL_VOLUME", "vultus-weights") or "vultus-weights"
 # VULTUS_REAL_ML: 1 fuerza real, 0 fuerza dobles, auto decide por pesos+deps.
 REAL_MODE = os.environ.get("VULTUS_REAL_ML", "auto").lower()
 
-# Nombres del bundle: dominio es dueno del 7-tupla ZIP_FULL (ver backend/domain.py).
+# Nombres del bundle: dominio es dueno de ZIP_NAMES zip-6 (ver backend/domain.py).
 # Este modulo no define ZIP_* locales para evitar divergencia con edge/contract.ts.
-ZIP_HEATMAP = "heatmap.png"
 ZIP_MESH_A = "mesh_a.glb"
 ZIP_MESH_B = "mesh_b.glb"
 GLB_MAGIC = b"glTF"
@@ -138,6 +154,10 @@ def _weights_present() -> bool:
 
 
 def _use_real() -> bool:
+    # Autoridad: REAL_MODE (snapshot de VULTUS_REAL_ML al importar, patcheable
+    # en tests white-box). La garantia sin-fallback con VULTUS_REAL_ML=1
+    # tardio la cierra el seam (fit_flame/bake_flame leen el env en vivo y
+    # fallan loud sin pesos), nunca un doble silencioso.
     if REAL_MODE == "1":
         return True
     if REAL_MODE == "0":
@@ -219,39 +239,46 @@ def _impl_landmarks(image: "ImageBytes") -> bytes:
 
 
 def _impl_fit(image: "ImageBytes", landmarks: "Landmarks") -> "Result[bytes, DomainError]":
-    """Nucleo fit GNM sobre tipos probados -> 1060 bytes (253f + 12f LE).
+    """Nucleo fit FLAME feed-forward sobre tipos probados -> 1060 bytes (253f + 12f LE).
 
-    Borde: el handler HTTP parsea una vez via decode_fit_request a
-    (Landmarks, ImageBytes) y llama aqui con (image, landmarks) ya probados.
-    Retorna Result, nunca lanza por outcomes de dominio. JobId queda en
-    shell (str), nunca como objeto aqui.
+    Borde: el handler HTTP parsea una vez via decode_fit_request (v2:
+    VERSION u8 + u32 BE len + body) a (Landmarks, ImageBytes) y llama aqui
+    con (image, landmarks) ya probados. Retorna Result, nunca lanza por
+    outcomes de dominio. JobId queda en shell (str), nunca como objeto aqui.
 
     S7 prod-block: con `_use_real()` el doble esta prohibido. Si el fit
-    real no esta disponible (npz ausente) se retorna Err(FitFailed) -> 500
-    generico via domain_to_status, nunca doble silencioso.
+    real no esta disponible (pesos DECA ausentes) se retorna Err(FitFailed)
+    -> 500 generico via domain_to_status, nunca doble silencioso.
     """
     try:
         from backend.domain import Err as _Err
         from backend.domain import FitFailed as _FitFailed
         from backend.domain import MlDecode as _MlDecode
         from backend.domain import Ok as _Ok
-        from backend.gnm_fit import fit_gnm
+        from backend.flame_fit import _real_fit_available as _flame_real
+        from backend.flame_fit import fit_flame
         from backend.pipeline_local import encode_fit_result
     except ImportError:  # pragma: no cover - paridad ruta plana en imagen
         from domain import Err as _Err  # type: ignore[no-redef]
         from domain import FitFailed as _FitFailed  # type: ignore[no-redef]
         from domain import MlDecode as _MlDecode  # type: ignore[no-redef]
         from domain import Ok as _Ok  # type: ignore[no-redef]
-        from gnm_fit import fit_gnm  # type: ignore[no-redef]
+        from flame_fit import (
+            _real_fit_available as _flame_real,  # type: ignore[no-redef]
+        )
+        from flame_fit import fit_flame  # type: ignore[no-redef]
         from pipeline_local import encode_fit_result  # type: ignore[no-redef]
-    if _use_real() and not _gnm_npz_present():
-        # Sin npz no hay fit real (`_real_fit_available` seria False y el
-        # seam caeria al doble): Err ruidoso aqui, nunca doble silencioso.
-        # Causa solo en logs, cliente ve "internal error" via domain_to_message.
-        logger.warning("real fit required but GNM head weights missing (npz ausente)")
-        return _Err(_FitFailed(detail=_MlDecode(details="real fit required but head weights missing")))
-    result = fit_gnm(image, landmarks)
+    if _use_real() and not _flame_real():
+        # Sin pesos DECA no hay fit real: Err ruidoso aqui, nunca doble
+        # silencioso. Causa solo en logs, cliente ve "internal error".
+        logger.warning("real flame fit required but DECA weights missing (DECA_DIR/FLAME_ASSETS_DIR vacios)")
+        return _Err(_FitFailed(detail=_MlDecode(details="real flame fit required but deca weights missing")))
+    result = fit_flame(image, landmarks)
     if isinstance(result, _Err):
+        # Causa extraida una sola vez en el shell: el cliente ve generico
+        # via domain_to_message, el log conserva el detalle para debug.
+        # Sin refactor amplio (el dominio conserva details:str, no cause:Exception).
+        logger.warning("fit flame failed err=%s", result.error)
         return result
     return _Ok(encode_fit_result(result.value))
 
@@ -259,23 +286,43 @@ def _impl_fit(image: "ImageBytes", landmarks: "Landmarks") -> "Result[bytes, Dom
 def _impl_texture(
     image: "ImageBytes", fit: "FitResult", landmarks: "Landmarks"
 ) -> "Result[bytes, DomainError]":
-    """Delega a `gnm_texture.build_albedo`: tipos probados -> UV_LEN bytes.
+    """Nucleo textura FLAME con completion sobre tipos probados -> UV_LEN bytes.
 
     Borde: el handler HTTP parsea una vez via decode_texture_request a
     (ImageBytes, FitResult, Landmarks) y llama aqui sin re-parsear.
     Retorna Result, nunca lanza por outcomes de dominio. JobId queda en
     shell (str), nunca como objeto aqui.
+
+    S7 prod-block: con `_use_real()` el doble esta prohibido. Si la
+    completion real no esta disponible (pesos FFHQ-UV ausentes) se retorna
+    Err(MlFailed) -> 500 generico via domain_to_status, nunca doble
+    silencioso.
     """
     try:
         from backend.domain import Err as _Err2
+        from backend.domain import MlDecode as _MlDecode2
+        from backend.domain import MlFailed as _MlFailed2
         from backend.domain import Ok as _Ok2
-        from backend.gnm_texture import build_albedo
+        from backend.flame_texture import _real_texture_available as _flame_tex_real
+        from backend.flame_texture import bake_flame
     except ImportError:  # pragma: no cover - paridad ruta plana en imagen
         from domain import Err as _Err2  # type: ignore[no-redef]
+        from domain import MlDecode as _MlDecode2  # type: ignore[no-redef]
+        from domain import MlFailed as _MlFailed2  # type: ignore[no-redef]
         from domain import Ok as _Ok2  # type: ignore[no-redef]
-        from gnm_texture import build_albedo  # type: ignore[no-redef]
-    result = build_albedo(image, fit, landmarks)
+        from flame_texture import (  # type: ignore[no-redef]
+            _real_texture_available as _flame_tex_real,
+        )
+        from flame_texture import bake_flame  # type: ignore[no-redef]
+    if _use_real() and not _flame_tex_real():
+        # Sin pesos FFHQ-UV no hay completion real: Err ruidoso aqui, nunca
+        # doble silencioso. Causa solo en logs, cliente ve "internal error".
+        logger.warning("real flame texture required but FFHQ-UV weights missing (FFHQ_UV_DIR vacio)")
+        return _Err2(_MlFailed2(detail=_MlDecode2(details="real flame texture required but ffhq-uv weights missing")))
+    result = bake_flame(image, fit, landmarks)
     if isinstance(result, _Err2):
+        # Causa extraida una sola vez en el shell (igual que _impl_fit).
+        logger.warning("bake flame failed err=%s", result.error)
         return result
     return _Ok2(result.value.as_bytes())
 
@@ -294,14 +341,39 @@ if HAVE_MODAL:
     # Imagen por receta (no from_dockerfile): cada paso se cachea por hash y
     # el codigo viaja en el paquete del deploy, asi los deploys de solo-codigo
     # no reconstruyen nada (<60s). Solo cambian la imagen los cambios a esta
-    # receta o a requirements.txt. Paridad con Dockerfile.gpu (uso local):
-    # misma base devel, mismos paquetes, mismo orden torch primero.
+    # receta, a requirements.txt o a requirements.lock/requirements-constraints.txt.
+    # Paridad con Dockerfile.gpu (uso local): misma base devel, mismos
+    # paquetes, mismo orden torch primero.
     # Base devel (no runtime): el rasterizador CUDA se compila desde source;
     # sin nvcc quedaria solo-CPU.
+    # F2 pin digest (Fix Cycle 3, 2026-09-28): base pineada por digest amd64,
+    # no por tag movil. Manifest evidence (solo lectura, sin pull):
+    # tag nvidia/cuda:12.6.0-devel-ubuntu22.04, manifest-list digest
+    # sha256:af25d2ef68f7aedaf0eb179e67773e64feefc3b65a12f59a6cd604ca7c53bb57,
+    # amd64/linux digest
+    # sha256:e4a0337cd453e253ede68d4fe564941bc30336143c770eaad3c9b0db506c3bce
+    # (arm64: sha256:2426f3e24139b43339d3c4fd093a5881eee4cef8cef3797ff6b43f98e3a9bf2c).
+    # Verificado via registry-1.docker.io/v2/nvidia/cuda/manifests/<tag> con
+    # token de auth.docker.io. Re-pinear si el tag se republica: repetir el
+    # fetch y actualizar ambas lineas (tag + digest amd64).
+    # F2 split CI-vs-Modal documentado: backend/requirements.lock (torch
+    # 2.13.0 unificado, hashes via `uv pip compile ... -c
+    # backend/requirements-constraints.txt`) es la fuente reproducible para
+    # CI (`pip install --require-hashes -r backend/requirements.lock`, job
+    # lock-check). Modal instala primero el build cu126 (misma VERSION
+    # 2.13.0/0.28.0, variante GPU) y luego requirements.txt, que es
+    # torch-free por diseno para no clobberar el cu126 con el build PyPI;
+    # fvcore==0.1.5.post20221221 e iopath==0.1.10 espejan el lock.
+    # missing-evidence: el build de imagen (Modal + compilacion pytorch3d
+    # ~9min) no corre en este lane; el cambio de receta es build-deferred y
+    # lo verifica el job manual docker-gpu / `modal deploy`.
     # Deploys estrictamente secuenciales: dos builds concurrentes no comparten
     # cache y ambos pagan el build completo.
     image = (
-        modal.Image.from_registry("nvidia/cuda:12.6.0-devel-ubuntu22.04", add_python="3.10")
+        modal.Image.from_registry(
+            "nvidia/cuda:12.6.0-devel-ubuntu22.04@sha256:e4a0337cd453e253ede68d4fe564941bc30336143c770eaad3c9b0db506c3bce",
+            add_python="3.10",
+        )
         .apt_install("build-essential", "python3-dev", "ninja-build", "curl", "libgl1", "libglib2.0-0", "git")
         .pip_install(
             "torch==2.13.0",
@@ -310,14 +382,20 @@ if HAVE_MODAL:
         )
         .pip_install_from_requirements("backend/requirements.txt")
         .run_commands(
-            "pip install --no-cache-dir fvcore iopath",
+            # fvcore/iopath pineados igual que backend/requirements.txt:
+            # prohibido `pip install` sin version en la imagen (Wave 2).
+            "pip install --no-cache-dir fvcore==0.1.5.post20221221 iopath==0.1.10",
             # Sin `|| echo`: pytorch3d es requerido en prod (rasterizador DECA).
             # --no-build-isolation: su setup.py importa torch y el env aislado
             # PEP 517 no lo trae (ahi moria con ModuleNotFoundError: torch).
             # CXX=g++: torch elige clang++ por defecto y no existe en la imagen.
             # FORCE_CUDA=1: el builder no tiene GPU y setup.py decidiria solo-CPU
             # aunque haya nvcc; T4 es sm_75, una sola arch para compilar rapido.
-            "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST=7.5 CXX=g++ CC=gcc pip install --no-cache-dir --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git",
+            # F2 pin (Fix Cycle 2 Lane A, 2026-09-28): pytorch3d pineado al SHA
+            # de HEAD resuelto via `git ls-remote ... HEAD`
+            # (978cd99221b9e0a6a568f1d427854d73363265cf). Sin este pin cada
+            # build podia traer un commit distinto de main.
+            "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST=7.5 CXX=g++ CC=gcc pip install --no-cache-dir --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@978cd99221b9e0a6a568f1d427854d73363265cf",
         )
         # Codigo compartido en la imagen: Modal solo monta `modal_app.py`;
         # sin esto el consumer muere con ModuleNotFoundError al importar
@@ -328,7 +406,7 @@ if HAVE_MODAL:
     )
 
     # Volume para cachear pesos MediaPipe / GNM (evita re-descarga en cold start)
-    weights = modal.Volume.from_name("vultus-weights", create_if_missing=True)
+    weights = modal.Volume.from_name(MODAL_VOLUME_NAME, create_if_missing=True)
 else:
     app = None  # type: ignore
     image = None  # type: ignore
@@ -354,10 +432,6 @@ PROGRESS_FIT = 0.40
 PROGRESS_TEXTURE = 0.75
 PROGRESS_ASSEMBLE = 0.95
 PROGRESS_DONE = 1.0
-
-
-def _env(name: str, default: str = "") -> str:
-    return os.environ.get(name, default).strip()
 
 
 def _load_r2_secret() -> SecretStr | None:
@@ -539,9 +613,9 @@ def mediapipe_infer(job_id: str, image: "ImageBytes") -> bytes:
 def fit_infer(
     job_id: str, image: "ImageBytes", landmarks: "Landmarks"
 ) -> "Result[bytes, DomainError]":
-    """Nucleo fit GNM sobre tipos probados -> 1060 bytes (253 coefs + 12 camara).
+    """Nucleo fit FLAME feed-forward sobre tipos probados -> 1060 bytes.
 
-    Borde: (image, landmarks) ya probados via decode_fit_request en el
+    Borde: (image, landmarks) ya probados via decode_fit_request (v2) en el
     handler o via R2 + landmarks probados en el worker. Retorna Result,
     nunca lanza por outcomes de dominio. JobId queda en shell (str).
     """
@@ -553,9 +627,9 @@ def fit_infer(
     result = _impl_fit(image, landmarks)
     dt = int((time.perf_counter() - t0) * 1000)
     try:
-        from backend.gnm_fit import _LAST_FIT_STATS as _fit_stats
+        from backend.flame_fit import _LAST_FIT_STATS as _fit_stats
     except ImportError:  # pragma: no cover - paridad ruta plana en imagen
-        from gnm_fit import _LAST_FIT_STATS as _fit_stats  # type: ignore[no-redef]
+        from flame_fit import _LAST_FIT_STATS as _fit_stats  # type: ignore[no-redef]
     iterations = int(_fit_stats.get("iterations", 0))
     loss = float(_fit_stats.get("loss", float("nan")))
     if isinstance(result, _ErrFI):
@@ -596,7 +670,7 @@ def texture_infer(
 
 
 def fit_worker(job_id: str, r2_key: "R2Key", landmarks: "Landmarks"):
-    """Worker fit - GNM fitting directo (GPU, 1 input por GPU). Lee imagen de R2.
+    """Worker fit - FLAME feed-forward (GPU, 1 input por GPU). Lee imagen de R2.
 
     Borde: r2_key (R2Key) y landmarks (Landmarks) ya probados; imagen se
     obtiene via _fetch_r2_bytes -> Result[ImageBytes] y se pasa probada a
@@ -641,23 +715,32 @@ if HAVE_MODAL:
         gpu="T4",
         cpu=4,
         memory=32768,
-        volumes={"/weights": weights},
+        volumes={WEIGHTS_ROOT: weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
         max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU
         timeout=60,
         # Sin esto el loader cae a la ruta del repo (ausente en la imagen)
         # y el fit sirve dobles silenciosos en prod; con VULTUS_REAL_ML=1
         # la ausencia de pesos falla ruidoso en vez de devolver el doble.
-        env={"GNM_ASSETS_DIR": "/weights/gnm", "VULTUS_REAL_ML": "1"},
+        # Puente FLAME-DECA/FFHQ-UV solo por env (Wave 6-fix: forward real
+        # cableado en flame_fit/flame_texture, deadline fit 10s).
+        env={
+            "GNM_ASSETS_DIR": GNM_ASSETS_DIR,
+            "VULTUS_REAL_ML": "1",
+            "FFHQ_UV_DIR": FFHQ_UV_DIR,
+            "DECA_DIR": DECA_DIR,
+            "FLAME_ASSETS_DIR": FLAME_ASSETS_DIR,
+        },
     )(fit_worker)
 
 
 def texture_worker(job_id: str, image: "ImageBytes", fit: "FitResult", landmarks: "Landmarks"):
     """
-    Worker textura - proyeccion + warp + inpaint solo ocluidas (GPU).
+    Worker textura - completion FFHQ-UV sin gris (GPU).
     Entrada: tipos probados (ImageBytes, FitResult, Landmarks).
-    Salida: albedo UV_LEN bytes.
-    Pool de 2 contenedores para paralelizar cara A/B del mismo job.
+    Salida: albedo UV_LEN bytes sin SKIN_SENTINEL en mascara skin.
+    Pool de 2 contenedores para paralelizar cara A/B del mismo job,
+    1 input por container (anti-OOM).
     """
     try:
         from backend.domain import Err as _ErrTW
@@ -686,12 +769,21 @@ if HAVE_MODAL:
         gpu="T4",
         cpu=2,
         memory=16384,
-        volumes={"/weights": weights},
+        volumes={WEIGHTS_ROOT: weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
         max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU (anti-OOM)
+        concurrency_limit=1,  # Wave 3: una completion pesada por container, sin OOM
         timeout=60,
         min_containers=0,
-        env={"GNM_ASSETS_DIR": "/weights/gnm", "VULTUS_REAL_ML": "1"},
+        # Puente FLAME-DECA/FFHQ-UV solo por env (Wave 6-fix: completion
+        # real cableada en flame_texture, ojos en bake separado).
+        env={
+            "GNM_ASSETS_DIR": GNM_ASSETS_DIR,
+            "VULTUS_REAL_ML": "1",
+            "FFHQ_UV_DIR": FFHQ_UV_DIR,
+            "DECA_DIR": DECA_DIR,
+            "FLAME_ASSETS_DIR": FLAME_ASSETS_DIR,
+        },
     )(texture_worker)
 
 
@@ -728,7 +820,7 @@ if HAVE_MODAL:
         image=image,
         cpu=2,
         memory=4096,
-        volumes={"/weights": weights},
+        volumes={WEIGHTS_ROOT: weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
         max_containers=4,
         timeout=30,
@@ -818,38 +910,44 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
 
     Borde: r2_a/r2_b ya probados (R2Key); imagenes via _fetch_r2_bytes ->
     Result[ImageBytes]; landmarks via parse_landmarks; fit via parse_fit_result;
-    uv via parse_complete_uv + compute_heatmap (dueno unico en dominio/gnm).
-    JobId queda en shell (str).
+    uv via parse_complete_uv. Zip-6 via ZipBundle/build_result_zip sin heatmap
+    (ADR-008). PBR skin-duplicate via resolve_pbr_pngs (ambos modos duplican
+    el albedo: placeholder honesto sin mapas reales; ojos en GLB 2
+    primitivas; TODO mapas reales futuros). JobId queda en shell (str).
     """
     import concurrent.futures
 
     try:
         from backend.domain import Err as _ErrR
         from backend.domain import Ok as _OkR
+        from backend.domain import ZipBundle as _BundleR
         from backend.domain import domain_to_message as _msgR
         from backend.domain import domain_to_status as _statusR
         from backend.domain import parse_complete_uv as _parse_uvR
         from backend.domain import parse_landmarks as _parse_lmR
-        from backend.gnm import compute_heatmap as _heatmapR
-        from backend.gnm_assemble import build_full_zip as _full_zip
+        from backend.gnm import build_result_zip as _zip6R
+        from backend.gnm import uv_to_png as _uv_pngR
         from backend.gnm_assemble import build_personalized_glb as _glb
-        from backend.gnm_assemble import pbr_from_albedo as _pbr
         from backend.pipeline_local import parse_fit_result as _parse_fit
+        from backend.pipeline_local import resolve_pbr_pngs as _resolve_pbrR
     except ImportError:  # pragma: no cover - paridad ruta plana en imagen
         from domain import Err as _ErrR  # type: ignore[no-redef]
         from domain import Ok as _OkR  # type: ignore[no-redef]
+        from domain import ZipBundle as _BundleR  # type: ignore[no-redef]
         from domain import domain_to_message as _msgR  # type: ignore[no-redef]
         from domain import domain_to_status as _statusR  # type: ignore[no-redef]
         from domain import parse_complete_uv as _parse_uvR  # type: ignore[no-redef]
         from domain import parse_landmarks as _parse_lmR  # type: ignore[no-redef]
-        from gnm import compute_heatmap as _heatmapR  # type: ignore[no-redef]
-        from gnm_assemble import build_full_zip as _full_zip  # type: ignore[no-redef]
+        from gnm import build_result_zip as _zip6R  # type: ignore[no-redef]
+        from gnm import uv_to_png as _uv_pngR  # type: ignore[no-redef]
         from gnm_assemble import (
             build_personalized_glb as _glb,  # type: ignore[no-redef]
         )
-        from gnm_assemble import pbr_from_albedo as _pbr  # type: ignore[no-redef]
         from pipeline_local import (
             parse_fit_result as _parse_fit,  # type: ignore[no-redef]
+        )
+        from pipeline_local import (
+            resolve_pbr_pngs as _resolve_pbrR,  # type: ignore[no-redef]
         )
 
     def _raise_for_domain(err_obj: object, context: str) -> None:
@@ -968,20 +1066,12 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
     t_assemble = time.perf_counter()
     r_mesh_a = _glb(ra_fit.value, ra_uv.value)
     r_mesh_b = _glb(rb_fit.value, rb_uv.value)
-    r_pbr_a = _pbr(ra_uv.value)
-    r_pbr_b = _pbr(rb_uv.value)
     if isinstance(r_mesh_a, _ErrR) or isinstance(r_mesh_b, _ErrR):
         raise RuntimeError("assemble glb failed")
-    if isinstance(r_pbr_a, _ErrR) or isinstance(r_pbr_b, _ErrR):
-        raise RuntimeError("assemble pbr failed")
     if not isinstance(r_mesh_a, _OkR) or not isinstance(r_mesh_b, _OkR):
         raise RuntimeError("assemble glb failed")
-    if not isinstance(r_pbr_a, _OkR) or not isinstance(r_pbr_b, _OkR):
-        raise RuntimeError("assemble pbr failed")
     mesh_a = r_mesh_a.value.as_bytes()
     mesh_b = r_mesh_b.value.as_bytes()
-    heat_obj = _heatmapR(ra_uv.value, rb_uv.value)
-    heat = heat_obj.as_bytes()
     assemble_ms = int((time.perf_counter() - t_assemble) * 1000)
     try:
         import numpy as _np
@@ -1010,26 +1100,26 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
         len(mesh_a),
         len(mesh_b),
     )
-    # PNG + zip en memoria, sin disco. Nombres del manifiesto versionado (7 archivos).
-    import io as _io
-
-    from PIL import Image
-
-    def _to_png(raw: bytes) -> bytes:
-        img = Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(raw))
-        buf = _io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
-
-    zip_bytes = _full_zip(
-        _to_png(ra_uv.value.as_bytes()),
-        _to_png(rb_uv.value.as_bytes()),
-        _to_png(heat),
-        mesh_a,
-        mesh_b,
-        _to_png(r_pbr_a.value),
-        _to_png(r_pbr_b.value),
+    # PNG + zip en memoria, sin disco. Zip-6 canonico (ADR-008, sin heatmap).
+    # PBR skin-duplicate via resolve_pbr_pngs (mismo helper que local_runner:
+    # ambos modos duplican; TODO mapas reales futuros -> pbr!=uv).
+    uv_a_png = _uv_pngR(ra_uv.value)
+    uv_b_png = _uv_pngR(rb_uv.value)
+    pbr_resolved = _resolve_pbrR(ra_uv.value, rb_uv.value)
+    if isinstance(pbr_resolved, _ErrR):
+        _raise_for_domain(pbr_resolved.error, "pbr resolve failed")
+    if not isinstance(pbr_resolved, _OkR):
+        raise RuntimeError("pbr resolve failed")
+    pbr_a, pbr_b = pbr_resolved.value
+    bundle = _BundleR(
+        uv_a_png=uv_a_png,
+        uv_b_png=uv_b_png,
+        mesh_a_glb=mesh_a,
+        mesh_b_glb=mesh_b,
+        pbr_a=pbr_a,
+        pbr_b=pbr_b,
     )
+    zip_bytes = _zip6R(bundle)
     _r2_client().put_object(
         Bucket=bucket, Key=f"jobs/{job_id}/result.zip", Body=zip_bytes, ContentType="application/zip"
     )
@@ -1103,7 +1193,7 @@ if HAVE_MODAL:
         image=image,
         cpu=1,
         memory=1024,
-        volumes={"/weights": weights},
+        volumes={WEIGHTS_ROOT: weights},
         secrets=[
             modal.Secret.from_name("vultus-cloudflare"),
             modal.Secret.from_name("vultus-queues-token"),
@@ -1111,7 +1201,7 @@ if HAVE_MODAL:
         # Cableado explicito: `gnm` resuelve assets en `GNM_ASSETS_DIR`.
         # Sin esto cae al `assets/` del repo, que no existe en la imagen
         # (solo viajan .py) y el bake muere con `gnm asset missing` en prod.
-        env={"GNM_ASSETS_DIR": "/weights/gnm"},
+        env={"GNM_ASSETS_DIR": GNM_ASSETS_DIR},
         schedule=modal.Period(seconds=5),
     )(queue_pull_consumer)
 
@@ -1245,7 +1335,7 @@ if HAVE_MODAL:
         gpu="T4",
         cpu=4,
         memory=16384,
-        volumes={"/weights": weights},
+        volumes={WEIGHTS_ROOT: weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
         # Sin @modal.concurrent: 1 input por container = una inferencia
         # pesada por GPU, sin OOM. max_containers=10 (Starter).
@@ -1261,7 +1351,8 @@ if HAVE_MODAL:
             # Precalienta MediaPipe al arrancar el container para que
             # el primer request ya este en warm (el timeout de 5s en
             # landmarks no perdona la carga lazy de TFLite).
-            # El fitter GNM real se cablea en Step 4 (dobles hasta entonces).
+            # El fit FLAME feed-forward vive en backend/flame_fit.py (Wave 2);
+            # el forward DECA real corre con pesos DECA_DIR en prod.
             _landmarker()
             logger.info("sidecar warm: mediapipe cargado")
 

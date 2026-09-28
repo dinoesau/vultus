@@ -1,8 +1,11 @@
-"""Modulo CPU compartido: template, heatmap, PNG y zip puros sin I/O.
+"""Modulo CPU compartido: template GNM legacy, PNG y zip-6 puros sin I/O.
 
-Unica fuente para API local y sidecar. Sin torch, sin FastAPI, sin logging.
-Entradas ya probadas (dominio), salidas probadas. Infallible salvo assets corruptos.
-El template personaliza su geometria en `gnm_assemble` via `load_template`.
+Wave 4 Step 5 (FLAME): sin mapa termico, sin ZIP_FULL legacy.
+El zip canonico es 6 piezas (`ZIP_NAMES`) via la unica seam `build_result_zip`.
+La geometria FLAME sucesora (5023 verts, ojos [3931:5023)) vive en
+`backend/gnm_assemble.py`; este modulo conserva el template GNM (17821)
+hasta el cutover de pesos (Wave 6) mas los helpers PNG/zip sin I/O.
+Sin torch, sin FastAPI, sin logging.
 """
 
 from __future__ import annotations
@@ -20,7 +23,8 @@ from backend.domain import (
     UV_WIDTH,
     ZIP_NAMES,
     CompleteUv,
-    Heatmap,
+    EyeTexture,
+    RenderedImage,
     ZipBundle,
 )
 
@@ -38,9 +42,6 @@ def _assets_dir() -> str:
     env_dir = os.environ.get("GNM_ASSETS_DIR", "").strip()
     if env_dir:
         return env_dir
-    # En Modal los .bin viven en el Volume (`/weights/gnm`), no junto al
-    # codigo (la imagen solo lleva .py). Sin este default el consumer muere
-    # con `gnm asset missing` en prod aunque local pase (repo `assets/`).
     weights_dir = os.environ.get("WEIGHTS_DIR", "").strip()
     if weights_dir:
         return os.path.join(weights_dir, "gnm")
@@ -105,16 +106,7 @@ def load_template() -> tuple[
     return _template_cache
 
 
-def compute_heatmap(uv_a: CompleteUv, uv_b: CompleteUv) -> Heatmap:
-    raw = bytes(
-        x - y if x >= y else y - x for x, y in zip(uv_a.as_bytes(), uv_b.as_bytes())
-    )
-    # Ambas entradas son CompleteUv probados de UV_LEN; el diff conserva
-    # longitud por construccion. Mint sancionado, no forja libre.
-    return Heatmap._mint_after_check(raw)  # noqa: SLF001 - mint sancionado tras checks UV_LEN, unico via compute_heatmap
-
-
-def uv_to_png(uv: CompleteUv | Heatmap) -> bytes:
+def uv_to_png(uv: CompleteUv | RenderedImage | EyeTexture) -> bytes:
     from PIL import Image
 
     img = Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(uv.as_bytes()))
@@ -124,18 +116,21 @@ def uv_to_png(uv: CompleteUv | Heatmap) -> bytes:
 
 
 def build_result_zip(bundle: ZipBundle) -> bytes:
-    """Zip 5 archivos ZIP_NAMES desde el mismo ZipBundle de 7.
+    """Zip 6 archivos en orden canonico ZIP_NAMES. Unica seam de zip.
 
-    Delega a build_full_zip (dueno unico del orden ZIP_FULL) y
-    emite solo el subset ZIP_NAMES en orden canonico.
+    Entradas probadas (ZipBundle 6 campos); salidas sin I/O. Sin heatmap
+    (ADR-008). Compresion STORED para bytes deterministas.
     """
-    from backend.gnm_assemble import build_full_zip
-
-    full = build_full_zip(bundle)
-    with zipfile.ZipFile(io.BytesIO(full)) as src:
-        payloads = {name: src.read(name) for name in ZIP_NAMES}
+    payloads = (
+        bundle.uv_a_png,
+        bundle.uv_b_png,
+        bundle.mesh_a_glb,
+        bundle.mesh_b_glb,
+        bundle.pbr_a,
+        bundle.pbr_b,
+    )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as z:
-        for name in ZIP_NAMES:
-            z.writestr(name, payloads[name])
+        for name, data in zip(ZIP_NAMES, payloads):
+            z.writestr(name, data)
     return buf.getvalue()

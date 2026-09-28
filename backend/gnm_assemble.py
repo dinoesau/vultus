@@ -1,22 +1,23 @@
-"""Ensamblaje GNM: 5 islas + PBR + GLB personalizado.
+"""Ensamblaje FLAME: malla 5023 + PBR 2 materiales + GLB.
 
-Islas = 5 bandas horizontales del UV 512 (layout v2, fronteras derivadas
-del layout UV real).
-Malla = template + combinacion lineal de la base de identidad (eval_mesh).
-Sin torch, sin FastAPI, sin logging.
+Wave 4 Step 5: piel total sin gris, ojos [3931:5023) con material propio,
+PBR real (sin truco emisivo), zip-6 por la unica seam `build_result_zip`
+en `backend/gnm.py`. Sin torch, sin FastAPI, sin logging.
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
+import math
+import os
 import struct
-import zipfile
+
+from PIL import Image
 
 from backend.domain import (
     UV_HEIGHT,
-    UV_LEN,
     UV_WIDTH,
-    ZIP_FULL,
     CompleteUv,
     DomainError,
     Err,
@@ -26,235 +27,350 @@ from backend.domain import (
     MlDecode,
     MlFailed,
     Ok,
-    UvRegion,
-    ZipBundle,
-    parse_complete_uv,
+    RenderedImage,
     parse_gnm_mesh,
-    parse_uv_region,
 )
 
-ISLAND_LAYOUT_VERSION = 2
-ISLAND_COUNT = 5
+# --- Constantes FLAME nombradas (no inventar valores fuera de aqui) ---
+# FLAME topologia canonica: 5023 verts; ojos = ultimos 1092 (contiguos).
+VERT_COUNT = 5023
+EYE_VERT_START = 3931
+EYE_VERT_END = 5023
+EYE_COUNT = EYE_VERT_END - EYE_VERT_START
+SKIN_VERT_COUNT = EYE_VERT_START
+FLAME_TRI_COUNT = 9976
+FLAME_SKIN_TRIS = 8000
+FLAME_EYE_TRIS = FLAME_TRI_COUNT - FLAME_SKIN_TRIS
+FLAME_TEMPLATE_NAME = "flame_template.bin"
 
-# Fronteras v2 por filas UV (0..512), derivadas del layout UV real:
-# cuantiles v de vertex_uvs del npz v3_0 (gnm_head.npz) para 5 islas
-# balanceadas por vertices (~3564 verts/isla). Calculado una vez con numpy
-# (quantile v = [0.29296, 0.48537, 0.60463, 0.69963] -> filas
-# [149, 248, 309, 358]; script inline python, 2026-09-10). Particiona las
-# 512 filas sin overlap cubriendo 0..512; roundtrip assemble/albedo intacto.
-_ISLAND_ROW_BOUNDS: tuple[tuple[int, int], ...] = (
-    (0, 149),
-    (149, 248),
-    (248, 309),
-    (309, 358),
-    (358, 512),
-)
-
-# ZIP_NAMES es el subset de 5 archivos; ZIP_FULL es el orden canonico de 7.
-# El dominio es dueno unico del orden (ver backend/domain.py).
-
-
-def island_bounds(island: int) -> tuple[int, int]:
-    # Borde delgado: la regla 1..5 vive en parse_uv_region (fuente unica).
-    # Este wrapper conserva el contrato raise para callers con int crudo;
-    # el core nuevo debe aceptar UvRegion probado via island_bounds_of.
-    from backend.domain import Err
-
-    parsed = parse_uv_region(island)
-    if isinstance(parsed, Err):
-        if isinstance(island, bool) or not isinstance(island, int):
-            raise TypeError(f"isla no entera: {island!r}")
-        raise ValueError(f"isla {island} fuera de 1..{ISLAND_COUNT}")  # noqa: TRY004 - rango entero invalido es ValueError, no TypeError
-    return _ISLAND_ROW_BOUNDS[parsed.value.island() - 1]
+_flame_cache: (
+    tuple[
+        list[tuple[float, float, float]],
+        list[tuple[float, float]],
+        list[tuple[int, int, int]],
+    ]
+    | None
+) = None
 
 
-def island_bounds_of(region: UvRegion) -> tuple[int, int]:
-    # Total sobre tipo probado: sin raise, sin rechequeo.
-    return _ISLAND_ROW_BOUNDS[region.island() - 1]
+def _env(name: str) -> str:
+    return os.environ.get(name, "").strip()
 
 
-def island_albedo(albedo: CompleteUv, region: UvRegion) -> bytes:
-    raw = albedo.as_bytes()
-    start_row, end_row = island_bounds_of(region)
-    row_len = UV_WIDTH * 3
-    return raw[start_row * row_len : end_row * row_len]
+def flame_assets_dir() -> str:
+    """Assets FLAME desde env. Vacio = ausente = fixture sintetico."""
+    return _env("FLAME_ASSETS_DIR")
 
 
-def assemble_islands(albedo: CompleteUv) -> dict[int, bytes]:
-    out: dict[int, bytes] = {}
-    for island in range(1, ISLAND_COUNT + 1):
-        region = parse_uv_region(island)
-        # Literales 1..5 probados por construccion: narrowing explicito
-        # (bug si falla), nunca assert de dominio.
-        if isinstance(region, Err):
-            raise RuntimeError(f"canonical island failed to parse: {island}")  # noqa: TRY004 - rama imposible de literales, no validacion de tipos
-        out[island] = island_albedo(albedo, region.value)
-    return out
+def _candidate_flame_paths() -> list[str]:
+    cands: list[str] = []
+    direct = flame_assets_dir()
+    if direct:
+        cands.append(os.path.join(direct, FLAME_TEMPLATE_NAME))
+    weights_dir = _env("WEIGHTS_DIR")
+    if weights_dir:
+        cands.append(os.path.join(weights_dir, "flame", FLAME_TEMPLATE_NAME))
+    here = os.path.dirname(os.path.abspath(__file__))
+    cands.append(os.path.join(here, "assets", FLAME_TEMPLATE_NAME))
+    seen: list[str] = []
+    for c in cands:
+        if c and c not in seen:
+            seen.append(c)
+    return seen
 
 
-def pbr_from_albedo(albedo: CompleteUv) -> Ok[CompleteUv] | Err[DomainError]:
-    try:
-        raw = albedo.as_bytes()
-        out = bytearray(UV_LEN)
-        for i in range(0, UV_LEN, 3):
-            lum = (raw[i] + raw[i + 1] + raw[i + 2]) // 3
-            inv = 255 - lum
-            out[i] = inv
-            out[i + 1] = inv
-            out[i + 2] = inv
-        return parse_complete_uv(bytes(out))
-    except Exception as exc:  # noqa: BLE001
-        return Err(MlFailed(detail=MlDecode(details=f"pbr failed: {exc}")))
+def is_flame_synthetic() -> bool:
+    """Flag separado de sha: True si no hay archivo (fixture sintetico, waiver).
+
+    Waiver fixture preservado: la falta local no es Err, es sintetico
+    determinista. El sha (`flame_template_sha`) sigue estable en ambos casos;
+    este flag dice cual es cual sin mezclar identidad con contenido.
+    """
+    for cand in _candidate_flame_paths():
+        if os.path.isfile(cand):
+            return False
+    return True
 
 
-def displaced_positions(fit: FitResult) -> list[tuple[float, float, float]]:
-    try:
-        from backend.gnm_head import eval_mesh
-
-        mesh = eval_mesh(fit.coeffs)
-        return [(float(p[0]), float(p[1]), float(p[2])) for p in mesh]
-    except RuntimeError:
-        # Sin npz (CI/Docker usan solo el bin): desplaza el template del bin
-        # de forma determinista por coef. Misma cuenta 17821, sin ruido.
-        from backend.gnm import load_template
-
-        positions, _, _ = load_template()
-        coeffs = fit.coeffs.as_tuple()
-        return [
-            (x + coeffs[idx % len(coeffs)] * 0.01, y, z)
-            for idx, (x, y, z) in enumerate(positions)
-        ]
+def _pad4_len(n: int) -> int:
+    """Longitud alineada a 4 (glTF exige byteOffset%4==0 por bufferView)."""
+    return (n + 3) // 4 * 4
 
 
-def _seam_split_tables(
-    fit: FitResult,
-) -> tuple[
+def _pad_bytes(buf: bytes) -> bytes:
+    """Rellena con ceros hasta multiplo de 4. No-op si ya alineado."""
+    target = _pad4_len(len(buf))
+    pad = target - len(buf)
+    if pad == 0:
+        return buf
+    return buf + b"\x00" * pad
+
+
+def _synthetic_flame_template() -> tuple[
     list[tuple[float, float, float]],
     list[tuple[float, float]],
     list[tuple[int, int, int]],
 ]:
-    """Parte vertices por (v, vt) unico para seams UV reales.
+    positions: list[tuple[float, float, float]] = []
+    for i in range(VERT_COUNT):
+        x = (float(i % 71) / 70.0) - 0.5
+        y = (float((i // 71) % 71) / 70.0) - 0.5
+        z = (float(i) / float(VERT_COUNT)) - 0.5
+        positions.append((x, y, z))
+    uvs: list[tuple[float, float]] = []
+    for i in range(VERT_COUNT):
+        u = float(i % 512) / 511.0
+        v = float((i // 512) % 512) / 511.0
+        uvs.append((u, v))
+    indices: list[tuple[int, int, int]] = []
+    for t in range(FLAME_SKIN_TRIS):
+        a = t % SKIN_VERT_COUNT
+        b = (t + 1) % SKIN_VERT_COUNT
+        c = (t + 2) % SKIN_VERT_COUNT
+        indices.append((a, b, c))
+    for t in range(FLAME_EYE_TRIS):
+        a = EYE_VERT_START + (t % EYE_COUNT)
+        b = EYE_VERT_START + ((t + 1) % EYE_COUNT)
+        c = EYE_VERT_START + ((t + 2) % EYE_COUNT)
+        indices.append((a, b, c))
+    return positions, uvs, indices
 
-    Con pesos: `triangles` + `triangle_uvs` del npz. Sin pesos (CI, solo bin):
-    triangulos del bin + UV last-wins expandidas (split degenerado, coherente).
-    Las UVs salen en convencion glTF (`v = 1 - v_uv`, origen arriba-izquierda).
+
+def load_flame_template() -> Ok[
+    tuple[
+        list[tuple[float, float, float]],
+        list[tuple[float, float]],
+        list[tuple[int, int, int]],
+    ]
+] | Err[DomainError]:
+    """Template sucesor de `gnm_template.bin`: archivo si existe, fixture si no.
+
+    Pre-check solo lectura: `modal volume ls` + pesos locales antes de pedir
+    el sha; waiver fixture registrado si Modal inalcanzable (el sintetico es
+    determinista y el sha queda registrado en `flame_template_sha`).
+    Valida el bin como `gnm.py`: NaN/inf e indices>=verts son Err(MlFailed),
+    nunca aceptacion silenciosa ni raise por expected. La falta local no es
+    Err (waiver sintetico); ver `is_flame_synthetic` para distinguirlas.
     """
-    positions = displaced_positions(fit)
-    try:
-        from backend.gnm_head import load_gnm_head
+    global _flame_cache
+    if _flame_cache is not None:
+        return Ok(_flame_cache)
+    for cand in _candidate_flame_paths():
+        if os.path.isfile(cand):
+            with open(cand, "rb") as f:
+                data = f.read()
+            if len(data) >= 8:
+                verts, tris = struct.unpack_from("<II", data, 0)
+                if verts == VERT_COUNT:
+                    expect = 8 + verts * 12 + verts * 8 + tris * 12
+                    if len(data) == expect:
+                        off = 8
+                        positions: list[tuple[float, float, float]] = []
+                        for _ in range(verts):
+                            x, y, z = struct.unpack_from("<3f", data, off)
+                            off += 12
+                            if not (math.isfinite(float(x)) and math.isfinite(float(y)) and math.isfinite(float(z))):
+                                return Err(MlFailed(detail=MlDecode(details="flame template posicion no finita")))
+                            positions.append((float(x), float(y), float(z)))
+                        uvs: list[tuple[float, float]] = []
+                        for _ in range(verts):
+                            u, v = struct.unpack_from("<2f", data, off)
+                            off += 8
+                            if not (math.isfinite(float(u)) and math.isfinite(float(v))):
+                                return Err(MlFailed(detail=MlDecode(details="flame template uv no finita")))
+                            uvs.append((float(u), float(v)))
+                        indices: list[tuple[int, int, int]] = []
+                        for _ in range(tris):
+                            a, b, c = struct.unpack_from("<III", data, off)
+                            off += 12
+                            if int(a) >= verts or int(b) >= verts or int(c) >= verts:
+                                return Err(MlFailed(detail=MlDecode(details="flame template indice fuera de rango")))
+                            indices.append((int(a), int(b), int(c)))
+                        _flame_cache = (positions, uvs, indices)
+                        return Ok(_flame_cache)
+    _flame_cache = _synthetic_flame_template()
+    return Ok(_flame_cache)
 
-        head = load_gnm_head()
-        import numpy as np
 
-        tris = np.asarray(head.triangles, dtype=np.int64).tolist()
-        tri_uvs = np.asarray(head.triangle_uvs, dtype=np.float64).tolist()
-    except RuntimeError:
-        from backend.gnm import load_template
+def flame_template_sha() -> str:
+    """SHA-256 del template sucesor: archivo si existe, fixture si no."""
+    for cand in _candidate_flame_paths():
+        if os.path.isfile(cand):
+            with open(cand, "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()
+    positions, uvs, indices = _synthetic_flame_template()
+    h = hashlib.sha256()
+    h.update(struct.pack("<II", VERT_COUNT, len(indices)))
+    for x, y, z in positions:
+        h.update(struct.pack("<3f", x, y, z))
+    for u, v in uvs:
+        h.update(struct.pack("<2f", u, v))
+    for a, b, c in indices:
+        h.update(struct.pack("<III", a, b, c))
+    return h.hexdigest()
 
-        _, bin_uvs, bin_tris = load_template()
-        tris = [(int(a), int(b), int(c)) for a, b, c in bin_tris]
-        tri_uvs = [
-            [list(bin_uvs[a]), list(bin_uvs[b]), list(bin_uvs[c])] for a, b, c in tris
+
+def is_eye_vertex(idx: int) -> bool:
+    """Ojo = [EYE_VERT_START:EYE_VERT_END). Total sobre int."""
+    return EYE_VERT_START <= idx < EYE_VERT_END
+
+
+def eye_vertex_indices() -> list[int]:
+    return list(range(EYE_VERT_START, EYE_VERT_END))
+
+
+def skin_vertex_indices() -> list[int]:
+    return list(range(EYE_VERT_START))
+
+
+def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] | Err[DomainError]:
+    loaded = load_flame_template()
+    if isinstance(loaded, Err):
+        return loaded
+    positions, _, _ = loaded.value
+    coeffs = fit.coeffs.as_tuple()
+    width = len(coeffs)
+    return Ok(
+        [
+            (x + coeffs[idx % width] * 0.01, y, z)
+            for idx, (x, y, z) in enumerate(positions)
         ]
-    index_of: dict[tuple[int, float, float], int] = {}
-    out_pos: list[tuple[float, float, float]] = []
-    out_uv: list[tuple[float, float]] = []
-    out_tris: list[tuple[int, int, int]] = []
-    for (a, b, c), (uva, uvb, uvc) in zip(tris, tri_uvs):
-        row: list[int] = []
-        for v, uv in ((a, uva), (b, uvb), (c, uvc)):
-            key = (int(v), float(uv[0]), float(uv[1]))
-            idx = index_of.get(key)
-            if idx is None:
-                idx = len(out_pos)
-                index_of[key] = idx
-                p = positions[int(v)]
-                out_pos.append((float(p[0]), float(p[1]), float(p[2])))
-                out_uv.append((float(uv[0]), 1.0 - float(uv[1])))
-            row.append(idx)
-        out_tris.append((row[0], row[1], row[2]))
-    return out_pos, out_uv, out_tris
+    )
+
+
+def _eye_png() -> bytes:
+    img = Image.new("RGB", (32, 32), (240, 240, 240))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def build_personalized_glb(
-    fit: FitResult, albedo: CompleteUv, atlas_png: ImageBytes | None = None
+    fit: FitResult, albedo: CompleteUv | RenderedImage, atlas_png: ImageBytes | None = None
 ) -> Ok[GnmMesh] | Err[DomainError]:
-    """GLB con seams reales: vertices partidos por (v, vt) unico.
+    """GLB FLAME con 2 primitivas: piel (<3931) y ojo ([3931:5023)).
 
-    `atlas_png` (opcional, 1024 del bake) se incrusta tal cual; sin el,
-    se codifica el albedo 512. Las UVs de export van en convencion glTF
-    (origen arriba-izquierda): `v = 1 - v_uv`. Material emisivo (base negra)
-    para que el visor muestre los pixeles de la foto tal cual, sin doble
-    iluminacion.
+    PBR real: baseColor blanca + baseColorTexture, sin emisivo. La piel usa
+    el albedo (CompleteUv legacy o RenderedImage completion; ambos UV_LEN por
+    as_bytes) o `atlas_png` si se da; el ojo usa textura propia (blanca
+    determinista). Las UVs van en convencion glTF (`v = 1 - v_uv`).
+    Tris a caballo (algun vertice <3931 y otro >=3931) son Err explicito,
+    nunca drop silencioso: dropped==len(all)-len(skin)-len(eye) debe ser 0.
+    Cada seccion del BIN va padded a 4 antes de offsets (pos/uv/skin/eye/pngs).
     """
     try:
-        split_positions, split_uvs, split_tris = _seam_split_tables(fit)
-        n_exp = len(split_positions)
-        if n_exp == 0 or len(split_uvs) != n_exp:
-            return Err(MlFailed(detail=MlDecode(details="glb failed: split incoherente")))
-        if len(split_tris) == 0:
-            return Err(MlFailed(detail=MlDecode(details="glb failed: sin triangulos")))
+        displaced = displaced_positions(fit)
+        if isinstance(displaced, Err):
+            return displaced
+        positions = displaced.value
+        if len(positions) != VERT_COUNT:
+            return Err(MlFailed(detail=MlDecode(details="glb failed: verts != 5023")))
+        loaded = load_flame_template()
+        if isinstance(loaded, Err):
+            return loaded
+        _, template_uvs, template_tris = loaded.value
+        split_uvs = [(float(u), 1.0 - float(v)) for u, v in template_uvs]
+        skin_tris = [t for t in template_tris if t[0] < EYE_VERT_START and t[1] < EYE_VERT_START and t[2] < EYE_VERT_START]
+        eye_tris = [t for t in template_tris if t[0] >= EYE_VERT_START and t[1] >= EYE_VERT_START and t[2] >= EYE_VERT_START]
+        # Tris a caballo -> Err explicito, nunca drop silencioso.
+        # dropped==len(all)-len(skin)-len(eye) debe ser 0.
+        dropped = len(template_tris) - len(skin_tris) - len(eye_tris)
+        if dropped != 0:
+            return Err(MlFailed(detail=MlDecode(details=f"glb failed: {dropped} tris a caballo piel/ojo")))
+        if not skin_tris or not eye_tris:
+            return Err(MlFailed(detail=MlDecode(details="glb failed: sin tris piel/ojo")))
         if atlas_png is not None:
-            png = atlas_png.as_bytes()
+            skin_png = atlas_png.as_bytes()
         else:
-            from PIL import Image as _Image
-
-            img = _Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(albedo.as_bytes()))
+            img = Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(albedo.as_bytes()))
             buf = io.BytesIO()
             img.save(buf, format="PNG")
-            png = buf.getvalue()
-        pos_buf = struct.pack(f"<{len(split_positions) * 3}f", *[c for p in split_positions for c in p])
-        uv_buf = struct.pack(f"<{len(split_uvs) * 2}f", *[c for t in split_uvs for c in t])
-        flat_idx = [v for tri in split_tris for v in tri]
-        if not flat_idx or min(flat_idx) < 0 or max(flat_idx) >= n_exp:
-            return Err(MlFailed(detail=MlDecode(details="glb failed: indice fuera de rango")))
-        use_u32 = n_exp > 65535
-        idx_fmt = f"<{len(flat_idx)}I" if use_u32 else f"<{len(flat_idx)}H"
+            skin_png = buf.getvalue()
+        eye_png = _eye_png()
+        pos_buf = struct.pack(f"<{VERT_COUNT * 3}f", *[c for p in positions for c in p])
+        uv_buf = struct.pack(f"<{VERT_COUNT * 2}f", *[c for t in split_uvs for c in t])
+        skin_flat = [v for tri in skin_tris for v in tri]
+        eye_flat = [v for tri in eye_tris for v in tri]
+        if not skin_flat or not eye_flat:
+            return Err(MlFailed(detail=MlDecode(details="glb failed: indices vacios")))
+        if min(skin_flat) < 0 or max(skin_flat) >= EYE_VERT_START:
+            return Err(MlFailed(detail=MlDecode(details="glb failed: piel fuera de rango")))
+        if min(eye_flat) < EYE_VERT_START or max(eye_flat) >= EYE_VERT_END:
+            return Err(MlFailed(detail=MlDecode(details="glb failed: ojo fuera de rango")))
+        use_u32 = VERT_COUNT > 65535
+        skin_fmt = f"<{len(skin_flat)}I" if use_u32 else f"<{len(skin_flat)}H"
+        eye_fmt = f"<{len(eye_flat)}I" if use_u32 else f"<{len(eye_flat)}H"
         idx_comp = 5125 if use_u32 else 5123
-        idx_buf = struct.pack(idx_fmt, *flat_idx)
-        pos_len, uvb_len, idx_len = len(pos_buf), len(uv_buf), len(idx_buf)
-        uv_off = pos_len
-        idx_off = pos_len + uvb_len
-        png_off = idx_off + idx_len
-        bin_buf = pos_buf + uv_buf + idx_buf + png
+        skin_buf = struct.pack(skin_fmt, *skin_flat)
+        eye_buf = struct.pack(eye_fmt, *eye_flat)
+        # Pad a 4 tras cada seccion antes de offsets (glTF byteOffset%4==0).
+        pos_len, uv_len = len(pos_buf), len(uv_buf)
+        skin_len, eye_len = len(skin_buf), len(eye_buf)
+        skin_png_len, eye_png_len = len(skin_png), len(eye_png)
+        pos_pad = _pad_bytes(pos_buf)
+        uv_pad = _pad_bytes(uv_buf)
+        skin_pad = _pad_bytes(skin_buf)
+        eye_pad = _pad_bytes(eye_buf)
+        skin_png_pad = _pad_bytes(skin_png)
+        eye_png_pad = _pad_bytes(eye_png)
+        uv_off = len(pos_pad)
+        skin_off = uv_off + len(uv_pad)
+        eye_off = skin_off + len(skin_pad)
+        skin_png_off = eye_off + len(eye_pad)
+        eye_png_off = skin_png_off + len(skin_png_pad)
+        bin_buf = pos_pad + uv_pad + skin_pad + eye_pad + skin_png_pad + eye_png_pad
         while len(bin_buf) % 4 != 0:
             bin_buf += b"\x00"
-        xs = [p[0] for p in split_positions]
-        ys = [p[1] for p in split_positions]
-        zs = [p[2] for p in split_positions]
-        idx_count = len(split_tris) * 3
+        xs = [p[0] for p in positions]
+        ys = [p[1] for p in positions]
+        zs = [p[2] for p in positions]
+        skin_count = len(skin_flat)
+        eye_count = len(eye_flat)
         json_str = (
-            '{"asset":{"version":"2.0","generator":"vultus-gnm-fit"},"scene":0,'
-            '"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0,"name":"VultusFacePersonalized"}],'
-            '"meshes":[{"name":"FacePersonalized","primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":2,"material":0}]}],'
-            '"materials":[{"name":"SkinPBR","pbrMetallicRoughness":{"baseColorFactor":[0,0,0,1],"metallicFactor":0,"roughnessFactor":0.9,"baseColorTexture":{"index":0}},"emissiveTexture":{"index":0},"emissiveFactor":[1,1,1]}],'
-            '"textures":[{"source":0,"sampler":0}],"samplers":[{"magFilter":9729,"minFilter":9729}],'
-            '"images":[{"bufferView":3,"mimeType":"image/png"}],'
+            '{"asset":{"version":"2.0","generator":"vultus-flame-fit"},"scene":0,'
+            '"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0,"name":"VultusFaceFlame"}],'
+            '"meshes":[{"name":"FaceFlame","primitives":['
+            '{"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":2,"material":0},'
+            '{"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":3,"material":1}'
+            "]}],"
+            '"materials":['
+            '{"name":"SkinPBR","pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.7,"baseColorTexture":{"index":0}}},'
+            '{"name":"EyePBR","pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.3,"baseColorTexture":{"index":1}}}'
+            "],"
+            '"textures":[{"source":0,"sampler":0},{"source":1,"sampler":0}],"samplers":[{"magFilter":9729,"minFilter":9729}],'
+            '"images":[{"bufferView":4,"mimeType":"image/png"},{"bufferView":5,"mimeType":"image/png"}],'
             f'"buffers":[{{"byteLength":{len(bin_buf)}}}],'
             '"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":%d,"target":34962},'
             '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34962},'
             '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34963},'
+            '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34963},'
+            '{"buffer":0,"byteOffset":%d,"byteLength":%d},'
             '{"buffer":0,"byteOffset":%d,"byteLength":%d}]'
-            % (pos_len, uv_off, uvb_len, idx_off, idx_len, png_off, len(png))
+            % (pos_len, uv_off, uv_len, skin_off, skin_len, eye_off, eye_len, skin_png_off, skin_png_len, eye_png_off, eye_png_len)
             + ',"accessors":[{"bufferView":0,"componentType":5126,"count":'
-            + f"{n_exp}"
+            + f"{VERT_COUNT}"
             + ',"type":"VEC3",'
             + f'"max":[{max(xs)},{max(ys)},{max(zs)}],"min":[{min(xs)},{min(ys)},{min(zs)}]'
             + "},"
             + '{"bufferView":1,"componentType":5126,"count":'
-            + f"{n_exp}"
+            + f"{VERT_COUNT}"
             + ',"type":"VEC2"},'
             + '{"bufferView":2,"componentType":'
             + f"{idx_comp}"
             + ',"count":'
-            + f"{idx_count}"
+            + f"{skin_count}"
+            + ',"type":"SCALAR"},'
+            + '{"bufferView":3,"componentType":'
+            + f"{idx_comp}"
+            + ',"count":'
+            + f"{eye_count}"
             + ',"type":"SCALAR"}],'
-            + '"extras":{"personalized":true,"islands":[1,2,3,4,5],"layout":'
-            + f"{ISLAND_LAYOUT_VERSION}"
-            + ',"verts":'
-            + f"{n_exp}"
-            + ',"tris":'
-            + f"{len(split_tris)}"
+            + '"extras":{"personalized":true,"flame":true,"verts":'
+            + f"{VERT_COUNT}"
+            + ',"eye_start":'
+            + f"{EYE_VERT_START}"
+            + ',"eye_end":'
+            + f"{EYE_VERT_END}"
             + "}}"
         )
         json_bytes = json_str.encode("utf-8")
@@ -265,41 +381,8 @@ def build_personalized_glb(
         out += struct.pack("<I", len(json_bytes)) + b"JSON" + json_bytes
         out += struct.pack("<I", len(bin_buf)) + b"BIN\x00" + bin_buf
         parsed = parse_gnm_mesh(out)
-        # Sintesis interna recien serializada: el parse no puede fallar.
-        # Narrowing explicito (entra al riel Err si falla), nunca assert.
         if isinstance(parsed, Err):
             return Err(MlFailed(detail=MlDecode(details="glb self-check failed")))
         return parsed
     except Exception as exc:  # noqa: BLE001
         return Err(MlFailed(detail=MlDecode(details=f"glb failed: {exc}")))
-
-
-def build_full_zip(bundle: ZipBundle) -> bytes:
-    """Zip 7 archivos en orden canonico ZIP_FULL (ZIP_NAMES 5-subset + PBR)."""
-    buf = io.BytesIO()
-    payloads = (
-        bundle.uv_a_png,
-        bundle.uv_b_png,
-        bundle.heatmap_png,
-        bundle.mesh_a_glb,
-        bundle.mesh_b_glb,
-        bundle.pbr_a,
-        bundle.pbr_b,
-    )
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as z:
-        for name, data in zip(ZIP_FULL, payloads):
-            z.writestr(name, data)
-    return buf.getvalue()
-
-
-def albedo_from_islands(parts: dict[int, bytes]) -> Ok[CompleteUv] | Err[DomainError]:
-    try:
-        ordered = b"".join(parts[i] for i in range(1, ISLAND_COUNT + 1))
-        if len(ordered) != UV_LEN:
-            return Err(MlFailed(detail=MlDecode(details=f"islands join len {len(ordered)} != {UV_LEN}")))
-        parsed = parse_complete_uv(ordered)
-        if isinstance(parsed, Err):
-            return parsed
-        return parsed
-    except Exception as exc:  # noqa: BLE001
-        return Err(MlFailed(detail=MlDecode(details=f"islands join failed: {exc}")))

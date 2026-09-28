@@ -13,14 +13,16 @@ export const API_PATHS = {
   result: (id: string) => `/v1/jobs/${id}/result`,
 } as const;
 
-// Nombres exactos del bundle (contrato con el worker, Fase 2 GNM: 3 PNG + 2 GLB).
+// Nombres exactos del bundle (contrato con el worker, zip-6 v2 sin heatmap:
+// 2 UV + 2 GLB + 2 PBR en orden canonico python).
 // Espejo de edge/contract.ts ZIP_MANIFEST; no renombrar sin cambiar el worker.
 export const RESULT_FILES = {
   uvA: "uv_a.png",
   uvB: "uv_b.png",
-  heat: "heatmap.png",
   meshA: "mesh_a.glb",
   meshB: "mesh_b.glb",
+  pbrA: "pbr_a.png",
+  pbrB: "pbr_b.png",
 } as const;
 
 export type Result<T, E> =
@@ -168,7 +170,11 @@ export function statusMessage(
 export interface ResultImages {
   uvA: Blob;
   uvB: Blob;
-  heat: Blob;
+}
+
+export interface ResultPbr {
+  pbrA: Blob;
+  pbrB: Blob;
 }
 
 export interface ResultMeshes {
@@ -176,18 +182,97 @@ export interface ResultMeshes {
   meshB: Blob;
 }
 
+// Version esperada del contrato (espejo de edge/contract.ts CONTRACT_VERSION;
+// v2 = zip-6 sin heatmap). El frontend la valida contra GET /health.
+// Bundle-split: edge y frontend son bundles separados, asi que el brand se
+// espeja aqui (single mint via mintContractVersionUnchecked) en vez de importar edge.
+// Fuente unica local: CONTRACT_VERSION; EXPECTED_CONTRACT_VERSION es alias compat.
+type Brand<T, Name extends string> = T & { readonly __brand: Name };
+declare const ContractVersionBrand: unique symbol;
+export type ContractVersion = Brand<number, "ContractVersion"> & {
+  readonly [ContractVersionBrand]: "ContractVersion";
+};
+export type ContractVersionError = { readonly kind: "InvalidContractVersion" };
+
+// Single mint site en este bundle (espejo de edge/contract.ts): la asercion
+// vive solo aqui, se revisa como sudo. Todo path smart-constructor la usa.
+function mintContractVersionUnchecked(value: number): ContractVersion {
+  return value as ContractVersion;
+}
+
+export const CONTRACT_VERSION: ContractVersion = mintContractVersionUnchecked(2);
+
+export function contractVersionToNumber(v: ContractVersion): number {
+  return v;
+}
+
+/** Fuente unica: parseContractVersion estricto entero >=1 via Result; nunca lanza. */
+export function parseContractVersion(raw: unknown): Result<ContractVersion, ContractVersionError> {
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+    return { ok: false, error: { kind: "InvalidContractVersion" } };
+  }
+  return { ok: true, value: mintContractVersionUnchecked(raw) };
+}
+
+// Alias compat: mismo brand que CONTRACT_VERSION, no segunda fuente.
+export const EXPECTED_CONTRACT_VERSION: ContractVersion = CONTRACT_VERSION;
+
+export type HealthVersionError =
+  | { readonly kind: "InvalidHealthVersion" }
+  | { readonly kind: "VersionMismatch"; readonly expected: ContractVersion; readonly received: ContractVersion };
+
+/** Parse-once del GET /health: exige contract_version brand que iguale al esperado, sin `as`. */
+export function parseHealthContractVersion(
+  raw: unknown,
+): Result<ContractVersion, HealthVersionError> {
+  if (!isRecord(raw)) return { ok: false, error: { kind: "InvalidHealthVersion" } };
+  const parsed = parseContractVersion(raw["contract_version"]);
+  if (!parsed.ok) {
+    return { ok: false, error: { kind: "InvalidHealthVersion" } };
+  }
+  if (contractVersionToNumber(parsed.value) !== contractVersionToNumber(CONTRACT_VERSION)) {
+    return {
+      ok: false,
+      error: { kind: "VersionMismatch", expected: CONTRACT_VERSION, received: parsed.value },
+    };
+  }
+  return { ok: true, value: parsed.value };
+}
+
+/** Cero panel roto: con mismatch o salud ilegible el visor muestra actualiza. */
+export function healthNeedsUpdate(health: unknown): boolean {
+  return !parseHealthContractVersion(health).ok;
+}
+
+export function contractVersionMessage(error: HealthVersionError): string {
+  switch (error.kind) {
+    case "InvalidHealthVersion":
+      return "versión de contrato desconocida, actualiza el visor";
+    case "VersionMismatch":
+      return `contrato v${contractVersionToNumber(error.received)} distinto de v${contractVersionToNumber(error.expected)}, actualiza el visor`;
+    default:
+      return assertNever(error);
+  }
+}
+
+// Unico sitio con `throw` por bug imposible en este bundle (espejo de
+// edge/assert.ts; sin nuevas deps: edge y frontend son bundles separados).
+// El dominio retorna Result, nunca lanza.
+function assertNever(value: never, message = "Unhandled case"): never {
+  throw new Error(`${message}: ${JSON.stringify(value)}`);
+}
+
 // Desempaqueta el zip en memoria; falla con mensaje claro si falta un PNG o GLB.
-// Borde delgado: try* retorna Result (nuevo), extract* conserva throw para
-// callers existentes (index.astro). El core nuevo debe usar tryExtract*.
+// Borde delgado: try* retorna Result. Pbr/Meshes no tienen wrapper throw
+// (ZipMissing esperado va por Err); Images conserva su wrapper legacy solo por
+// compat, el codigo nuevo debe usar tryExtract*. El core nuevo debe usar tryExtract*.
 export async function tryExtractResultImages(zipBlob: Blob): Promise<Result<ResultImages, ZipMissing>> {
   const zip = await JSZip.loadAsync(zipBlob);
   const uvA = await tryPickEntry(zip, RESULT_FILES.uvA);
   if (!uvA.ok) return uvA;
   const uvB = await tryPickEntry(zip, RESULT_FILES.uvB);
   if (!uvB.ok) return uvB;
-  const heat = await tryPickEntry(zip, RESULT_FILES.heat);
-  if (!heat.ok) return heat;
-  return { ok: true, value: { uvA: uvA.value, uvB: uvB.value, heat: heat.value } };
+  return { ok: true, value: { uvA: uvA.value, uvB: uvB.value } };
 }
 
 export async function extractResultImages(zipBlob: Blob): Promise<ResultImages> {
@@ -196,7 +281,20 @@ export async function extractResultImages(zipBlob: Blob): Promise<ResultImages> 
   return parsed.value;
 }
 
+// Desempaqueta las texturas PBR en memoria; falla si falta un PBR.
+// Railway total: solo try* retorna Result. Sin wrappers throw (ZipMissing es
+// esperado y se propaga como Err al caller, nunca como excepcion).
+export async function tryExtractResultPbr(zipBlob: Blob): Promise<Result<ResultPbr, ZipMissing>> {
+  const zip = await JSZip.loadAsync(zipBlob);
+  const pbrA = await tryPickEntry(zip, RESULT_FILES.pbrA);
+  if (!pbrA.ok) return pbrA;
+  const pbrB = await tryPickEntry(zip, RESULT_FILES.pbrB);
+  if (!pbrB.ok) return pbrB;
+  return { ok: true, value: { pbrA: pbrA.value, pbrB: pbrB.value } };
+}
+
 // Desempaqueta los meshes GLB en memoria; falla si falta un GLB.
+// Railway total: solo try* retorna Result. Sin wrappers throw.
 export async function tryExtractResultMeshes(zipBlob: Blob): Promise<Result<ResultMeshes, ZipMissing>> {
   const zip = await JSZip.loadAsync(zipBlob);
   const meshA = await tryPickEntry(zip, RESULT_FILES.meshA);
@@ -206,8 +304,42 @@ export async function tryExtractResultMeshes(zipBlob: Blob): Promise<Result<Resu
   return { ok: true, value: { meshA: meshA.value, meshB: meshB.value } };
 }
 
-export async function extractResultMeshes(zipBlob: Blob): Promise<ResultMeshes> {
-  const parsed = await tryExtractResultMeshes(zipBlob);
-  if (!parsed.ok) throw new Error(`el zip no contiene ${parsed.error.name}`);
-  return parsed.value;
+// Parte visor (Wave 5): el zip-6 completo en una sola carga para pintar
+// UV + PBR + meshes sin reparsear el zip tres veces. Result, no throw.
+export interface ViewerBlobs {
+  uvA: Blob;
+  uvB: Blob;
+  pbrA: Blob;
+  pbrB: Blob;
+  meshA: Blob;
+  meshB: Blob;
+}
+
+export async function tryExtractViewerBlobs(
+  zipBlob: Blob,
+): Promise<Result<ViewerBlobs, ZipMissing>> {
+  const zip = await JSZip.loadAsync(zipBlob);
+  const uvA = await tryPickEntry(zip, RESULT_FILES.uvA);
+  if (!uvA.ok) return uvA;
+  const uvB = await tryPickEntry(zip, RESULT_FILES.uvB);
+  if (!uvB.ok) return uvB;
+  const pbrA = await tryPickEntry(zip, RESULT_FILES.pbrA);
+  if (!pbrA.ok) return pbrA;
+  const pbrB = await tryPickEntry(zip, RESULT_FILES.pbrB);
+  if (!pbrB.ok) return pbrB;
+  const meshA = await tryPickEntry(zip, RESULT_FILES.meshA);
+  if (!meshA.ok) return meshA;
+  const meshB = await tryPickEntry(zip, RESULT_FILES.meshB);
+  if (!meshB.ok) return meshB;
+  return {
+    ok: true,
+    value: {
+      uvA: uvA.value,
+      uvB: uvB.value,
+      pbrA: pbrA.value,
+      pbrB: pbrB.value,
+      meshA: meshA.value,
+      meshB: meshB.value,
+    },
+  };
 }

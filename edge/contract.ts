@@ -3,9 +3,17 @@
  * Python la importa como espejo, nunca al reves.
  * Constantes canonicas: MAX_IMAGE_BYTES, magic JPEG/PNG,
  * TtlSecs 1..=3600 default 60, Stage, JobId uuid.
+ * Zip canonico v2: 6 piezas sin heatmap (ADR-008 revoca ADR-002).
  * Pre-validacion fina del gateway para no encolar basura a Queues+R2
  * y no diverger en mensajes 400.
  */
+import { assertNever } from "./assert";
+
+// Canon good-typescript: Brand generico zero-runtime. Los brands existentes
+// (JobId/TtlSecs/Progress/ContractVersion) lo usan como alias canonico; se
+// conserva el unique-symbol historico como interseccion para no romper
+// asignabilidad. Declarado arriba del primer uso, single mint por tipo.
+export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export const RESULT_TTL_SECONDS = 60;
@@ -40,11 +48,10 @@ export const GNM_ISLANDS = [1, 2, 3, 4, 5] as const;
 export type GnmIsland = (typeof GNM_ISLANDS)[number];
 
 // Manifiesto zip versionado: fuente unica que Python espeja.
-// Albedo/mesh/heatmap conservan nombre salvo conflicto; PBR viaja en el zip.
+// Zip-6 v2 sin heatmap (ADR-008): uv + mesh + PBR, en orden canonico python.
 export const ZIP_MANIFEST = {
   uvA: "uv_a.png",
   uvB: "uv_b.png",
-  heat: "heatmap.png",
   meshA: "mesh_a.glb",
   meshB: "mesh_b.glb",
   pbrA: "pbr_a.png",
@@ -54,7 +61,6 @@ export const ZIP_MANIFEST = {
 export const ZIP_NAMES = [
   ZIP_MANIFEST.uvA,
   ZIP_MANIFEST.uvB,
-  ZIP_MANIFEST.heat,
   ZIP_MANIFEST.meshA,
   ZIP_MANIFEST.meshB,
   ZIP_MANIFEST.pbrA,
@@ -62,14 +68,64 @@ export const ZIP_NAMES = [
 ] as const;
 export type ZipName = (typeof ZIP_NAMES)[number];
 
+// Version de contrato: v1 legacy era 7 piezas con heatmap sin versionar;
+// v2 es zip-6 sin heatmap. El transporte (sobre) no cambia, el payload si.
+declare const ContractVersionBrand: unique symbol;
+export type ContractVersion = Brand<number, "ContractVersion"> & {
+  readonly [ContractVersionBrand]: "ContractVersion";
+};
+export type ContractVersionError = { readonly kind: "InvalidContractVersion" };
+
+export type ContractVersionMismatch =
+  | { readonly kind: "Match" }
+  | {
+      readonly kind: "VersionMismatch";
+      readonly expected: ContractVersion;
+      readonly received: ContractVersion;
+    };
+
+// Single mint site per good-typescript pillar 1: the brand assertion lives only here,
+// reviewed as sudo. All contract-version smart-constructor paths mint via this helper.
+function mintContractVersionUnchecked(value: number): ContractVersion {
+  return value as ContractVersion;
+}
+
+export const CONTRACT_VERSION: ContractVersion = mintContractVersionUnchecked(2);
+
+export function contractVersionToNumber(v: ContractVersion): number {
+  return v;
+}
+
+/** Fuente unica: parseContractVersion estricto entero >=1 via Result; nunca lanza. */
+export function parseContractVersion(raw: unknown): Result<ContractVersion, ContractVersionError> {
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+    return { ok: false, error: { kind: "InvalidContractVersion" } };
+  }
+  return { ok: true, value: mintContractVersionUnchecked(raw) };
+}
+
+/** ADT total: Match solo si igual a CONTRACT_VERSION, si no VersionMismatch. */
+export function checkContractVersion(received: ContractVersion): ContractVersionMismatch {
+  if (contractVersionToNumber(received) === contractVersionToNumber(CONTRACT_VERSION)) {
+    return { kind: "Match" };
+  }
+  return { kind: "VersionMismatch", expected: CONTRACT_VERSION, received };
+}
+
+export function contractMismatchToMessage(mismatch: ContractVersionMismatch): string {
+  switch (mismatch.kind) {
+    case "Match":
+      return "contract version match";
+    case "VersionMismatch":
+      return `contract version mismatch: expected ${contractVersionToNumber(mismatch.expected)} got ${contractVersionToNumber(mismatch.received)}, actualiza el visor`;
+    default:
+      return assertNever(mismatch);
+  }
+}
+
 export type Result<T, E> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: E };
-
-// Canon good-typescript: Brand generico zero-runtime. Los brands existentes
-// (JobId/TtlSecs/Progress) lo usan como alias canonico; se conserva el
-// unique-symbol historico como interseccion para no romper asignabilidad.
-export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 
 declare const JobIdBrand: unique symbol;
 export type JobId = Brand<string, "JobId"> & { readonly [JobIdBrand]: "JobId" };

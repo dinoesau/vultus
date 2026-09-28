@@ -1,19 +1,34 @@
 ---
-// Isla 3D Fase 2: visor sincronizado con el UV plano, expresion neutra fija.
-// Sin SSR pesado: el canvas existe en HTML estatico; Three.js se importa lazy
-// solo en cliente (tras mount y tras done via evento `vultus:meshes`).
-// Sin editor de expresion arbitraria: solo render neutro + re-descarga local.
+ // Isla 3D: visor estudio blanco con dos caras PBR (A + B en paralelo).
+ // Sin SSR pesado: los canvas existen en HTML estatico; Three.js se importa
+ // lazy solo en cliente (tras mount y tras done via evento `vultus:meshes`).
+ // Fondo, luces y mensajes provienen del nucleo `three-rig.ts` (sin three).
 ---
 
-<section aria-label="Visor 3D" class="panel">
-  <h2>Visor 3D (expresion neutra)</h2>
-  <canvas
-    data-testid="viewer-3d"
-    width="480"
-    height="360"
-    aria-label="Mesh 3D con expresion neutra"
-  >
-  </canvas>
+<section aria-label="Visor 3D estudio" class="panel">
+  <h2>Visor 3D (estudio blanco)</h2>
+  <div class="meshes">
+    <figure>
+      <figcaption>Cara A</figcaption>
+      <canvas
+        data-testid="viewer-3d-a"
+        width="480"
+        height="360"
+        aria-label="Mesh 3D de la cara A con piel PBR"
+      >
+      </canvas>
+    </figure>
+    <figure>
+      <figcaption>Cara B</figcaption>
+      <canvas
+        data-testid="viewer-3d-b"
+        width="480"
+        height="360"
+        aria-label="Mesh 3D de la cara B con piel PBR"
+      >
+      </canvas>
+    </figure>
+  </div>
   <p id="viewer-3d-status" role="status">visor 3D listo (neutro, sin resultado)</p>
   <p class="download-row">
     <a id="download-mesh-a" hidden download="mesh_a.glb">Descargar mesh A</a>
@@ -22,50 +37,145 @@
 </section>
 
 <script>
-  const canvas = document.querySelector(
-    '[data-testid="viewer-3d"]',
-  ) as HTMLCanvasElement | null;
+  import {
+    SKIN_MATERIAL,
+    STUDIO_BACKGROUND_HEX,
+    STUDIO_CAMERA_FOV,
+    STUDIO_CANVAS_HEIGHT,
+    STUDIO_CANVAS_WIDTH,
+    STUDIO_LIGHTS,
+    checkStudioLights,
+    parseStudioBackground,
+    resolveSkinColorHex,
+    viewerStatusMessage,
+  } from "./three-rig.ts";
+  import type { Result } from "./three-rig.ts";
+
+  function isRecord(raw: unknown): raw is Record<string, unknown> {
+    return typeof raw === "object" && raw !== null && !Array.isArray(raw);
+  }
+
+  function isBlob(value: unknown): value is Blob {
+    return value instanceof Blob;
+  }
+
+  const foundA = document.querySelector('[data-testid="viewer-3d-a"]');
+  const canvasA = foundA instanceof HTMLCanvasElement ? foundA : null;
+  const foundB = document.querySelector('[data-testid="viewer-3d-b"]');
+  const canvasB = foundB instanceof HTMLCanvasElement ? foundB : null;
   const statusEl = document.getElementById("viewer-3d-status");
-  const linkA = document.getElementById("download-mesh-a") as HTMLAnchorElement | null;
-  const linkB = document.getElementById("download-mesh-b") as HTMLAnchorElement | null;
+  const foundLinkA = document.getElementById("download-mesh-a");
+  const linkA = foundLinkA instanceof HTMLAnchorElement ? foundLinkA : null;
+  const foundLinkB = document.getElementById("download-mesh-b");
+  const linkB = foundLinkB instanceof HTMLAnchorElement ? foundLinkB : null;
   let meshUrls: string[] = [];
 
   function setStatus(msg: string): void {
     if (statusEl) statusEl.textContent = msg;
   }
 
-  // Render neutro procedural: esfera achatada que gira, sin depender del GLB.
-  // Garantiza canvas visible aunque el GLB minimo no traiga material estandar.
-  async function renderNeutral(): Promise<void> {
+  // Un solo renderer por canvas: se dispone + cancela RAF antes de repintar.
+  interface CanvasSlot {
+    renderer: import("three").WebGLRenderer | undefined;
+    raf: number | undefined;
+  }
+  const slots = new Map<HTMLCanvasElement, CanvasSlot>();
+
+  function getSlot(canvas: HTMLCanvasElement): CanvasSlot {
+    const found = slots.get(canvas);
+    if (found) return found;
+    const fresh: CanvasSlot = { renderer: undefined, raf: undefined };
+    slots.set(canvas, fresh);
+    return fresh;
+  }
+
+  function disposeCanvas(canvas: HTMLCanvasElement | null): void {
     if (!canvas) return;
+    const slot = slots.get(canvas);
+    if (!slot) return;
+    if (slot.raf !== undefined) {
+      cancelAnimationFrame(slot.raf);
+      slot.raf = undefined;
+    }
+    if (slot.renderer !== undefined) {
+      try {
+        slot.renderer.dispose();
+      } catch {
+        // Dispose best-effort: el contexto ya puede estar perdido.
+      }
+      slot.renderer = undefined;
+    }
+  }
+
+  // Parsers muertos cableados al boot: sin trio valido no hay visor.
+  function studioBootOk(): boolean {
+    if (!parseStudioBackground(STUDIO_BACKGROUND_HEX).ok) {
+      setStatus("visor 3D no disponible (config estudio)");
+      return false;
+    }
+    if (!checkStudioLights(STUDIO_LIGHTS).ok) {
+      setStatus("visor 3D no disponible (config estudio)");
+      return false;
+    }
+    return true;
+  }
+
+  type ThreeModule = typeof import("three");
+
+  function applyStudio(THREE: ThreeModule, scene: import("three").Scene): void {
+    scene.background = new THREE.Color(STUDIO_BACKGROUND_HEX);
+    for (const light of STUDIO_LIGHTS) {
+      const dir = new THREE.DirectionalLight(light.colorHex, light.intensity);
+      dir.position.set(light.position[0], light.position[1], light.position[2]);
+      scene.add(dir);
+    }
+  }
+
+  function makeCamera(THREE: ThreeModule): import("three").PerspectiveCamera {
+    const camera = new THREE.PerspectiveCamera(
+      STUDIO_CAMERA_FOV,
+      STUDIO_CANVAS_WIDTH / STUDIO_CANVAS_HEIGHT,
+      0.1,
+      100,
+    );
+    camera.position.set(0, 0.2, 3.2);
+    camera.lookAt(0, 0, 0);
+    return camera;
+  }
+
+  function skinMaterial(THREE: ThreeModule): import("three").MeshStandardMaterial {
+    return new THREE.MeshStandardMaterial({
+      color: resolveSkinColorHex(false),
+      roughness: SKIN_MATERIAL.roughness,
+      metalness: SKIN_MATERIAL.metalness,
+    });
+  }
+
+  // Render neutro procedural por canvas: esfera achatada que gira.
+  // Garantiza canvas visible aunque el GLB minimo no traiga material estandar.
+  async function renderNeutral(canvas: HTMLCanvasElement | null): Promise<void> {
+    if (!canvas) return;
+    disposeCanvas(canvas);
     try {
       const THREE = await import("three");
       const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-      renderer.setSize(480, 360, false);
+      renderer.setSize(STUDIO_CANVAS_WIDTH, STUDIO_CANVAS_HEIGHT, false);
+      getSlot(canvas).renderer = renderer;
       const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x0c141d);
-      const camera = new THREE.PerspectiveCamera(35, 480 / 360, 0.1, 100);
-      camera.position.set(0, 0.2, 3.2);
-      camera.lookAt(0, 0, 0);
-      const light = new THREE.DirectionalLight(0xffffff, 1.4);
-      light.position.set(2, 3, 4);
-      scene.add(light);
-      scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+      applyStudio(THREE, scene);
+      const camera = makeCamera(THREE);
       const geo = new THREE.SphereGeometry(1, 48, 32);
       geo.scale(0.82, 1.05, 0.9);
-      const mat = new THREE.MeshStandardMaterial({
-        color: 0xd9a27a,
-        roughness: 0.9,
-        metalness: 0,
-      });
-      const head = new THREE.Mesh(geo, mat);
+      const head = new THREE.Mesh(geo, skinMaterial(THREE));
       head.name = "VultusFaceNeutral";
       scene.add(head);
       let frames = 0;
       const tick = () => {
         head.rotation.y += 0.01;
         renderer.render(scene, camera);
-        if (++frames < 240 && canvas.isConnected) requestAnimationFrame(tick);
+        if (++frames < 240 && canvas.isConnected) {
+          getSlot(canvas).raf = requestAnimationFrame(tick);
+        }
       };
       tick();
     } catch {
@@ -77,17 +187,66 @@
     meshUrls.push(url);
   }
 
-  // Tras done: expone re-descarga local e intenta pintar la cara real.
-  // El neutro procedural es solo carga; el exito exige GLB parseado.
+  interface ViewerDetail {
+    readonly meshA: Blob;
+    readonly meshB: Blob;
+    readonly pbrA?: Blob;
+    readonly pbrB?: Blob;
+  }
+
+  type ViewerDetailError = { readonly kind: "InvalidViewerDetail" };
+
+  // Parse propio Result: sin casts fuera del dominio, detalle roto es Err.
+  // Construccion inmutable: el valor se crea en una sola expresion, sin reasignacion.
+  function parseViewerDetail(raw: unknown): Result<ViewerDetail, ViewerDetailError> {
+    if (!isRecord(raw)) return { ok: false, error: { kind: "InvalidViewerDetail" } };
+    const meshA = raw["meshA"];
+    const meshB = raw["meshB"];
+    if (!isBlob(meshA) || !isBlob(meshB)) {
+      return { ok: false, error: { kind: "InvalidViewerDetail" } };
+    }
+    const pbrA = raw["pbrA"];
+    const pbrB = raw["pbrB"];
+    if (pbrA !== undefined && !isBlob(pbrA)) {
+      return { ok: false, error: { kind: "InvalidViewerDetail" } };
+    }
+    if (pbrB !== undefined && !isBlob(pbrB)) {
+      return { ok: false, error: { kind: "InvalidViewerDetail" } };
+    }
+    return {
+      ok: true,
+      value: {
+        meshA,
+        meshB,
+        ...(isBlob(pbrA) ? { pbrA } : {}),
+        ...(isBlob(pbrB) ? { pbrB } : {}),
+      },
+    };
+  }
+
+  // Total: detalle roto es Err y el caller lo mapea a status invalid, nunca drop silencioso.
+  function readDetail(ev: Event): Result<ViewerDetail, ViewerDetailError> {
+    if (!isRecord(ev)) return { ok: false, error: { kind: "InvalidViewerDetail" } };
+    return parseViewerDetail(ev["detail"]);
+  }
+
+  // Tras done: expone re-descarga local e intenta pintar las caras reales.
+  // El neutro procedural es solo carga; el exito exige GLBs parseados.
   window.addEventListener("vultus:meshes", (ev) => {
-    const detail = (ev as CustomEvent).detail as
-      | { meshA?: Blob; meshB?: Blob }
-      | undefined;
-    if (!detail?.meshA || !detail?.meshB) return;
+    const parsed = readDetail(ev);
+    if (!parsed.ok) {
+      setStatus(viewerStatusMessage("invalid"));
+      return;
+    }
+    const detail = parsed.value;
     const urlA = URL.createObjectURL(detail.meshA);
     const urlB = URL.createObjectURL(detail.meshB);
     trackUrl(urlA);
     trackUrl(urlB);
+    const pbrUrlA = detail.pbrA ? URL.createObjectURL(detail.pbrA) : null;
+    const pbrUrlB = detail.pbrB ? URL.createObjectURL(detail.pbrB) : null;
+    if (pbrUrlA) trackUrl(pbrUrlA);
+    if (pbrUrlB) trackUrl(pbrUrlB);
     if (linkA) {
       linkA.href = urlA;
       linkA.hidden = false;
@@ -96,45 +255,108 @@
       linkB.href = urlB;
       linkB.hidden = false;
     }
-    setStatus("cargando cara real (GLB)...");
-    void loadGlbs(urlA, urlB);
+    setStatus(viewerStatusMessage("loading"));
+    void loadGlbs(urlA, urlB, pbrUrlA, pbrUrlB);
   });
 
-  async function loadGlbs(urlA: string, urlB: string): Promise<void> {
-    if (!canvas) return;
+  async function paintFace(
+    THREE: ThreeModule,
+    canvas: HTMLCanvasElement,
+    glbUrl: string,
+    pbrUrl: string | null,
+    label: string,
+  ): Promise<{ readonly pbrOk: boolean }> {
+    const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
+    const loader = new GLTFLoader();
+    const gltf = await loader.loadAsync(glbUrl);
+    let map: import("three").Texture | null = null;
+    if (pbrUrl) {
+      try {
+        const texLoader = new THREE.TextureLoader();
+        const tex = await texLoader.loadAsync(pbrUrl);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        map = tex;
+      } catch {
+        map = null;
+      }
+    }
+    const pbrOk = map !== null;
+    // GLB conserva materiales embebidos tal cual (primitiva 0 SkinPBR material 0,
+    // primitiva 1 EyePBR material 1 con texturas propias).
+    // Fallback solo si el mesh llega sin material (GLB minimo sin material estandar).
+    const fallback = skinMaterial(THREE);
+    if (map) {
+      fallback.map = map;
+      fallback.color.set(resolveSkinColorHex(true));
+    }
+    // Ojos preservados por indice de material/primitiva: no se toca ningun
+    // material existente, sin filtro por nombre de nodo.
+    gltf.scene.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return;
+      const current = node.material;
+      if (Array.isArray(current)) {
+        if (current.length === 0) {
+          node.material = fallback;
+          return;
+        }
+        let hasGap = false;
+        for (const entry of current) {
+          if (!entry) {
+            hasGap = true;
+            break;
+          }
+        }
+        if (!hasGap) return;
+        node.material = current.map((entry) => (entry ? entry : fallback));
+        return;
+      }
+      if (current) return;
+      node.material = fallback;
+    });
+    disposeCanvas(canvas);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setSize(STUDIO_CANVAS_WIDTH, STUDIO_CANVAS_HEIGHT, false);
+    getSlot(canvas).renderer = renderer;
+    const scene = new THREE.Scene();
+    applyStudio(THREE, scene);
+    const camera = makeCamera(THREE);
+    scene.add(gltf.scene);
+    renderer.render(scene, camera);
+    let frames = 0;
+    const tick = () => {
+      gltf.scene.rotation.y += 0.01;
+      renderer.render(scene, camera);
+      if (++frames < 240 && canvas.isConnected) {
+        getSlot(canvas).raf = requestAnimationFrame(tick);
+      }
+    };
+    tick();
+    void label;
+    return { pbrOk };
+  }
+
+  async function loadGlbs(
+    urlA: string,
+    urlB: string,
+    pbrA: string | null,
+    pbrB: string | null,
+  ): Promise<void> {
+    if (!canvasA || !canvasB) return;
     try {
       const THREE = await import("three");
-      const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
-      const loader = new GLTFLoader();
-      // Exito solo si ambos GLB parsean; se renderiza el primero como cara real.
-      const [gltfA, gltfB] = await Promise.all([
-        loader.loadAsync(urlA),
-        loader.loadAsync(urlB),
+      // Exito solo si ambos GLB parsean; cada cara se pinta en su canvas.
+      // PBR roto nunca es ready: estado distinto sin PBR, GLB parseado.
+      const [doneA, doneB] = await Promise.all([
+        paintFace(THREE, canvasA, urlA, pbrA, "A"),
+        paintFace(THREE, canvasB, urlB, pbrB, "B"),
       ]);
-      void gltfB;
-      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-      renderer.setSize(480, 360, false);
-      const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x0c141d);
-      const camera = new THREE.PerspectiveCamera(35, 480 / 360, 0.1, 100);
-      camera.position.set(0, 0.2, 3.2);
-      camera.lookAt(0, 0, 0);
-      const light = new THREE.DirectionalLight(0xffffff, 1.4);
-      light.position.set(2, 3, 4);
-      scene.add(light);
-      scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-      scene.add(gltfA.scene);
-      renderer.render(scene, camera);
-      let frames = 0;
-      const tick = () => {
-        gltfA.scene.rotation.y += 0.01;
-        renderer.render(scene, camera);
-        if (++frames < 240 && canvas.isConnected) requestAnimationFrame(tick);
-      };
-      tick();
-      setStatus("cara real lista: mesh A cargado en visor (GLB parseado).");
+      if (!doneA.pbrOk || !doneB.pbrOk) {
+        setStatus(`${viewerStatusMessage("loading")} sin PBR (textura no disponible, GLB parseado).`);
+        return;
+      }
+      setStatus(viewerStatusMessage("ready"));
     } catch {
-      setStatus("GLB invalido: no se pudo parsear (revisa el zip).");
+      setStatus(viewerStatusMessage("invalid"));
     }
   }
 
@@ -149,10 +371,19 @@
       linkB.hidden = true;
       linkB.removeAttribute("href");
     }
-    setStatus("visor 3D listo (neutro, sin resultado)");
+    disposeCanvas(canvasA);
+    disposeCanvas(canvasB);
+    setStatus(viewerStatusMessage("idle"));
+    if (studioBootOk()) {
+      void renderNeutral(canvasA);
+      void renderNeutral(canvasB);
+    }
   });
 
-  void renderNeutral();
+  if (studioBootOk()) {
+    void renderNeutral(canvasA);
+    void renderNeutral(canvasB);
+  }
 </script>
 
 <style>
@@ -170,13 +401,37 @@
     color: #8a5a2b;
     margin: 0 0 0.75rem;
   }
-  canvas[data-testid="viewer-3d"] {
+  .meshes {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+  }
+  @media (max-width: 760px) {
+    .meshes {
+      grid-template-columns: 1fr;
+    }
+  }
+  figure {
+    margin: 0;
+    border: 1px solid #d7dde5;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  figcaption {
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.5rem 0.75rem;
+    background: #14202e;
+    color: #f4f6f8;
+  }
+  canvas[data-testid="viewer-3d-a"],
+  canvas[data-testid="viewer-3d-b"] {
     display: block;
     width: 100%;
     max-width: 480px;
     aspect-ratio: 4 / 3;
-    background: #0c141d;
-    border-radius: 8px;
+    background: #ffffff;
+    border-radius: 0 0 8px 8px;
   }
   #viewer-3d-status {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

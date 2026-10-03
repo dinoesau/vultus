@@ -113,6 +113,11 @@ Sin `flame_template.bin` hay waiver local salvo con `VULTUS_REAL_ML=1` que falla
 Template real se congela con `scripts/extract_flame_template.py` desde `flame2023_Open.pkl` + `FLAME_w_HIFI3D_UV.obj`.
 Ojos reales via `bake_eye_texture` cuando el puente trae `eye_ball_tex.png`, si no blanco fallback.
 Imagen Modal trae `nvdiffrast==0.4.0` para futuro unwrap texgan/DPR.
+Puente ampliado a 7 archivos: base 4 mas `checkpoints/texgan_model/texgan_ffhq_uv.pth`, `checkpoints/deep3d_model/epoch_latest.pth` y `topo_assets/unwrap_1024_info.mat`.
+Env nuevos `TEXGAN_DIR`, `DEEP3D_DIR`, `TOPO_DIR` con defaults bajo `WEIGHTS_ROOT`, pasados a fit y texture workers.
+Template real `backend/assets/flame_template.bin` (5023/9976, sha `d4140b7b`) generado desde `flame2023_Open.pkl` + `FLAME_w_HIFI3D_UV.obj` con UVs last-wins (5150 vt con seams).
+`hifi3dpp_mean_face.obj` ausente en HF y Volume: documentado, no bloquea extras.
+Fitting sigue feed-forward una pasada dentro de `5+10+30` en TTL 60 con drain `visibility180`; sin fitting iterativo.
 Loader GNM `17821/35324` se conserva solo hasta el cutover (ver ADR-008); el bake gris legacy (`gnm_texture.build_albedo`) falla ruidoso sin pesos, sin caller productivo.
 Sin pesos los dobles locales siguen (gateway en verde); con `VULTUS_REAL_ML=1` el fallo es ruidoso (`FitFailed`/`MlFailed`).
 Reciben tipos ya probados, escriben a `/tmp/{job_id}` en tmpfs, retornan tipos con `UV_LEN`.

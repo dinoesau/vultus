@@ -37,7 +37,7 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: production
@@ -94,11 +94,11 @@ jobs:
     timeout-minutes: 15
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: production
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -137,7 +137,7 @@ jobs:
           npm ci --prefer-offline --no-audit --no-fund
           VITE_API_URL=https://api.vultus.esau.com.mx npm run build
       - name: upload frontend dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: frontend-dist
           path: frontend/dist
@@ -153,7 +153,7 @@ jobs:
     timeout-minutes: 5
     needs: deploy-edge
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: production
       - name: smoke prod gateway
@@ -167,10 +167,10 @@ jobs:
     needs: smoke-edge
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: production
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: install modal cli
@@ -186,7 +186,7 @@ jobs:
     timeout-minutes: 10
     needs: [smoke-edge, deploy-modal]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: production
       - name: smoke prod after modal
@@ -201,7 +201,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: production

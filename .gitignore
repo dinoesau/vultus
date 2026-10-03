@@ -35,6 +35,7 @@ Thumbs.db
 
 # Models checkpoints - no commitear pesos
 checkpoints/
+weights/
 models/*.bin
 models/*.ckpt
 *.pth

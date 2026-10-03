@@ -112,7 +112,7 @@ modal app logs vultus-workers        # logs GPU
 ```
 
 Modal escala `0 -> 100` GPUs, paga por segundo. Ver `ARCHITECTURE.md` ADR-004.
-Receta pineada: imagen base por digest + `requirements.lock` con hashes (`torch==2.13.0`) + `pytorch3d` por SHA; el job `lock-check` de CI verifica frescura.
+Receta pineada: imagen base por digest + `requirements.lock` con hashes (`torch==2.13.0`); el job `lock-check` de CI verifica frescura.
 El deploy real (con build log) corre en el release tag via CD, nunca desde rama dev.
 Aviso: hay un solo environment (`main`) y el consumer corre con schedule cada 5s:
 `modal serve` robaria jobs de la queue prod y `modal deploy` actualiza prod directo. No hay staging Modal.
@@ -241,7 +241,7 @@ Abre PR y verifica `docker compose up` + `pytest backend/tests -q` pasan E2E.
 `docker build` falla: reintenta `docker compose build api runner` (gateway worker + runner Python).
 `redis connection refused`: doc vieja, ya no aplica. Nunca hubo `Redis`: el estado vive en el DO/R2 (prod) o emulado (dev). Verifica `/health` y `ttl_secs`.
 `wrangler deploy` falla (prod): verifica `wrangler.toml` bindings de Queues/R2 y `CLOUDFLARE_API_TOKEN`.
-`modal deploy` falla: verifica `modal token` y receta pineada (digest base + lock + pytorch3d SHA en `modal_app.py`); el build real con logs corre en el release tag, nunca `serve` (roba queue prod por el schedule).
+`modal deploy` falla: verifica `modal token` y receta pineada (digest base + lock en `modal_app.py`); el build real con logs corre en el release tag, nunca `serve` (roba queue prod por el schedule).
 `CUDA out of memory` (local o Modal): baja `concurrency_limit` a 1 en `texture_worker` / `fit_worker` (`modal_app.py`).
 `Ml::Decode` en `landmarks/fit/texture`: verifica `FitRequest`/`TextureRequest` y `UV_LEN`.
 `WS no conecta`: verifica `VITE_API_URL` en `frontend/.env` y `Durable Objects` binding en `wrangler.toml` (prod) o `wrangler.dev.toml` (local).

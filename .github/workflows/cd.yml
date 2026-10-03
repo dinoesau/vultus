@@ -1,10 +1,17 @@
 name: cd
 
-# CD solo por boton: Run workflow con bump crea el tag y despliega todo a prod
-# (edge + humo + GPU + humo + release) en el mismo run. main es integracion (CI).
-# Orden: merge a production, boton con bump, el CD crea tag + Release. Sin triggers por push.
+# CD por merge a production con label Release + boton manual como fallback.
+# Auto: PR con label Release: Major/Minor/Patch hacia production, al hacer
+# merge el CD crea el tag y despliega todo a prod (edge + humo + GPU + humo
+# + release) en el mismo run. Sin label no despliega (skip). main es
+# integracion (CI). Manual: Run workflow con bump/version hace lo mismo.
+# Orden auto: merge a production con label, el CD crea tag + Release.
+# Orden manual: merge a production, boton con bump, el CD crea tag + Release.
 
 on:
+  pull_request:
+    types: [closed]
+    branches: [production]
   workflow_dispatch:
     inputs:
       bump:
@@ -29,7 +36,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      bump: ${{ steps.bump.outputs.bump }}
+    steps:
+      - name: resolver bump desde label o input manual
+        id: bump
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BUMP_DISPATCH: ${{ inputs.bump }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "bump=${BUMP_DISPATCH:-patch}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          MERGED="$(jq -r '.pull_request.merged // false' "$GITHUB_EVENT_PATH")"
+          if [ "$MERGED" != "true" ]; then
+            echo "bump=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LABELS="$(jq -r '[.pull_request.labels // [] | .[].name] | join(",")' "$GITHUB_EVENT_PATH")"
+          if echo ",$LABELS," | grep -q ",Release: Major,"; then
+            echo "bump=major" >> "$GITHUB_OUTPUT"
+          elif echo ",$LABELS," | grep -q ",Release: Minor,"; then
+            echo "bump=minor" >> "$GITHUB_OUTPUT"
+          elif echo ",$LABELS," | grep -q ",Release: Patch,"; then
+            echo "bump=patch" >> "$GITHUB_OUTPUT"
+          else
+            echo "bump=skip" >> "$GITHUB_OUTPUT"
+          fi
+
   version:
+    needs: resolve
+    if: needs.resolve.outputs.bump != 'skip'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -45,7 +86,7 @@ jobs:
         id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUMP: ${{ inputs.bump }}
+          BUMP: ${{ needs.resolve.outputs.bump }}
           VERSION_OVERRIDE: ${{ inputs.version }}
         run: |
           git fetch origin production --tags

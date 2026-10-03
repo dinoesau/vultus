@@ -188,6 +188,7 @@ Bridge gate: `MODAL_VOLUME=... R2_BUCKET=... bash scripts/modal-weights-sync.sh 
 Goldens LFW congelados por sha256.
 Diag FLAME (foto + UV atlas + GLB): `python3 scripts/render_diag.py --photo <jpg> --out <png>`.
 Template real: `python3 scripts/extract_flame_template.py --check` (falla loud sin pkl+OBJ).
+E2E verde exige puente local: `DECA_DIR=weights/deca FLAME_ASSETS_DIR=weights/flame FFHQ_UV_DIR=weights/ffhq-uv TOPO_DIR=weights/topo_assets VULTUS_REAL_ML=1 python3 scripts/e2e-flame-real.py` (pesos en `weights/` nunca se commitean).
 No commitear JPEGs LFW.
 
 ### 7.2 Frontend E2E

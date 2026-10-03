@@ -105,8 +105,13 @@ Deps compute local: `httpx/Pillow/numpy` (ver `backend/requirements-api.txt`).
 
 Cada worker es módulo deep con una sola responsabilidad.
 `Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|fit|texture` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FitResult`, `-> RenderedImage`).
-`fit` es DECA feed-forward (`backend/flame_fit.py`, determinista x2, deadline 10s, `Result` total sin `raise`).
-`texture` es completion FFHQ-UV 1024 (`backend/flame_texture.py`, `SKIN_SENTINEL` const en codigo, `evidence >= 0.99`, `concurrency_limit=1`).
+`fit` es frente geometrico 68 landmarks estilo Deep3D (`backend/flame_fit.py`, determinista x2, deadline 10s, `Result` total sin `raise`).
+Identidad desde 10 ratios 68lm, detalle condicionado a identidad+pesos sin bytes de foto, loss = residual de simetria (no 0 fijo).
+La regresion sobre base HiFi3D++ con torch vive en el worker GPU Modal; sin `torch` top-level.
+`texture` es unwrap por proyeccion FFHQ-UV (`backend/flame_texture.py`, `SKIN_SENTINEL` const en codigo, `evidence >= 0.99`, `concurrency_limit=1`).
+Atlas 512 = pixel <-> UV piel 0-1; cada texel cubierto se muestrea de la foto por proyeccion afine del template real, ocluidas con completion + detalle de checkpoint.
+Ojos en textura aparte via `bake_eye_texture`; el atlas nunca muestrea fondo (cobertura de malla 88.7%).
+El `.mat` denso apunta a malla 20k (divergencia documentada): gate de presencia + mascara, mapeo rasterizado del FLAME 5023.
 `Worker 4 CPU` (`assemble`) vive en `backend/gnm_assemble.py`: malla FLAME `VERT_COUNT = 5023`, ojos `[EYE_VERT_START:EYE_VERT_END) = [3931:5023)` (1092 verts) con material propio, 2 primitivas PBR real (`SkinPBR` + `EyePBR`, sin emisivo), `build_personalized_glb(fit, albedo, eye_texture?) -> GnmMesh`, zip-6 via `build_result_zip` en `backend/gnm.py` (sin dep `torch/diffusers/mediapipe`).
 Fixture local es cabeza coherente (elipsoide piel + 2 esferas ojos, UVs piel 0-1 ojos 2-3), no rejilla plana.
 Sin `flame_template.bin` hay waiver local salvo con `VULTUS_REAL_ML=1` que falla loud.

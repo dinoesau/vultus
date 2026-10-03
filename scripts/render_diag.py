@@ -1,8 +1,8 @@
-"""Diag overlay: detected-68 (verde) vs projected-68 (rojo) + error medio en px.
+"""Diag FLAME: foto + UV atlas + GLB cabeza coherente.
 
 Uso: python3 scripts/render_diag.py --photo <jpg> --out <png>
-Imprime en stdout el hallazgo de ejes + mean reprojection error finito.
-Sin torch. Solo PIL + numpy.
+Imprime verts, evidencia, sentinel y guarda diagnostico lado a lado
+(foto crop + uv atlas). Sin torch. Solo PIL + numpy.
 """
 
 from __future__ import annotations
@@ -14,15 +14,17 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from backend.domain import Err, parse_image_bytes, parse_landmarks
-from backend.gnm_fit import fit_gnm, project
-from backend.gnm_head import eval_landmarks68, mediapipe478_to_gnm68_targets
+from backend.domain import Err, Ok, parse_image_bytes, parse_landmarks
+from backend.flame_fit import fit_flame
+from backend.flame_texture import bake_flame, count_sentinel, texture_evidence
+from backend.gnm import uv_to_png
+from backend.gnm_assemble import VERT_COUNT, build_personalized_glb, is_flame_synthetic
 
 TASK_CANDIDATES = (
     REPO_ROOT / "weights" / "mediapipe" / "face_landmarker.task",
@@ -77,10 +79,9 @@ def main() -> int:
     image = parsed_img.value
     pil = Image.open(io.BytesIO(raw)).convert("RGB")
     rgb = np.asarray(pil)
-    h, w = rgb.shape[0], rgb.shape[1]
     raw478 = _real_478(rgb)
     if raw478 is None:
-        print("LANDMARKS_SYNTHETIC=1 (sin MediaPipe real; error ilustrativo)")
+        print("LANDMARKS_SYNTHETIC=1 (sin MediaPipe real; diag ilustrativo)")
         pts = []
         for i in range(478):
             x = 0.25 + 0.5 * ((i % 22) / 21.0)
@@ -93,34 +94,34 @@ def main() -> int:
     if isinstance(parsed_lm, Err):
         print(f"FAIL no parsean landmarks: {parsed_lm.error}")
         return 1
+    assert isinstance(parsed_lm, Ok)
     landmarks = parsed_lm.value
-    fit_res = fit_gnm(image, landmarks)
+    fit_res = fit_flame(image, landmarks)
     if isinstance(fit_res, Err):
         print(f"FAIL fit: {fit_res.error}")
         return 1
-    fit = fit_res.value
-    detected68 = np.asarray(mediapipe478_to_gnm68_targets(raw478), dtype=np.float64)
-    mesh68 = np.asarray(eval_landmarks68(fit.coeffs.as_tuple()), dtype=np.float64)
-    proj = np.asarray(project(fit.camera, mesh68), dtype=np.float64)
-    det_px = detected68 * np.asarray([w, h], dtype=np.float64)
-    proj_px = proj * np.asarray([w, h], dtype=np.float64)
-    err = np.linalg.norm(det_px - proj_px, axis=1)
-    mean_err = float(err.mean())
-    print(f"mean_reproj_px_error={mean_err:.2f} w={w} h={h}")
-    print(f"camera={list(fit.camera.as_tuple())}")
-    print("AXIS_FINDING: project sin flip (y-down MediaPipe); si el overlay rojo "
-          "aparece espejado en Y respecto al verde, el bake necesita flip de ejes.")
-    out = pil.copy()
-    draw = ImageDraw.Draw(out)
-    for x, y in det_px:
-        draw.ellipse([x - 2, y - 2, x + 2, y + 2], outline=(0, 255, 0), width=1)
-    for x, y in proj_px:
-        draw.ellipse([x - 2, y - 2, x + 2, y + 2], outline=(255, 0, 0), width=1)
-    out.save(args.out)
-    print(f"diag_saved={args.out}")
-    if not np.isfinite(mean_err):
-        print("FAIL mean error no finito")
+    assert isinstance(fit_res, Ok)
+    alb_res = bake_flame(image, fit_res.value, landmarks)
+    if isinstance(alb_res, Err):
+        print(f"FAIL albedo: {alb_res.error}")
         return 1
+    assert isinstance(alb_res, Ok)
+    raw_uv = alb_res.value.as_bytes()
+    print(f"verts={VERT_COUNT} synthetic={is_flame_synthetic()} evidence={texture_evidence(raw_uv):.4f} sentinel={count_sentinel(raw_uv)}")
+    glb_res = build_personalized_glb(fit_res.value, alb_res.value)
+    if isinstance(glb_res, Err):
+        print(f"FAIL glb: {glb_res.error}")
+        return 1
+    print(f"glb_len={len(glb_res.value.as_bytes())} magic={glb_res.value.as_bytes()[0:4]!r}")
+    uv_png = uv_to_png(alb_res.value)
+    uv_img = Image.open(io.BytesIO(uv_png)).convert("RGB")
+    thumb = pil.copy()
+    thumb.thumbnail((512, 512))
+    canvas = Image.new("RGB", (1024, 512), (0, 0, 0))
+    canvas.paste(thumb, (0, 0))
+    canvas.paste(uv_img.resize((512, 512)), (512, 0))
+    canvas.save(args.out)
+    print(f"diag_saved={args.out}")
     return 0
 
 

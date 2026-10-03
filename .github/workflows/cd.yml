@@ -66,7 +66,8 @@ jobs:
             fi
             NEXT="$OVERRIDE"
           else
-            LATEST="$(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || echo 'v0.1.0')"
+            LATEST="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+            [ -z "$LATEST" ] && LATEST='v0.1.0'
             BASE="${LATEST#v}"
             MAJOR="$(echo "$BASE" | cut -d. -f1)"
             MINOR="$(echo "$BASE" | cut -d. -f2)"
@@ -77,10 +78,19 @@ jobs:
               *) NEXT="$MAJOR.$MINOR.$((PATCH + 1))" ;;
             esac
           fi
-          if git rev-parse "v$NEXT" >/dev/null 2>&1; then
-            echo "::error::tag v$NEXT ya existe"
-            exit 1
-          fi
+          TRIES=0
+          while git rev-parse "v$NEXT" >/dev/null 2>&1; do
+            TRIES=$((TRIES + 1))
+            if [ "$TRIES" -gt 10 ]; then
+              echo "::error::tag v$NEXT ya existe y no se pudo avanzar"
+              exit 1
+            fi
+            BASE="$NEXT"
+            MAJOR="$(echo "$BASE" | cut -d. -f1)"
+            MINOR="$(echo "$BASE" | cut -d. -f2)"
+            PATCH="$(echo "$BASE" | cut -d. -f3)"
+            NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          done
           git tag "v$NEXT"
           git push origin "v$NEXT"
           echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"

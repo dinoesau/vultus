@@ -1,14 +1,12 @@
 name: cd
 
-# CD estricto por tags: solo v*.*.* despliega a prod (edge + humo + GPU + humo + release).
-# Sin preview: push a production no despliega nada, solo deja el codigo listo.
-# main es integracion (CI). Orden: merge a production, tag en la punta, push tag.
-# Tags deben salir de production (guard lo verifica). Manual no despliega prod.
+# CD automatico: push a production despliega directo a prod (edge + humo + GPU + humo).
+# Sin preview, sin tag manual. main es integracion (CI).
+# Orden: merge a production, push rama, CD hace el resto y sube frontend-dist como artifact.
 
 on:
   push:
     branches: [production]
-    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -16,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       run_modal:
-        description: 'Solo debug, no despliega prod. Prod solo via tag.'
+        description: 'Deploy Modal GPU workers'
         type: boolean
         default: true
 
@@ -29,23 +27,11 @@ concurrency:
 
 jobs:
   deploy-edge:
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: guard tag sobre production
-        run: |
-          git fetch origin production
-          TAG_SHA="${{ github.sha }}"
-          if ! git merge-base --is-ancestor "$TAG_SHA" origin/production; then
-            echo "::error::tag ${{ github.ref_name }} no sale de production. Haz: git checkout production && git tag ${{ github.ref_name }} && git push origin production ${{ github.ref_name }}"
-            exit 1
-          fi
-          echo "release ${{ github.ref_name }} desde $TAG_SHA"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -97,7 +83,6 @@ jobs:
         run: npx --yes wrangler@4 pages deploy frontend/dist --project-name vultus --commit-hash '${{ github.sha }}'
 
   smoke-edge:
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: deploy-edge
@@ -113,8 +98,8 @@ jobs:
     timeout-minutes: 30
     needs: smoke-edge
     # En push inputs no existe y '' != false es falso: sin este OR Modal
-    # nunca desplegaria en release. Manual nunca es tag, asi que solo corre en push de tag.
-    if: startsWith(github.ref, 'refs/tags/v') && needs.smoke-edge.result == 'success' && (github.event_name == 'push' || inputs.run_modal != false)
+    # nunca desplegaria en push. Manual sigue con run_modal=false para saltarlo.
+    if: needs.smoke-edge.result == 'success' && (github.event_name == 'push' || inputs.run_modal != false)
     environment: production
     steps:
       - uses: actions/checkout@v4
@@ -140,22 +125,3 @@ jobs:
         env:
           API_URL: https://api.vultus.esau.com.mx
         run: bash scripts/smoke-prod.sh
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    needs: [deploy-modal, smoke-e2e]
-    permissions:
-      contents: write
-    steps:
-      - name: create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.ref_name }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG ya existe, se omite"
-          else
-            gh release create "$TAG" --title "$TAG" --generate-notes
-          fi

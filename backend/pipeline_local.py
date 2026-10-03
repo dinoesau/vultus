@@ -410,10 +410,17 @@ def run_pair(
         _raw_gate = _uv_gate.as_bytes()
         if count_sentinel(_raw_gate) != 0 or texture_evidence(_raw_gate) < EVIDENCE_MIN:
             return _fail("texture sentinel/evidence gate failed")
-    mesh_a_result = build_personalized_glb(fit_a, uv_a)
+    try:
+        from backend.flame_texture import bake_eye_texture as _bake_eye
+
+        _eye_res = _bake_eye()
+        _eye_tex = _eye_res.value if isinstance(_eye_res, Ok) else None
+    except Exception:  # noqa: BLE001 - eye fallback blanco, nunca tumba assemble
+        _eye_tex = None
+    mesh_a_result = build_personalized_glb(fit_a, uv_a, eye_texture=_eye_tex)
     if isinstance(mesh_a_result, Err):
         return _fail(f"assemble mesh_a failed: {mesh_a_result.error}")
-    mesh_b_result = build_personalized_glb(fit_b, uv_b)
+    mesh_b_result = build_personalized_glb(fit_b, uv_b, eye_texture=_eye_tex)
     if isinstance(mesh_b_result, Err):
         return _fail(f"assemble mesh_b failed: {mesh_b_result.error}")
     mesh_a = mesh_a_result.value

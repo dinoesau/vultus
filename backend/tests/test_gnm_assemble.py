@@ -484,3 +484,34 @@ def test_glb_embeds_eye_texture_when_provided() -> None:
     assert isinstance(out_white, Ok)
     assert out_real.value.as_bytes() != out_white.value.as_bytes()
     assert raw_eye[:100] != bytes([240, 240, 240] * 34)[:100]
+
+
+def test_displaced_clamps_identity_spikes_a_5mm() -> None:
+    """Coefs O(9) de identidad no generan picos: dx clamp a +-5mm."""
+    from backend.gnm_assemble import _DISPLACE_MAX, displaced_positions
+
+    assert _DISPLACE_MAX == 0.005
+    out = displaced_positions(_fit(8.9))
+    assert isinstance(out, Ok)
+
+    from backend.gnm_assemble import load_flame_template
+
+    tpl = load_flame_template()
+    assert isinstance(tpl, Ok)
+    xs = [p[0] for p in tpl.value[0]]
+    for (x, _y, _z), x0 in zip(out.value, xs):
+        assert abs(x - x0) <= 0.005 + 1e-9
+
+
+def test_raster_skips_backfacing_tris() -> None:
+    """Tris de espaldas no muestrean la foto (swirl por falta de depth)."""
+    from backend import flame_texture as _texmod
+    from backend.flame_texture import _rasterize_skin_uv
+
+    _texmod._raster_cache = None
+    uvs = [(0.0, 0.0), (0.02, 0.0), (0.0, 0.02), (0.05, 0.0), (0.07, 0.0), (0.05, 0.02)]
+    tris = [(0, 1, 2), (3, 4, 5)]
+    v_idx, _bw = _rasterize_skin_uv(uvs, tris, facing=[True, False])
+    assert int(v_idx[5, 5, 0]) >= 0
+    assert int(v_idx[30, 5, 0]) == -1
+    _texmod._raster_cache = None

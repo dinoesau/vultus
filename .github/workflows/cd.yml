@@ -1,13 +1,12 @@
 name: cd
 
 # CD estricto por tags: solo v*.*.* despliega a prod (edge + humo + GPU + humo + release).
-# Sin preview: push a production no despliega nada, solo deja el codigo listo.
-# main es integracion (CI). Orden: merge a production, crear tag (boton bump o git tag), push tag.
+# Push a production no dispara nada. main es integracion (CI).
+# Orden: merge a production, crear tag (boton bump o git tag), push tag.
 # Tags deben salir de production (guard lo verifica). El CD crea el Release, el humano solo pone el numero.
 
 on:
   push:
-    branches: [production]
     tags: ['v[0-9]+.[0-9]+.[0-9]+*']
     paths-ignore:
       - '**.md'

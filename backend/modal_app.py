@@ -771,8 +771,7 @@ if HAVE_MODAL:
         memory=16384,
         volumes={WEIGHTS_ROOT: weights},
         secrets=[modal.Secret.from_name("vultus-cloudflare")],
-        max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU (anti-OOM)
-        concurrency_limit=1,  # Wave 3: una completion pesada por container, sin OOM
+        max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU (anti-OOM, default sin concurrent)
         timeout=60,
         min_containers=0,
         # Puente FLAME-DECA/FFHQ-UV solo por env (Wave 6-fix: completion

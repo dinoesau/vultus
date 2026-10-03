@@ -2,8 +2,8 @@ name: cd
 
 # CD estricto por tags: solo v*.*.* despliega a prod (edge + humo + GPU + humo + release).
 # Sin preview: push a production no despliega nada, solo deja el codigo listo.
-# main es integracion (CI). Orden: merge a production, tag en la punta, push tag.
-# Tags deben salir de production (guard lo verifica). Manual no despliega prod.
+# main es integracion (CI). Orden: merge a production, crear tag (boton bump o git tag), push tag.
+# Tags deben salir de production (guard lo verifica). El CD crea el Release, el humano solo pone el numero.
 
 on:
   push:
@@ -15,10 +15,19 @@ on:
       - 'LICENSE'
   workflow_dispatch:
     inputs:
-      run_modal:
-        description: 'Solo debug, no despliega prod. Prod solo via tag.'
-        type: boolean
-        default: true
+      bump:
+        description: 'Bump major, minor o patch (crea el tag solo, el CD hace el release)'
+        required: false
+        type: choice
+        default: patch
+        options:
+          - major
+          - minor
+          - patch
+      version:
+        description: 'Override version exacta sin v (opcional, ej 0.2.0)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -28,6 +37,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  version:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: production
+      - name: crear tag desde bump
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUMP: ${{ inputs.bump }}
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: |
+          git fetch origin production --tags
+          git checkout production
+          OVERRIDE="$(echo "${VERSION_OVERRIDE:-}" | tr -d ' ' | sed 's/^v//')"
+          if [ -n "$OVERRIDE" ]; then
+            if ! echo "$OVERRIDE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::version invalida: $OVERRIDE (usa X.Y.Z)"
+              exit 1
+            fi
+            NEXT="$OVERRIDE"
+          else
+            LATEST="$(git describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || echo 'v0.1.0')"
+            BASE="${LATEST#v}"
+            MAJOR="$(echo "$BASE" | cut -d. -f1)"
+            MINOR="$(echo "$BASE" | cut -d. -f2)"
+            PATCH="$(echo "$BASE" | cut -d. -f3)"
+            case "${BUMP:-patch}" in
+              major) NEXT="$((MAJOR + 1)).0.0" ;;
+              minor) NEXT="$MAJOR.$((MINOR + 1)).0" ;;
+              *) NEXT="$MAJOR.$MINOR.$((PATCH + 1))" ;;
+            esac
+          fi
+          if git rev-parse "v$NEXT" >/dev/null 2>&1; then
+            echo "::error::tag v$NEXT ya existe"
+            exit 1
+          fi
+          git tag "v$NEXT"
+          git push origin "v$NEXT"
+          echo "tag v$NEXT creado sobre production, el CD de tag despliega solo"
+
   deploy-edge:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -112,9 +167,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: smoke-edge
-    # En push inputs no existe y '' != false es falso: sin este OR Modal
-    # nunca desplegaria en release. Manual nunca es tag, asi que solo corre en push de tag.
-    if: startsWith(github.ref, 'refs/tags/v') && needs.smoke-edge.result == 'success' && (github.event_name == 'push' || inputs.run_modal != false)
+    # Solo corre en push de tag: el numero lo pone el boton bump o git tag manual.
+    if: startsWith(github.ref, 'refs/tags/v') && needs.smoke-edge.result == 'success'
     environment: production
     steps:
       - uses: actions/checkout@v4

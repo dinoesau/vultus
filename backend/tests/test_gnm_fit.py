@@ -470,3 +470,107 @@ def test_deep3d_fingerprint_consumes_epoch(monkeypatch, tmp_path) -> None:
     assert isinstance(first, _Ok)
     assert first.value != b""
     assert first.value == second.value
+
+
+def _require_real_fit_vectors(monkeypatch):  # type: ignore[no-untyped-def]
+    """Puente DECA/FLAME + triple LFW + MediaPipe, o skip con motivo."""
+    import os as _os
+    from pathlib import Path as _Path
+
+    repo = _Path(__file__).resolve().parent.parent.parent
+    monkeypatch.setenv("DECA_DIR", _os.environ.get("DECA_DIR", str(repo / "weights" / "deca")))
+    monkeypatch.setenv("FLAME_ASSETS_DIR", _os.environ.get("FLAME_ASSETS_DIR", str(repo / "weights" / "flame")))
+    from backend.flame_fit import weights_present as _wp
+
+    if not _wp():
+        import pytest
+
+        pytest.skip("sin puente DECA/FLAME no hay fit real local")
+    dataset = _Path("/Users/esau.martinez/Code/datasets/lfw")
+    tags = {
+        "A": dataset / "George_W_Bush" / "George_W_Bush_0001.jpg",
+        "B": dataset / "George_W_Bush" / "George_W_Bush_0002.jpg",
+        "C": dataset / "Aaron_Eckhart" / "Aaron_Eckhart_0001.jpg",
+    }
+    for tag, path in tags.items():
+        if not path.is_file():
+            import pytest as _pytest
+
+            _pytest.skip(f"sin triple LFW ({tag})")
+    return {tag: path.read_bytes() for tag, path in tags.items()}
+
+
+def test_fit_68_ratios_discriminate_identity_real(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """GWT1 RED: ratios 68 mismos discriminan (misma < distinta) con landmarks reales."""
+    import json as _json
+
+    import mediapipe as _mp
+    from mediapipe.tasks import python as _base
+    from mediapipe.tasks.python import vision as _vis
+
+    from backend.domain import Ok as _Ok
+    from backend.domain import parse_landmarks as _plm
+    from backend.flame_fit import identity_ratios_68
+
+    raws = _require_real_fit_vectors(monkeypatch)
+    task = "/Users/esau.martinez/Code/weights/mediapipe/face_landmarker.task"
+    opts = _vis.FaceLandmarkerOptions(base_options=_base.BaseOptions(model_asset_path=task), num_faces=1)
+    import io as _io
+
+    import numpy as _np
+    from PIL import Image as _Image
+
+    lms = {}
+    with _vis.FaceLandmarker.create_from_options(opts) as landmarker:
+        for tag, raw in raws.items():
+            rgb = _np.asarray(_Image.open(_io.BytesIO(raw)).convert("RGB"))
+            res = landmarker.detect(_mp.Image(image_format=_mp.ImageFormat.SRGB, data=rgb))
+            pts = [[float(q.x), float(q.y), float(q.z)] for q in res.face_landmarks[0]]
+            parsed = _plm(_json.dumps(pts).encode())
+            assert isinstance(parsed, _Ok)
+            lms[tag] = parsed.value
+    import math as _math
+
+    def _d(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+        return _math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+    ra = identity_ratios_68(lms["A"])
+    rb = identity_ratios_68(lms["B"])
+    rc = identity_ratios_68(lms["C"])
+    assert isinstance(ra, _Ok) and isinstance(rb, _Ok) and isinstance(rc, _Ok)
+    assert _d(ra.value, rb.value) < _d(ra.value, rc.value)
+
+
+def test_fit_real_loss_is_computed_symmetry_not_zero(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """GWT1 RED: loss real es residual geometrico finito, no 0 fijo."""
+    import json as _json
+
+    import mediapipe as _mp
+    from mediapipe.tasks import python as _base
+    from mediapipe.tasks.python import vision as _vis
+
+    from backend.domain import Ok as _Ok
+    from backend.domain import parse_image_bytes as _pimg
+    from backend.domain import parse_landmarks as _plm
+    from backend.flame_fit import _LAST_FIT_STATS, fit_flame
+
+    raws = _require_real_fit_vectors(monkeypatch)
+    task = "/Users/esau.martinez/Code/weights/mediapipe/face_landmarker.task"
+    opts = _vis.FaceLandmarkerOptions(base_options=_base.BaseOptions(model_asset_path=task), num_faces=1)
+    import io as _io
+
+    import numpy as _np
+    from PIL import Image as _Image
+
+    with _vis.FaceLandmarker.create_from_options(opts) as landmarker:
+        raw = raws["A"]
+        rgb = _np.asarray(_Image.open(_io.BytesIO(raw)).convert("RGB"))
+        res = landmarker.detect(_mp.Image(image_format=_mp.ImageFormat.SRGB, data=rgb))
+        pts = [[float(q.x), float(q.y), float(q.z)] for q in res.face_landmarks[0]]
+        img = _pimg(raw)
+        lms = _plm(_json.dumps(pts).encode())
+        assert isinstance(img, _Ok) and isinstance(lms, _Ok)
+        out = fit_flame(img.value, lms.value)
+        assert isinstance(out, _Ok)
+    assert _LAST_FIT_STATS["iterations"] == 1.0
+    assert _LAST_FIT_STATS["loss"] > 0.0

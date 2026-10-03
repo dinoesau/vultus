@@ -854,23 +854,143 @@ def test_flame_eye_bake_real_map_differs_from_skin(monkeypatch) -> None:  # type
     assert max_abs_diff(first.value.as_bytes(), skin.value.as_bytes()) > 0
 
 
-def test_unwrap_extras_missing_fails_loud_when_real() -> None:
-    """Slice 3 RED: sin texgan/unwrap extras, unwrap real es Err."""
-    import os
+def test_unwrap_extras_missing_fails_loud_when_real(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Sin unwrap mat, unwrap real es Err loud (nunca blur silencioso)."""
+    from pathlib import Path as _Path
 
     from backend import flame_texture as _tex
+    from backend.domain import Err as _Err
 
     assert _tex.TEXGAN_NAME == "texgan_ffhq_uv.pth"
     assert _tex.UNWRAP_MAT_NAME == "unwrap_1024_info.mat"
-    # Helper debe existir y ser total sin raise.
-    assert hasattr(_tex, "ffhq_uv_extra_present")
-    assert _tex.ffhq_uv_extra_present() in (True, False)
-    if not _tex.ffhq_uv_extra_present():
-        os.environ["VULTUS_REAL_ML"] = "1"
-        try:
-            res = _tex.run_unwrap_texture()  # type: ignore[no-untyped-call]
-            from backend.domain import Err as _Err
+    repo = _Path(__file__).resolve().parent.parent.parent
+    monkeypatch.setenv("FFHQ_UV_DIR", str(repo / "weights" / "ffhq-uv"))
+    empty = tmp_path / "topo-vacio"
+    empty.mkdir()
+    monkeypatch.setenv("TOPO_DIR", str(empty))
+    monkeypatch.setenv("WEIGHTS_ROOT", str(tmp_path / "vacio"))
+    assert _tex._find_unwrap_mat() is None
+    img = _image(0xA1)
+    fit = _flame_fit_value()
+    res = _tex.run_unwrap_texture(img, fit, _landmarks())
+    assert isinstance(res, _Err)
 
-            assert isinstance(res, _Err)
-        finally:
-            os.environ.pop("VULTUS_REAL_ML", None)
+
+def _require_local_unwrap_env(monkeypatch):  # type: ignore[no-untyped-def]
+    """Env a pesos locales del repo (puente 4 + unwrap mat), o skip con motivo."""
+    from pathlib import Path as _Path
+
+    repo = _Path(__file__).resolve().parent.parent.parent
+    monkeypatch.setenv("DECA_DIR", str(repo / "weights" / "deca"))
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(repo / "weights" / "flame"))
+    monkeypatch.setenv("FFHQ_UV_DIR", str(repo / "weights" / "ffhq-uv"))
+    monkeypatch.setenv("TOPO_DIR", str(repo / "weights" / "topo_assets"))
+    monkeypatch.setenv("TEXGAN_DIR", str(repo / "weights" / "checkpoints" / "texgan_model"))
+    from backend.flame_texture import weights_present as _wp
+
+    if not _wp():
+        import pytest
+
+        pytest.skip("sin puente FFHQ-UV local no hay unwrap real")
+    dataset = _Path("/Users/esau.martinez/Code/datasets/lfw")
+    path_a = dataset / "George_W_Bush" / "George_W_Bush_0001.jpg"
+    if not path_a.is_file():
+        import pytest as _pytest
+
+        _pytest.skip("sin LFW no hay foto para unwrap")
+    return path_a.read_bytes()
+
+
+def test_unwrap_projection_ok_sentinel_evidence_x2(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """GWT2 RED: unwrap por proyeccion Ok, cero sentinel, evidence>=MIN, x2 identico."""
+    import json as _json
+
+    import mediapipe as _mp
+    from mediapipe.tasks import python as _base
+    from mediapipe.tasks.python import vision as _vis
+
+    from backend.domain import Ok as _Ok
+    from backend.domain import parse_image_bytes as _pimg
+    from backend.domain import parse_landmarks as _plm
+    from backend.flame_fit import fit_flame
+    from backend.flame_texture import (
+        EVIDENCE_MIN,
+        count_sentinel,
+        max_abs_diff,
+        run_unwrap_texture,
+        texture_evidence,
+    )
+
+    raw = _require_local_unwrap_env(monkeypatch)
+    task = "/Users/esau.martinez/Code/weights/mediapipe/face_landmarker.task"
+    opts = _vis.FaceLandmarkerOptions(base_options=_base.BaseOptions(model_asset_path=task), num_faces=1)
+    import io as _io
+
+    import numpy as _np
+    from PIL import Image as _Image
+
+    with _vis.FaceLandmarker.create_from_options(opts) as landmarker:
+        rgb = _np.asarray(_Image.open(_io.BytesIO(raw)).convert("RGB"))
+        res = landmarker.detect(_mp.Image(image_format=_mp.ImageFormat.SRGB, data=rgb))
+        pts = [[float(q.x), float(q.y), float(q.z)] for q in res.face_landmarks[0]]
+    img = _pimg(raw)
+    lms = _plm(_json.dumps(pts).encode())
+    assert isinstance(img, _Ok) and isinstance(lms, _Ok)
+    fit = fit_flame(img.value, lms.value)
+    assert isinstance(fit, _Ok)
+    first = run_unwrap_texture(img.value, fit.value, lms.value)
+    second = run_unwrap_texture(img.value, fit.value, lms.value)
+    assert isinstance(first, _Ok)
+    assert isinstance(second, _Ok)
+    out = first.value.as_bytes()
+    assert len(out) == 786432
+    assert count_sentinel(out) == 0
+    assert texture_evidence(out) >= EVIDENCE_MIN
+    assert max_abs_diff(out, second.value.as_bytes()) == 0
+
+
+def test_unwrap_differs_from_blur_completion(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """GWT2 RED: unwrap proyectado no es el blur 64->512 (proyeccion UV real)."""
+    import json as _json
+
+    import mediapipe as _mp
+    from mediapipe.tasks import python as _base
+    from mediapipe.tasks.python import vision as _vis
+
+    from backend.domain import Ok as _Ok
+    from backend.domain import parse_image_bytes as _pimg
+    from backend.domain import parse_landmarks as _plm
+    from backend.flame_fit import fit_flame
+    from backend.flame_texture import (
+        _decode_photo,
+        _face_crop,
+        _photo_base,
+        run_unwrap_texture,
+    )
+
+    raw = _require_local_unwrap_env(monkeypatch)
+    task = "/Users/esau.martinez/Code/weights/mediapipe/face_landmarker.task"
+    opts = _vis.FaceLandmarkerOptions(base_options=_base.BaseOptions(model_asset_path=task), num_faces=1)
+    import io as _io
+
+    import numpy as _np
+    from PIL import Image as _Image
+
+    with _vis.FaceLandmarker.create_from_options(opts) as landmarker:
+        rgb = _np.asarray(_Image.open(_io.BytesIO(raw)).convert("RGB"))
+        res = landmarker.detect(_mp.Image(image_format=_mp.ImageFormat.SRGB, data=rgb))
+        pts = [[float(q.x), float(q.y), float(q.z)] for q in res.face_landmarks[0]]
+    img = _pimg(raw)
+    lms = _plm(_json.dumps(pts).encode())
+    assert isinstance(img, _Ok) and isinstance(lms, _Ok)
+    fit = fit_flame(img.value, lms.value)
+    assert isinstance(fit, _Ok)
+    unwrapped = run_unwrap_texture(img.value, fit.value, lms.value)
+    assert isinstance(unwrapped, _Ok)
+    photo = _decode_photo(img.value)
+    assert isinstance(photo, _Ok)
+    crop = _face_crop(photo.value, lms.value)
+    assert isinstance(crop, _Ok)
+    blur = _photo_base(crop.value).astype(_np.float64)
+    uw = _np.frombuffer(unwrapped.value.as_bytes(), dtype=_np.uint8).astype(_np.float64).reshape(512, 512, 3)
+    assert float(_np.abs(uw - blur).mean()) > 1.0

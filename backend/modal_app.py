@@ -86,6 +86,17 @@ DECA_DIR = _env("DECA_DIR", os.path.join(WEIGHTS_ROOT, "deca")) or os.path.join(
 FLAME_ASSETS_DIR = _env("FLAME_ASSETS_DIR", os.path.join(WEIGHTS_ROOT, "flame")) or os.path.join(
     WEIGHTS_ROOT, "flame"
 )
+# Pesos RGB fitting FFHQ-UV verificados en Volume (37 archivos).
+# Solo por env con defaults bajo WEIGHTS_ROOT; nada hardcodeado fuera de aqui.
+TEXGAN_DIR = _env("TEXGAN_DIR", os.path.join(WEIGHTS_ROOT, "checkpoints", "texgan_model")) or os.path.join(
+    WEIGHTS_ROOT, "checkpoints", "texgan_model"
+)
+DEEP3D_DIR = _env("DEEP3D_DIR", os.path.join(WEIGHTS_ROOT, "checkpoints", "deep3d_model")) or os.path.join(
+    WEIGHTS_ROOT, "checkpoints", "deep3d_model"
+)
+TOPO_DIR = _env("TOPO_DIR", os.path.join(WEIGHTS_ROOT, "topo_assets")) or os.path.join(
+    WEIGHTS_ROOT, "topo_assets"
+)
 # Nombre del Volume (Factor III: config por env, ver .env.example).
 MODAL_VOLUME_NAME = _env("MODAL_VOLUME", "vultus-weights") or "vultus-weights"
 # VULTUS_REAL_ML: 1 fuerza real, 0 fuerza dobles, auto decide por pesos+deps.
@@ -396,6 +407,10 @@ if HAVE_MODAL:
             # (978cd99221b9e0a6a568f1d427854d73363265cf). Sin este pin cada
             # build podia traer un commit distinto de main.
             "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST=7.5 CXX=g++ CC=gcc pip install --no-cache-dir --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@978cd99221b9e0a6a568f1d427854d73363265cf",
+            # RGB fitting FFHQ-UV: rasterizador nvdiffrast para unwrap/DPR.
+            # Pin compatible con torch 2.13 cu126; build-deferred (verifica
+            # job manual docker-gpu / modal deploy). Sin || echo: requerido.
+            "pip install --no-cache-dir nvdiffrast==0.4.0",
         )
         # Codigo compartido en la imagen: Modal solo monta `modal_app.py`;
         # sin esto el consumer muere con ModuleNotFoundError al importar
@@ -730,6 +745,9 @@ if HAVE_MODAL:
             "FFHQ_UV_DIR": FFHQ_UV_DIR,
             "DECA_DIR": DECA_DIR,
             "FLAME_ASSETS_DIR": FLAME_ASSETS_DIR,
+            "TEXGAN_DIR": TEXGAN_DIR,
+            "DEEP3D_DIR": DEEP3D_DIR,
+            "TOPO_DIR": TOPO_DIR,
         },
     )(fit_worker)
 
@@ -782,7 +800,11 @@ if HAVE_MODAL:
             "FFHQ_UV_DIR": FFHQ_UV_DIR,
             "DECA_DIR": DECA_DIR,
             "FLAME_ASSETS_DIR": FLAME_ASSETS_DIR,
+            "TEXGAN_DIR": TEXGAN_DIR,
+            "DEEP3D_DIR": DEEP3D_DIR,
+            "TOPO_DIR": TOPO_DIR,
         },
+
     )(texture_worker)
 
 
@@ -1063,8 +1085,19 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
     _report_progress(job_id, PROGRESS_ASSEMBLE, "assemble")
 
     t_assemble = time.perf_counter()
-    r_mesh_a = _glb(ra_fit.value, ra_uv.value)
-    r_mesh_b = _glb(rb_fit.value, rb_uv.value)
+    try:
+        from backend.flame_texture import bake_eye_texture as _bake_eye_modal
+
+        _eye_modal_res = _bake_eye_modal()
+        try:
+            from backend.domain import Ok as _OkEye
+        except ImportError:
+            from domain import Ok as _OkEye  # type: ignore[no-redef]
+        _eye_modal = _eye_modal_res.value if isinstance(_eye_modal_res, _OkEye) else None
+    except Exception:
+        _eye_modal = None
+    r_mesh_a = _glb(ra_fit.value, ra_uv.value, eye_texture=_eye_modal)
+    r_mesh_b = _glb(rb_fit.value, rb_uv.value, eye_texture=_eye_modal)
     if isinstance(r_mesh_a, _ErrR) or isinstance(r_mesh_b, _ErrR):
         raise RuntimeError("assemble glb failed")
     if not isinstance(r_mesh_a, _OkR) or not isinstance(r_mesh_b, _OkR):

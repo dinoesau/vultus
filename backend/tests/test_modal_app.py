@@ -268,3 +268,15 @@ def test_fit_infer_logs_iterations_and_loss(caplog):
 def test_fit_worker_timeout_stays_60():
     assert modal_app.FIT_TIMEOUT_SECS == 10
     assert modal_app.TOTAL_TIMEOUT_SECS == 60
+
+
+def test_real_weight_dirs_exposed_via_env() -> None:
+    """Fix 1 RED: TEXGAN/DEEP3D/TOPO dirs por env con defaults bajo WEIGHTS_ROOT."""
+    from backend import modal_app as _m
+
+    assert hasattr(_m, "TEXGAN_DIR")
+    assert hasattr(_m, "DEEP3D_DIR")
+    assert hasattr(_m, "TOPO_DIR")
+    assert _m.TEXGAN_DIR.endswith("checkpoints/texgan_model")
+    assert _m.DEEP3D_DIR.endswith("checkpoints/deep3d_model")
+    assert _m.TOPO_DIR.endswith("topo_assets")

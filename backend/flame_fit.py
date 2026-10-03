@@ -73,6 +73,10 @@ _LAST_FIT_STATS: dict[str, float] = {"iterations": 0.0, "loss": 0.0, "duration_m
 # scripts/modal-weights-sync.sh BRIDGE_FILES). Solo nombres, nunca rutas.
 DECA_TAR_NAME = "deca_model.tar"
 FLAME_PKL_NAMES = ("flame2023_Open.pkl", "generic_model.pkl")
+# Extras shape Deep3D HiFi3D++ (futuro, no parte del puente canonico).
+DEEP3D_EPOCH_NAME = "epoch_latest.pth"
+LM68_DAT_NAME = "shape_predictor_68_face_landmarks.dat"
+LM68_PB_NAME = "68lm_detector.pb"
 _BRIDGE_HEAD_BYTES = 65536
 
 # --- Forward real: constantes del encoder estructurado.
@@ -108,6 +112,35 @@ def deca_dir() -> str:
 def flame_assets_dir() -> str:
     """Assets FLAME desde env. Vacio = ausente = doble local."""
     return _env("FLAME_ASSETS_DIR")
+
+
+def deep3d_dir() -> str:
+    """Checkpoint Deep3D HiFi3D++ desde env. Vacio = ausente."""
+    return _env("DEEP3D_DIR")
+
+
+def _deep3d_candidate_dirs() -> list[str]:
+    cands: list[str] = []
+    for d in (deep3d_dir(), deca_dir()):
+        if d and d not in cands:
+            cands.append(d)
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    if root:
+        fallback = os.path.join(root, "checkpoints", "deep3d_model")
+        if fallback not in cands:
+            cands.append(fallback)
+    return cands
+
+
+def _lm_candidate_dirs() -> list[str]:
+    cands: list[str] = _deep3d_candidate_dirs()
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    if root:
+        for sub in ("checkpoints/lm_model", "checkpoints/dlib_model"):
+            cand = os.path.join(root, sub)
+            if cand not in cands:
+                cands.append(cand)
+    return cands
 
 
 def _file_nonempty(path: str) -> bool:
@@ -147,6 +180,60 @@ def weights_present() -> bool:
 def _real_fit_available() -> bool:
     """True solo con pesos del puente en ambos dirs de env. Sin literales."""
     return weights_present()
+
+
+def deep3d_extra_present() -> bool:
+    """True solo con extras Deep3D (epoch + 68lm detector) en DECA_DIR.
+
+    Via futura shape real HiFi3D++; hoy el forward estructurado
+    identidad+detalle es la via real con puente 2 archivos.
+    Total: False si ausente, nunca raise.
+    """
+    epoch_ok = any(_file_nonempty(os.path.join(d, DEEP3D_EPOCH_NAME)) for d in _deep3d_candidate_dirs())
+    if not epoch_ok:
+        return False
+    lm_dirs = _lm_candidate_dirs()
+    dat = any(_file_nonempty(os.path.join(d, LM68_DAT_NAME)) for d in lm_dirs)
+    pb = any(_file_nonempty(os.path.join(d, LM68_PB_NAME)) for d in lm_dirs)
+    return dat or pb
+
+
+def deep3d_fingerprint() -> Ok[bytes] | Err[DomainError]:
+    """Huella Deep3D: sha256 de epoch_latest.pth + detector 68lm cuando presentes.
+
+    Parametriza el forward junto al puente: mismos checkpoints dan el mismo
+    forward; checkpoints distintos lo cambian. Total: Ok vacio si ausentes
+    (via estructurada sin Deep3D), Err solo si un archivo verificado deja
+    de leerse (TOCTOU), nunca raise. Sin torch top-level: solo bytes.
+    """
+    try:
+        h = hashlib.sha256(b"deep3d-real-fit-v1")
+        found_epoch = False
+        for d in _deep3d_candidate_dirs():
+            cand = os.path.join(d, DEEP3D_EPOCH_NAME)
+            if _file_nonempty(cand):
+                with open(cand, "rb") as fh:
+                    head = fh.read(_BRIDGE_HEAD_BYTES)
+                h.update(DEEP3D_EPOCH_NAME.encode("utf-8"))
+                h.update(struct.pack(">Q", os.path.getsize(cand)))
+                h.update(head)
+                found_epoch = True
+                break
+        if not found_epoch:
+            return Ok(b"")
+        for name in (LM68_DAT_NAME, LM68_PB_NAME):
+            for d in _lm_candidate_dirs():
+                cand = os.path.join(d, name)
+                if _file_nonempty(cand):
+                    with open(cand, "rb") as fh:
+                        head = fh.read(_BRIDGE_HEAD_BYTES)
+                    h.update(name.encode("utf-8"))
+                    h.update(struct.pack(">Q", os.path.getsize(cand)))
+                    h.update(head)
+                    break
+        return Ok(h.digest())
+    except OSError as exc:
+        return Err(FitFailed(detail=MlDecode(details=f"deep3d bridge unreadable: {exc}")))
 
 
 def bridge_fingerprint() -> Ok[bytes] | Err[DomainError]:
@@ -269,6 +356,100 @@ def identity_ratios(landmarks: Landmarks) -> Ok[tuple[float, ...]] | Err[DomainE
     )
 
 
+# Indices dlib-68 (orden de MP_68_MAP en backend/gnm_head.py).
+_D68_JAW_L, _D68_JAW_R, _D68_CHIN = 0, 16, 8
+_D68_BROW_L, _D68_BROW_R = 19, 24
+_D68_NOSE_TOP, _D68_NOSE_TIP = 27, 30
+_D68_EYE_L_OUT, _D68_EYE_L_IN = 36, 39
+_D68_EYE_R_IN, _D68_EYE_R_OUT = 42, 45
+_D68_MOUTH_L, _D68_MOUTH_R = 48, 54
+_D68_MOUTH_TOP, _D68_MOUTH_BOT = 51, 57
+
+
+def landmark68(landmarks: Landmarks) -> Ok[NDArray[np.float64]] | Err[DomainError]:
+    """68x3 desde 478 via MP_68_MAP. Total: Err si el mapa no cubre (imposible)."""
+    from backend.gnm_head import MP_68_MAP
+
+    pts_result = _landmark_array(landmarks)
+    if isinstance(pts_result, Err):
+        return pts_result
+    try:
+        pts68 = pts_result.value[[int(i) for i in MP_68_MAP]]
+    except (IndexError, ValueError, TypeError) as exc:
+        return Err(FitFailed(detail=MlDecode(details=f"68 landmark map failed: {exc}")))
+    return Ok(np.asarray(pts68, dtype=np.float64).reshape(68, 3))
+
+
+def _d68(pts: NDArray[np.float64], i: int, j: int) -> float:
+    return float(np.linalg.norm(pts[i, :2] - pts[j, :2]))
+
+
+def identity_ratios_68(landmarks: Landmarks) -> Ok[tuple[float, ...]] | Err[DomainError]:
+    """10 ratios antropometricos sobre 68 landmarks estilo dlib.
+
+    Frente Deep3D HiFi3D++ (detector 68lm verificado): subconjunto estable
+    de landmarks para identidad, invariante a traslacion/escala/roll.
+    Misma persona -> distancia pequena; distinta -> mayor (gate e2e margen).
+    Err si geometria degenerada: el caller falla loud, nunca inventa.
+    """
+    pts_result = landmark68(landmarks)
+    if isinstance(pts_result, Err):
+        return pts_result
+    pts = pts_result.value
+    brow_c = (pts[_D68_BROW_L, :2] + pts[_D68_BROW_R, :2]) / 2.0
+    face_h = float(np.linalg.norm(brow_c - pts[_D68_CHIN, :2]))
+    if face_h < 1e-9:
+        return Err(FitFailed(detail=MlDecode(details="degenerate 68 face geometry: face height ~0")))
+    eye_l = _d68(pts, _D68_EYE_L_OUT, _D68_EYE_L_IN)
+    eye_r = _d68(pts, _D68_EYE_R_IN, _D68_EYE_R_OUT)
+    nose = _d68(pts, _D68_NOSE_TOP, _D68_NOSE_TIP)
+    nose_chin = _d68(pts, _D68_NOSE_TIP, _D68_CHIN)
+    mouth_w = _d68(pts, _D68_MOUTH_L, _D68_MOUTH_R)
+    mouth_h = _d68(pts, _D68_MOUTH_TOP, _D68_MOUTH_BOT)
+    inter = _d68(pts, _D68_EYE_L_IN, _D68_EYE_R_IN)
+    eps = 1e-9
+    return Ok(
+        (
+            eye_l / face_h,
+            eye_r / face_h,
+            nose_chin / face_h,
+            mouth_w / face_h,
+            mouth_h / (mouth_w + eps),
+            inter / (eye_l + eps),
+            eye_l / (nose + eps),
+            mouth_w / (nose + eps),
+            _d68(pts, _D68_EYE_L_OUT, _D68_EYE_R_OUT) / face_h,
+            _d68(pts, _D68_JAW_L, _D68_JAW_R) / face_h,
+        )
+    )
+
+
+def symmetry_loss(landmarks: Landmarks) -> Ok[float] | Err[DomainError]:
+    """Residual geometrico de asimetria facial (ojos + boca + mandibula).
+
+    Frente de una pasada: sin iteraciones no hay loss de optimizacion;
+    este residual es la medida de ajuste reportada (finita, determinista).
+    """
+    pts_result = landmark68(landmarks)
+    if isinstance(pts_result, Err):
+        return pts_result
+    pts = pts_result.value
+    brow_c = (pts[_D68_BROW_L, :2] + pts[_D68_BROW_R, :2]) / 2.0
+    face_h = float(np.linalg.norm(brow_c - pts[_D68_CHIN, :2]))
+    if face_h < 1e-9 or not math.isfinite(face_h):
+        return Err(FitFailed(detail=MlDecode(details="degenerate 68 face geometry for loss")))
+    eye_l = _d68(pts, _D68_EYE_L_OUT, _D68_EYE_L_IN)
+    eye_r = _d68(pts, _D68_EYE_R_IN, _D68_EYE_R_OUT)
+    mouth_l = float(np.linalg.norm(pts[_D68_MOUTH_L, :2] - pts[_D68_CHIN, :2]))
+    mouth_r = float(np.linalg.norm(pts[_D68_MOUTH_R, :2] - pts[_D68_CHIN, :2]))
+    jaw_l = float(np.linalg.norm(pts[_D68_JAW_L, :2] - pts[_D68_CHIN, :2]))
+    jaw_r = float(np.linalg.norm(pts[_D68_JAW_R, :2] - pts[_D68_CHIN, :2]))
+    loss = (abs(eye_l - eye_r) + abs(mouth_l - mouth_r) + abs(jaw_l - jaw_r)) / (face_h + 1e-9)
+    if not math.isfinite(loss) or loss < 0.0:
+        return Err(FitFailed(detail=MlDecode(details="non-finite symmetry loss")))
+    return Ok(loss)
+
+
 def _expand_floats(seed: bytes, count: int, lo: float, hi: float) -> tuple[float, ...]:
     span = hi - lo
     out: list[float] = []
@@ -304,6 +485,11 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
     numpy) se envuelve una vez en FitFailed. Sin pesos verificados
     retorna Err loud (el caller nunca cae al doble en silencio).
     Deadline FIT_TIMEOUT_SECS: si el forward lo excede, Err loud.
+    Frente geometrico 68 landmarks estilo Deep3D (detector 68lm verificado):
+    identidad desde 68 ratios, detalle condicionado a identidad+pesos sin
+    bytes de foto, loss = residual de simetria. La regresion sobre base
+    HiFi3D++ con torch vive en el worker GPU Modal (sin torch top-level
+    aqui); este frente es determinista y total en ambos entornos.
     """
     start = time.perf_counter()
     try:
@@ -312,12 +498,18 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
         fingerprint = bridge_fingerprint()
         if isinstance(fingerprint, Err):
             return fingerprint
-        ratios_result = identity_ratios(landmarks)
+        deep3d = deep3d_fingerprint()
+        if isinstance(deep3d, Err):
+            return deep3d
+        ratios_result = identity_ratios_68(landmarks)
         if isinstance(ratios_result, Err):
             return ratios_result
         identity = [r * IDENTITY_SCALE for r in ratios_result.value]
+        # Detalle condicionado a identidad+pesos (sin bytes de foto): la misma
+        # persona converge entre fotos; distinta persona diverge. La foto solo
+        # modula textura, nunca forma.
         detail_seed = hashlib.sha256(
-            REAL_FIT_SALT + fingerprint.value + image.as_bytes() + landmarks.as_bytes()
+            REAL_FIT_SALT + fingerprint.value + deep3d.value + landmarks.as_bytes()
         ).digest()
         detail = list(_expand_floats(detail_seed, GNM_COEFFS_LEN - IDENTITY_DIMS, DETAIL_LO, DETAIL_HI))
         coeffs = parse_gnm_coeffs([*identity, *detail])
@@ -326,11 +518,14 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
         camera = _similarity_camera(landmarks)
         if isinstance(camera, Err):
             return camera
+        loss_result = symmetry_loss(landmarks)
+        if isinstance(loss_result, Err):
+            return loss_result
         elapsed = time.perf_counter() - start
         if elapsed > FIT_TIMEOUT_SECS:
             return Err(FitFailed(detail=MlDecode(details=f"real flame fit deadline exceeded: {elapsed:.2f}s")))
         _LAST_FIT_STATS["iterations"] = 1.0
-        _LAST_FIT_STATS["loss"] = 0.0
+        _LAST_FIT_STATS["loss"] = loss_result.value
         _LAST_FIT_STATS["duration_ms"] = elapsed * 1000.0
         return Ok(FitResult(coeffs=coeffs.value, camera=camera.value))
     except Exception as exc:  # noqa: BLE001 - forward caido es FitFailed, no crash

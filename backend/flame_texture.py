@@ -336,34 +336,62 @@ def _require_unwrap_mat() -> Ok[str] | Err[DomainError]:
     return Ok(mat_path)
 
 
-_RASTER_CACHE_KEY = "flame-5023-skin-raster-v1"
+# Costura 5150-vt colapsada a 1 UV por vertice: los tris de costura cruzan
+# islas (UV-span enorme con 3D minima). Sin filtro, con last-wins pintan
+# bandas sobre todo el atlas (sopa de triangulos, golden 280 en el template).
+_UV_STRETCH_MAX = 0.25
+
+_RASTER_CACHE_KEY = "flame-5023-skin-raster-v2"
 _raster_cache: tuple[str, NDArray[np.int64], NDArray[np.float64]] | None = None
 
 
 def _rasterize_skin_uv(
-    uvs: list[tuple[float, float]], tris: list[tuple[int, int, int]]
+    uvs: list[tuple[float, float]],
+    tris: list[tuple[int, int, int]],
+    facing: list[bool] | None = None,
 ) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
     """Mapeo texel 512 -> (tri verts piel, baricentricos) en UV 0-1.
 
     Convencion del contrato: pixel (col,row) <-> UV (u=col/511, v=row/511)
     (el flip `v=1-v_uv` del GLB se cancela con flipY del visor; ver
     `build_personalized_glb`). Solo tris de piel (verts <3931, UVs en 0-1);
-    ojos viven en textura aparte. Last-wins en seams. Cacheado en proceso.
+    ojos viven en textura aparte. Last-wins en seams. Cacheado en proceso
+    (la clave incluye facing: geometria distinta por fit no reusa raster).
+    `facing` alinea con `tris`: tris de espaldas (normal z<=0) no muestrean
+    la foto, van a completion.
     """
     global _raster_cache
-    key = f"{_RASTER_CACHE_KEY}:{len(uvs)}:{len(tris)}"
+    digest = ""
+    if facing is not None:
+        digest = hashlib.sha256(np.asarray(facing, dtype=bool).tobytes()).hexdigest()[:16]
+    key = f"{_RASTER_CACHE_KEY}:{len(uvs)}:{len(tris)}:{digest}"
     if _raster_cache is not None and _raster_cache[0] == key:
         return _raster_cache[1], _raster_cache[2]
     uva = np.asarray(uvs, dtype=np.float64)
     v_idx = np.full((TEX_SIZE, TEX_SIZE, 3), -1, dtype=np.int64)
     bw = np.zeros((TEX_SIZE, TEX_SIZE, 3), dtype=np.float64)
-    for tri in tris:
+    for ti, tri in enumerate(tris):
         a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
         if a >= 3931 or b >= 3931 or c >= 3931:
+            continue
+        if facing is not None and not facing[ti]:
             continue
         pa, pb, pc = uva[a] * 511.0, uva[b] * 511.0, uva[c] * 511.0
         if bool((pa < 0.0).any() or (pa > 511.0).any()) and False:
             pass
+        # Tris de costura: colapso 5150-vt a 1 UV por vertice los estira
+        # entre islas; se saltan para no envenenar el atlas (la ocluida la
+        # rellena la completion). Umbral en UV 0-1, no en pixeles.
+        du = float(
+            max(
+                np.linalg.norm(pa - pb),
+                np.linalg.norm(pb - pc),
+                np.linalg.norm(pa - pc),
+            )
+            / 511.0
+        )
+        if du > _UV_STRETCH_MAX:
+            continue
         min_u = max(0.0, float(min(pa[0], pb[0], pc[0])))
         max_u = min(511.0, float(max(pa[0], pb[0], pc[0])))
         min_v = max(0.0, float(min(pa[1], pb[1], pc[1])))
@@ -392,20 +420,6 @@ def _rasterize_skin_uv(
         region_b[inside, 2] = w2[inside]
     _raster_cache = (key, v_idx, bw)
     return v_idx, bw
-
-
-def _load_unwrap_validity() -> NDArray[np.bool_] | None:
-    """Mascara de validez 512 del topo (o None si el PNG falta)."""
-    for d in _topo_candidate_dirs():
-        cand = os.path.join(d, UNWRAP_MASK_NAME)
-        if _file_nonempty(cand):
-            try:
-                with Image.open(cand) as handle:
-                    mask = np.asarray(handle.convert("L"), dtype=np.uint8)[::2, ::2]
-                return mask > 128
-            except Exception:  # noqa: BLE001 - mascara ilegible: validez solo por cobertura
-                return None
-    return None
 
 
 def _bilinear_sample(photo: NDArray[np.float64], px: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -467,9 +481,10 @@ def run_unwrap_texture(
     El atlas 512 cubre UV piel 0-1 (pixel <-> UV directo; el flip del GLB se
     cancela con flipY del visor). Cada texel cubierto por un tri de piel del
     template real se muestrea de la foto por proyeccion afine alineada a
-    bbox; ocluidas (sin tri, fuera de foto/crop/mascara) se inpintan con
-    completion foto-derivada + detalle condicionado a checkpoint
-    (fingerprint con texgan). Ojos viven en textura aparte via
+    bbox; ocluidas (sin tri o fuera de foto) se rellenan con piel media
+    foto-derivada + detalle condicionado a checkpoint (fingerprint con
+    texgan). Sin mascara foranea: la del layout denso 20k no corresponde al
+    atlas propio 5023 y recortaba un ovalo ajeno.
     `bake_eye_texture`, nunca en este atlas. Balance gris-world sobre
     muestras validas (DPR SH completo en worker GPU Modal). Cero sentinel
     por construccion. Total: Err loud si falta el mat, el template o la
@@ -501,11 +516,16 @@ def run_unwrap_texture(
         if isinstance(loaded, Err):
             return loaded
         _, template_uvs, template_tris = loaded.value
-        v_idx, bw = _rasterize_skin_uv(list(template_uvs), list(template_tris))
-        covered = v_idx[..., 0] >= 0
         displaced = displaced_positions(fit)
         if isinstance(displaced, Err):
             return displaced
+        dpa = np.asarray(displaced.value, dtype=np.float64)
+        facing: list[bool] = []
+        for ta, tb, tc in template_tris:
+            n = np.cross(dpa[tb] - dpa[ta], dpa[tc] - dpa[ta])
+            facing.append(bool(n[2] > 0.0))
+        v_idx, bw = _rasterize_skin_uv(list(template_uvs), list(template_tris), facing)
+        covered = v_idx[..., 0] >= 0
         proj_result = _project_verts_to_pixels(displaced.value, width, height, xs, ys)
         if isinstance(proj_result, Err):
             return proj_result
@@ -523,13 +543,12 @@ def run_unwrap_texture(
             & (tex_px[..., 1] >= 0.0)
             & (tex_px[..., 1] < float(height))
         )
-        validity = _load_unwrap_validity()
-        if validity is not None and validity.shape == (TEX_SIZE, TEX_SIZE):
-            in_photo = in_photo & validity
         skin_valid = in_photo
         sampled = _bilinear_sample(photo, tex_px)
+        skin_mean: NDArray[np.float64] | None = None
         if bool(skin_valid.any()):
             means = sampled[skin_valid].mean(axis=0)
+            skin_mean = np.array(means, dtype=np.float64)
             gray = float(means.mean())
             if gray > 1e-9 and bool(np.all(means > 1e-9)):
                 sampled = sampled * (gray / np.maximum(means, 1e-9))[None, None, :]
@@ -542,10 +561,14 @@ def run_unwrap_texture(
         quantized = struct.pack(f"<{len(ratios_result.value)}f", *(round(r, 2) for r in ratios_result.value))
         fit_quant = struct.pack("<253f", *(round(c, 1) for c in fit.coeffs.as_tuple()))
         seed = hashlib.sha256(REAL_TEXTURE_SALT + fingerprint.value + quantized + fit_quant).digest()
-        crop_result = _face_crop(photo, landmarks)
-        if isinstance(crop_result, Err):
-            return crop_result
-        completion = np.clip(_photo_base(crop_result.value) + _identity_detail(seed), 0.0, 255.0)
+        detail = _identity_detail(seed)
+        if skin_mean is not None:
+            completion = np.clip(skin_mean[None, None, :] + detail, 0.0, 255.0)
+        else:
+            crop_result = _face_crop(photo, landmarks)
+            if isinstance(crop_result, Err):
+                return crop_result
+            completion = np.clip(_photo_base(crop_result.value) + detail, 0.0, 255.0)
         out = np.where(skin_valid[..., None], np.clip(sampled, 0.0, 255.0), completion)
         raw = np.rint(out).astype(np.uint8).tobytes()
         scrubbed = _scrub_sentinel(raw)

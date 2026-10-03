@@ -290,6 +290,12 @@ def skin_vertex_indices() -> list[int]:
     return list(range(EYE_VERT_START))
 
 
+# Desplazamiento geometrico acotado: los coefs de identidad son O(1-9) y
+# con *0.01 generaban picos de hasta 9cm (40 por ciento del ancho de cabeza,
+# patron periodo-253). Personalizacion sana es milimetrica.
+_DISPLACE_MAX = 0.005
+
+
 def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] | Err[DomainError]:
     loaded = load_flame_template()
     if isinstance(loaded, Err):
@@ -299,7 +305,7 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
     width = len(coeffs)
     return Ok(
         [
-            (x + coeffs[idx % width] * 0.01, y, z)
+            (x + min(max(coeffs[idx % width] * 0.01, -_DISPLACE_MAX), _DISPLACE_MAX), y, z)
             for idx, (x, y, z) in enumerate(positions)
         ]
     )

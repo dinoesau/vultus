@@ -954,8 +954,7 @@ def test_unwrap_projection_ok_sentinel_evidence_x2(monkeypatch) -> None:  # type
     assert max_abs_diff(out, second.value.as_bytes()) == 0
 
 
-def test_unwrap_differs_from_blur_completion(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """GWT2 RED: unwrap proyectado no es el blur 64->512 (proyeccion UV real)."""
+def test_unwrap_differs_from_blur_completion(monkeypatch) -> None:  # type: ignore[no-untyped-def]    """GWT2 RED: unwrap proyectado no es el blur 64->512 (proyeccion UV real)."""
     import json as _json
 
     try:
@@ -1004,3 +1003,162 @@ def test_unwrap_differs_from_blur_completion(monkeypatch) -> None:  # type: igno
     blur = _photo_base(crop.value).astype(_np.float64)
     uw = _np.frombuffer(unwrapped.value.as_bytes(), dtype=_np.uint8).astype(_np.float64).reshape(512, 512, 3)
     assert float(_np.abs(uw - blur).mean()) > 1.0
+
+
+def test_raster_skips_seam_stretched_tris() -> None:
+    """Tris de costura (UV-span enorme, 3D minima) no pintan el atlas.
+
+    El 5150-vt del OBJ colapsa seams a 1 UV por vertice: esos tris cruzan
+    islas y con last-wins envenenan todo el atlas (sopa de triangulos).
+    """
+    from backend import flame_texture as _texmod
+    from backend.flame_texture import _UV_STRETCH_MAX, _rasterize_skin_uv
+
+    _texmod._raster_cache = None
+    assert _UV_STRETCH_MAX == 0.25
+    uvs = [(0.0, 0.0), (0.02, 0.0), (0.0, 0.02), (0.9, 0.9)]
+    tris = [(0, 1, 2), (0, 1, 3)]
+    v_idx, _bw = _rasterize_skin_uv(uvs, tris)
+    assert int(v_idx[5, 5, 0]) >= 0
+    assert int(v_idx[200, 200, 0]) == -1
+    _texmod._raster_cache = None
+
+
+def test_real_template_seam_stretch_count() -> None:
+    """Golden del template real: 280 tris piel con UV-span>0.25 y 3D minima."""
+    from pathlib import Path as _Path
+
+    import numpy as _np
+
+    from backend.gnm_assemble import load_flame_template
+
+    repo = _Path(__file__).resolve().parent.parent.parent
+    if not (repo / "backend" / "assets" / "flame_template.bin").is_file():
+        import pytest as _pytest
+
+        _pytest.skip("sin flame_template.bin no hay golden de costura")
+    from backend.flame_texture import _UV_STRETCH_MAX
+
+    _, uvs, tris = load_flame_template().value
+    ua = _np.asarray(uvs, dtype=_np.float64)
+    stretched = 0
+    for a, b, c in tris:
+        if a >= 3931 or b >= 3931 or c >= 3931:
+            continue
+        du = max(
+            float(_np.linalg.norm(ua[a] - ua[b])),
+            float(_np.linalg.norm(ua[b] - ua[c])),
+            float(_np.linalg.norm(ua[a] - ua[c])),
+        )
+        if du > float(_UV_STRETCH_MAX):
+            stretched += 1
+    assert stretched == 280
+
+
+def _spread_landmarks():
+    import json as _json
+
+    from backend.domain import parse_landmarks as _plm
+
+    pts = [[(i % 22) / 22.0, ((i // 22) % 22) / 22.0, 0.0] for i in range(478)]
+    parsed = _plm(_json.dumps(pts).encode("utf-8"))
+    assert isinstance(parsed, Ok)
+    return parsed.value
+
+
+def _tmp_topo_with(monkeypatch, tmp_path, with_mask: bool):  # type: ignore[no-untyped-def]
+    """Topo tmp con mat siempre; máscara foránea 20k solo si se pide."""
+    import shutil as _shutil
+    from pathlib import Path as _Path
+
+    from backend.flame_texture import UNWRAP_MASK_NAME, UNWRAP_MAT_NAME
+
+    repo = _Path(__file__).resolve().parent.parent.parent
+    monkeypatch.setenv("FFHQ_UV_DIR", str(repo / "weights" / "ffhq-uv"))
+    monkeypatch.setenv("WEIGHTS_ROOT", str(tmp_path / "noroot"))
+    monkeypatch.setenv("WEIGHTS_DIR", str(tmp_path / "noroot"))
+    monkeypatch.delenv("VULTUS_REAL_ML", raising=False)
+    topo = tmp_path / ("topo_mask" if with_mask else "topo_plain")
+    topo.mkdir(exist_ok=True)
+    _shutil.copy(str(repo / "weights" / "topo_assets" / UNWRAP_MAT_NAME), str(topo / UNWRAP_MAT_NAME))
+    if with_mask:
+        _shutil.copy(
+            "/Users/esau.martinez/Code/weights/ffhq-uv-hf/topo_assets/" + UNWRAP_MASK_NAME,
+            str(topo / UNWRAP_MASK_NAME),
+        )
+    monkeypatch.setenv("TOPO_DIR", str(topo))
+
+
+def test_foreign_20k_mask_ignored_by_unwrap(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """La máscara foránea del layout 20k no recorta el atlas propio 5023."""
+    from pathlib import Path as _Path
+
+    from backend import flame_texture as _texmod
+    from backend.flame_fit import fit_flame
+    from backend.flame_texture import run_unwrap_texture
+
+    repo = _Path(__file__).resolve().parent.parent.parent
+    if not (repo / "weights" / "ffhq-uv" / "FLAME_w_HIFI3D_UV.obj").is_file():
+        import pytest as _pytest
+
+        _pytest.skip("sin puente FFHQ-UV local no hay unwrap")
+    outs = []
+    for with_mask in (False, True):
+        _tmp_topo_with(monkeypatch, tmp_path, with_mask)
+        _texmod._raster_cache = None
+        from backend.flame_texture import _find_unwrap_mat as _find
+
+        if _find() is None:
+            import pytest as _pytest
+
+            _pytest.skip("sin mat no hay unwrap")
+        img = _image(0x77)
+        lms = _spread_landmarks()
+        fit = fit_flame(img, lms)
+        assert isinstance(fit, Ok)
+        out = run_unwrap_texture(img, fit.value, lms)
+        assert isinstance(out, Ok)
+        outs.append(out.value.as_bytes())
+    _texmod._raster_cache = None
+    assert outs[0] == outs[1]
+
+
+def test_completion_is_skin_not_photo_bg(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Texeles fuera de isla se rellenan con piel media, no fondo de foto."""
+    from pathlib import Path as _Path
+
+    import numpy as _np
+
+    from backend import flame_texture as _texmod
+    from backend.flame_fit import fit_flame
+    from backend.flame_texture import _rasterize_skin_uv, run_unwrap_texture
+    from backend.gnm_assemble import load_flame_template
+
+    repo = _Path(__file__).resolve().parent.parent.parent
+    if not (repo / "weights" / "ffhq-uv" / "FLAME_w_HIFI3D_UV.obj").is_file():
+        import pytest as _pytest
+
+        _pytest.skip("sin puente FFHQ-UV local no hay unwrap")
+    _tmp_topo_with(monkeypatch, tmp_path, False)
+    _texmod._raster_cache = None
+    from backend.flame_texture import _find_unwrap_mat as _find
+
+    if _find() is None:
+        import pytest as _pytest
+
+        _pytest.skip("sin mat no hay unwrap")
+    img = _image(0x77)
+    lms = _spread_landmarks()
+    fit = fit_flame(img, lms)
+    assert isinstance(fit, Ok)
+    out = run_unwrap_texture(img, fit.value, lms)
+    assert isinstance(out, Ok)
+    _texmod._raster_cache = None
+    uw = _np.frombuffer(out.value.as_bytes(), dtype=_np.uint8).astype(_np.float64).reshape(512, 512, 3)
+    _pos, uvs, tris = load_flame_template().value
+    v_idx, _bw = _rasterize_skin_uv(list(uvs), list(tris))
+    island = v_idx[..., 0] >= 0
+    assert bool(island.any()) and bool((~island).any())
+    skin_mean = uw[island].mean(axis=0)
+    corner = uw[0, 0]
+    assert float(_np.abs(corner - skin_mean).max()) < 40.0

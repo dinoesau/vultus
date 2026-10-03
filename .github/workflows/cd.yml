@@ -1,16 +1,18 @@
 name: cd
 
-# CD por merge a production con label Release + boton manual como fallback.
+# CD por push a production con label Release + boton manual como fallback.
 # Auto: PR con label Release: Major/Minor/Patch hacia production, al hacer
-# merge el CD crea el tag y despliega todo a prod (edge + humo + GPU + humo
-# + release) en el mismo run. Sin label no despliega (skip). main es
-# integracion (CI). Manual: Run workflow con bump/version hace lo mismo.
+# merge (push a production) el CD crea el tag y despliega todo a prod
+# (edge + humo + GPU + humo + release) en el mismo run. Sin label no
+# despliega (skip). main es integracion (CI). Manual: Run workflow con
+# bump/version hace lo mismo. Se usa push y no pull_request closed porque
+# el environment production exige github.ref == refs/heads/production y el
+# evento de PR corre como refs/pull/NN/merge (bloqueado por proteccion).
 # Orden auto: merge a production con label, el CD crea tag + Release.
 # Orden manual: merge a production, boton con bump, el CD crea tag + Release.
 
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches: [production]
   workflow_dispatch:
     inputs:
@@ -39,6 +41,8 @@ jobs:
   resolve:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      pull-requests: read
     outputs:
       bump: ${{ steps.bump.outputs.bump }}
     steps:
@@ -47,17 +51,22 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BUMP_DISPATCH: ${{ inputs.bump }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             echo "bump=${BUMP_DISPATCH:-patch}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          MERGED="$(jq -r '.pull_request.merged // false' "$GITHUB_EVENT_PATH")"
-          if [ "$MERGED" != "true" ]; then
+          PRS="$(jq -r '[.commits // [] | .[].message] + [(.head_commit.message // "")] | join("\n")' "$GITHUB_EVENT_PATH" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true)"
+          if [ -z "$PRS" ]; then
             echo "bump=skip" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          LABELS="$(jq -r '[.pull_request.labels // [] | .[].name] | join(",")' "$GITHUB_EVENT_PATH")"
+          LABELS=""
+          for N in $PRS; do
+            L="$(gh pr view "$N" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || true)"
+            LABELS="$LABELS,$L"
+          done
           if echo ",$LABELS," | grep -q ",Release: Major,"; then
             echo "bump=major" >> "$GITHUB_OUTPUT"
           elif echo ",$LABELS," | grep -q ",Release: Minor,"; then

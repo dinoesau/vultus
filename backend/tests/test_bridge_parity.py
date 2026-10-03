@@ -11,7 +11,12 @@ import os
 import re
 
 from backend.flame_fit import DECA_TAR_NAME, FLAME_PKL_NAMES
-from backend.flame_texture import EYE_MAP_NAME, UV_OBJ_NAME
+from backend.flame_texture import (
+    EYE_MAP_NAME,
+    TEXGAN_NAME,
+    UNWRAP_MAT_NAME,
+    UV_OBJ_NAME,
+)
 
 _SYNC_SH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "scripts", "modal-weights-sync.sh"
@@ -24,6 +29,9 @@ EXPECTED_BRIDGE_FILES = frozenset(
         "deca/deca_model.tar",
         "ffhq-uv/FLAME_w_HIFI3D_UV.obj",
         "ffhq-uv/eye_ball_tex.png",
+        "checkpoints/texgan_model/texgan_ffhq_uv.pth",
+        "checkpoints/deep3d_model/epoch_latest.pth",
+        "topo_assets/unwrap_1024_info.mat",
     }
 )
 EXPECTED_FLAME_PKL_ALTS = frozenset(
@@ -53,4 +61,6 @@ def test_bridge_parity_with_python_consts() -> None:
     assert f"deca/{DECA_TAR_NAME}" in bridge
     assert f"ffhq-uv/{UV_OBJ_NAME}" in bridge
     assert f"ffhq-uv/{EYE_MAP_NAME}" in bridge
+    assert f"checkpoints/texgan_model/{TEXGAN_NAME}" in bridge
+    assert f"topo_assets/{UNWRAP_MAT_NAME}" in bridge
     assert frozenset(alts) == frozenset(f"flame/{name}" for name in FLAME_PKL_NAMES)

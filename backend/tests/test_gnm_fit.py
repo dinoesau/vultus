@@ -436,3 +436,37 @@ def test_flame_real_fit_deterministic_x2_with_real_vectors(monkeypatch) -> None:
     assert first.value.coeffs.as_tuple() == second.value.coeffs.as_tuple()
     assert first.value.camera.as_tuple() == second.value.camera.as_tuple()
     assert encode_fit_result(first.value) == encode_fit_result(second.value)
+
+
+def test_deep3d_fingerprint_empty_without_weights(monkeypatch, tmp_path) -> None:
+    """Deep3D fingerprint vacio sin pesos, total sin raise."""
+    from backend import flame_fit as _ff
+    from backend.domain import Ok as _Ok
+
+    monkeypatch.setenv("DEEP3D_DIR", str(tmp_path / "vacio"))
+    monkeypatch.setenv("DECA_DIR", str(tmp_path / "vacio"))
+    monkeypatch.setenv("WEIGHTS_ROOT", str(tmp_path / "vacio"))
+    monkeypatch.setenv("WEIGHTS_DIR", "")
+    res = _ff.deep3d_fingerprint()
+    assert isinstance(res, _Ok)
+    assert res.value == b""
+
+
+def test_deep3d_fingerprint_consumes_epoch(monkeypatch, tmp_path) -> None:
+    """Con epoch + detector, fingerprint no vacio y estable."""
+    from backend import flame_fit as _ff
+    from backend.domain import Ok as _Ok
+
+    d = tmp_path / "deep3d"
+    d.mkdir()
+    (d / "epoch_latest.pth").write_bytes(b"fake-epoch-weights-12345")
+    (d / "68lm_detector.pb").write_bytes(b"fake-detector-67890")
+    monkeypatch.setenv("DEEP3D_DIR", str(d))
+    monkeypatch.setenv("DECA_DIR", "")
+    monkeypatch.setenv("WEIGHTS_ROOT", str(tmp_path))
+    monkeypatch.setenv("WEIGHTS_DIR", "")
+    first = _ff.deep3d_fingerprint()
+    second = _ff.deep3d_fingerprint()
+    assert isinstance(first, _Ok)
+    assert first.value != b""
+    assert first.value == second.value

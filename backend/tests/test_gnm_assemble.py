@@ -344,7 +344,9 @@ def test_is_flame_synthetic_flag_separate_from_sha(monkeypatch, tmp_path) -> Non
     # Sin archivo: sintetico True, sha estable, load no lanza (waiver).
     monkeypatch.setenv("FLAME_ASSETS_DIR", str(tmp_path / "vacio-inexistente"))
     monkeypatch.setenv("WEIGHTS_DIR", "")
+    monkeypatch.setenv("VULTUS_REAL_ML", "0")
     monkeypatch.setattr(_asm, "_flame_cache", None)
+    monkeypatch.setattr(_asm, "_candidate_flame_paths", lambda: [str(tmp_path / "vacio-inexistente" / "flame_template.bin")])
     assert _asm.is_flame_synthetic() is True
     sha1 = _asm.flame_template_sha()
     sha2 = _asm.flame_template_sha()
@@ -359,6 +361,7 @@ def test_is_flame_synthetic_flag_separate_from_sha(monkeypatch, tmp_path) -> Non
     _write_flame_bin(str(tmp_path / "flame_template.bin"), positions0, uvs0, [(0, 1, 2)])
     monkeypatch.setenv("FLAME_ASSETS_DIR", str(tmp_path))
     monkeypatch.setattr(_asm, "_flame_cache", None)
+    monkeypatch.setattr(_asm, "_candidate_flame_paths", lambda: [str(tmp_path / "flame_template.bin")])
     assert _asm.is_flame_synthetic() is False
 
 
@@ -463,6 +466,7 @@ def test_load_flame_template_fails_loud_when_real_demanded(monkeypatch, tmp_path
     monkeypatch.setenv("WEIGHTS_DIR", "")
     monkeypatch.setenv("VULTUS_REAL_ML", "1")
     monkeypatch.setattr(_asm, "_flame_cache", None)
+    monkeypatch.setattr(_asm, "_candidate_flame_paths", lambda: [str(tmp_path / "vacio-inexistente" / "flame_template.bin")])
     result = _asm.load_flame_template()
     assert isinstance(result, _Err)
 

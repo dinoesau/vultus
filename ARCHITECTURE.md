@@ -107,7 +107,12 @@ Cada worker es módulo deep con una sola responsabilidad.
 `Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|fit|texture` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FitResult`, `-> RenderedImage`).
 `fit` es DECA feed-forward (`backend/flame_fit.py`, determinista x2, deadline 10s, `Result` total sin `raise`).
 `texture` es completion FFHQ-UV 1024 (`backend/flame_texture.py`, `SKIN_SENTINEL` const en codigo, `evidence >= 0.99`, `concurrency_limit=1`).
-`Worker 4 CPU` (`assemble`) vive en `backend/gnm_assemble.py`: malla FLAME `VERT_COUNT = 5023`, ojos `[EYE_VERT_START:EYE_VERT_END) = [3931:5023)` (1092 verts) con material propio, 2 primitivas PBR real (`SkinPBR` + `EyePBR`, sin emisivo), `build_personalized_glb(fit, albedo) -> GnmMesh`, zip-6 via `build_result_zip` en `backend/gnm.py` (sin dep `torch/diffusers/mediapipe`).
+`Worker 4 CPU` (`assemble`) vive en `backend/gnm_assemble.py`: malla FLAME `VERT_COUNT = 5023`, ojos `[EYE_VERT_START:EYE_VERT_END) = [3931:5023)` (1092 verts) con material propio, 2 primitivas PBR real (`SkinPBR` + `EyePBR`, sin emisivo), `build_personalized_glb(fit, albedo, eye_texture?) -> GnmMesh`, zip-6 via `build_result_zip` en `backend/gnm.py` (sin dep `torch/diffusers/mediapipe`).
+Fixture local es cabeza coherente (elipsoide piel + 2 esferas ojos, UVs piel 0-1 ojos 2-3), no rejilla plana.
+Sin `flame_template.bin` hay waiver local salvo con `VULTUS_REAL_ML=1` que falla loud.
+Template real se congela con `scripts/extract_flame_template.py` desde `flame2023_Open.pkl` + `FLAME_w_HIFI3D_UV.obj`.
+Ojos reales via `bake_eye_texture` cuando el puente trae `eye_ball_tex.png`, si no blanco fallback.
+Imagen Modal trae `nvdiffrast==0.4.0` para futuro unwrap texgan/DPR.
 Loader GNM `17821/35324` se conserva solo hasta el cutover (ver ADR-008); el bake gris legacy (`gnm_texture.build_albedo`) falla ruidoso sin pesos, sin caller productivo.
 Sin pesos los dobles locales siguen (gateway en verde); con `VULTUS_REAL_ML=1` el fallo es ruidoso (`FitFailed`/`MlFailed`).
 Reciben tipos ya probados, escriben a `/tmp/{job_id}` en tmpfs, retornan tipos con `UV_LEN`.

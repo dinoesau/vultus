@@ -82,6 +82,13 @@ REAL_TEXTURE_SALT = b"flame-real-texture-v1"
 # scripts/modal-weights-sync.sh BRIDGE_FILES + mapa ocular del puente).
 UV_OBJ_NAME = "FLAME_w_HIFI3D_UV.obj"
 EYE_MAP_NAME = "eye_ball_tex.png"
+# Extras RGB fitting FFHQ-UV (futuro unwrap texgan/DPR/parsing, no parte
+# del puente canonico 4 archivos para no romper test_bridge_parity).
+# Cuando presentes, run_unwrap_texture es la via real; sin ellas la
+# completion foto-derivada es la via real actual.
+TEXGAN_NAME = "texgan_ffhq_uv.pth"
+UNWRAP_MAT_NAME = "unwrap_1024_info.mat"
+MEAN_FACE_NAME = "hifi3dpp_mean_face.obj"
 
 # Geometria de la completion real.
 FACE_MARGIN = 0.15
@@ -142,6 +149,34 @@ def weights_present() -> bool:
 def _real_texture_available() -> bool:
     """True solo con pesos del puente en `FFHQ_UV_DIR`. Sin literales."""
     return weights_present()
+
+
+def ffhq_uv_extra_present() -> bool:
+    """True solo con extras unwrap (texgan + unwrap mat + mean face) en FFHQ_UV_DIR.
+
+    Via futura texgan/DPR/parsing; no parte del puente canonico.
+    Total: False si dir ausente o algun extra falta/vacio, nunca raise.
+    """
+    bridge = ffhq_uv_dir()
+    if not bridge:
+        return False
+    for name in (TEXGAN_NAME, UNWRAP_MAT_NAME, MEAN_FACE_NAME):
+        if not _file_nonempty(os.path.join(bridge, name)):
+            return False
+    return True
+
+
+def run_unwrap_texture() -> Ok[RenderedImage] | Err[DomainError]:
+    """Seam futuro unwrap texgan: hoy siempre Err loud documentado.
+
+    Con extras presentes retornaria Ok unwrap real (nvdiffrast + DPR SH9 +
+    parsing mask sobre coordenadas UV reales cara 0-1 ojos 2-3).
+    Sin extras es Err(MlFailed) para cerrar gameable con VULTUS_REAL_ML=1.
+    Total: nunca raise, nunca doble silencioso.
+    """
+    if not ffhq_uv_extra_present():
+        return Err(MlFailed(detail=MlDecode(details="real unwrap requires texgan_ffhq_uv.pth + unwrap_1024_info.mat + hifi3dpp_mean_face.obj")))
+    return Err(MlFailed(detail=MlDecode(details="real unwrap extras present but texgan path not yet wired (TODO Slice 3)")))
 
 
 def count_sentinel(raw: bytes) -> int:

@@ -421,3 +421,62 @@ def test_pbr_intentional_double_pbr_eq_uv(monkeypatch, tmp_path) -> None:  # typ
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
         names = z.namelist()
     assert names == list(ZIP_NAMES)
+
+
+def test_synthetic_template_head_like_not_lines() -> None:
+    """Slice 1 RED: template sintetico debe abrir como cabeza, no lineas."""
+    import math as _math
+
+    import backend.gnm_assemble as _asm
+
+    positions, uvs, tris = _asm._synthetic_flame_template()
+    assert len(positions) == _asm.VERT_COUNT
+    assert len(tris) == _asm.FLAME_TRI_COUNT
+
+    def _area(t: tuple[int, int, int]) -> float:
+        p0, p1, p2 = positions[t[0]], positions[t[1]], positions[t[2]]
+        ux, uy, uz = p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]
+        vx, vy, vz = p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]
+        cx = uy * vz - uz * vy
+        cy = uz * vx - ux * vz
+        cz = ux * vy - uy * vx
+        return 0.5 * _math.sqrt(cx * cx + cy * cy + cz * cz)
+
+    areas = [_area(t) for t in tris[:200]]
+    mean_area = sum(areas) / len(areas)
+    assert mean_area > 1e-6, f"tris degenerados tipo linea, mean_area={mean_area}"
+    xs = [p[0] for p in positions[: _asm.SKIN_VERT_COUNT]]
+    ys = [p[1] for p in positions[: _asm.SKIN_VERT_COUNT]]
+    assert (max(ys) - min(ys)) > (max(xs) - min(xs)) * 1.1
+    skin_uvs = uvs[: _asm.SKIN_VERT_COUNT]
+    assert all(0.0 <= u <= 1.0 and 0.0 <= v <= 1.0 for u, v in skin_uvs)
+    eye_uvs = uvs[_asm.EYE_VERT_START :]
+    assert all(2.0 <= u <= 3.0 and 0.0 <= v <= 1.0 for u, v in eye_uvs)
+
+
+def test_load_flame_template_fails_loud_when_real_demanded(monkeypatch, tmp_path) -> None:
+    """Slice 1 RED: con VULTUS_REAL_ML=1 sin bin debe ser Err, no waiver."""
+    import backend.gnm_assemble as _asm
+    from backend.domain import Err as _Err
+
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(tmp_path / "vacio-inexistente"))
+    monkeypatch.setenv("WEIGHTS_DIR", "")
+    monkeypatch.setenv("VULTUS_REAL_ML", "1")
+    monkeypatch.setattr(_asm, "_flame_cache", None)
+    result = _asm.load_flame_template()
+    assert isinstance(result, _Err)
+
+
+def test_glb_embeds_eye_texture_when_provided() -> None:
+    """Slice 4 RED: EyeTexture real debe incrustarse, no blanco fallback."""
+    from backend.domain import parse_eye_texture
+
+    raw_eye = bytes([10, 20, 30] * (512 * 512))
+    parsed = parse_eye_texture(raw_eye)
+    assert isinstance(parsed, Ok)
+    out_real = build_personalized_glb(_fit(0.1), _albedo(0xA1), eye_texture=parsed.value)
+    out_white = build_personalized_glb(_fit(0.1), _albedo(0xA1))
+    assert isinstance(out_real, Ok)
+    assert isinstance(out_white, Ok)
+    assert out_real.value.as_bytes() != out_white.value.as_bytes()
+    assert raw_eye[:100] != bytes([240, 240, 240] * 34)[:100]

@@ -186,7 +186,8 @@ Regenerar bin: `python3 scripts/extract_gnm_template.py --check` (sin `--check` 
 Gate real: `DECA_DIR=... FLAME_ASSETS_DIR=... FFHQ_UV_DIR=... VULTUS_REAL_ML=1 LANDMARKS_REAL=1 python3 scripts/e2e-flame-real.py` (margen estricto + SSIM misma>distinta, landmarks MediaPipe reales, fotos congeladas por sha256; en dobles margen/SSIM fallan por diseno).
 Bridge gate: `MODAL_VOLUME=... R2_BUCKET=... bash scripts/modal-weights-sync.sh --check` (puente 5/5 + cutover + backup por contenido; `volume rm gnm` solo tras cutover de codigo + backup verificada).
 Goldens LFW congelados por sha256.
-Diag de camara: `python3 scripts/render_diag.py --photo <jpg> --out <png>`.
+Diag FLAME (foto + UV atlas + GLB): `python3 scripts/render_diag.py --photo <jpg> --out <png>`.
+Template real: `python3 scripts/extract_flame_template.py --check` (falla loud sin pkl+OBJ).
 No commitear JPEGs LFW.
 
 ### 7.2 Frontend E2E

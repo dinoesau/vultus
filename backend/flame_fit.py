@@ -73,6 +73,10 @@ _LAST_FIT_STATS: dict[str, float] = {"iterations": 0.0, "loss": 0.0, "duration_m
 # scripts/modal-weights-sync.sh BRIDGE_FILES). Solo nombres, nunca rutas.
 DECA_TAR_NAME = "deca_model.tar"
 FLAME_PKL_NAMES = ("flame2023_Open.pkl", "generic_model.pkl")
+# Extras shape Deep3D HiFi3D++ (futuro, no parte del puente canonico).
+DEEP3D_EPOCH_NAME = "epoch_latest.pth"
+LM68_DAT_NAME = "shape_predictor_68_face_landmarks.dat"
+LM68_PB_NAME = "68lm_detector.pb"
 _BRIDGE_HEAD_BYTES = 65536
 
 # --- Forward real: constantes del encoder estructurado.
@@ -147,6 +151,23 @@ def weights_present() -> bool:
 def _real_fit_available() -> bool:
     """True solo con pesos del puente en ambos dirs de env. Sin literales."""
     return weights_present()
+
+
+def deep3d_extra_present() -> bool:
+    """True solo con extras Deep3D (epoch + 68lm detector) en DECA_DIR.
+
+    Via futura shape real HiFi3D++; hoy el forward estructurado
+    identidad+detalle es la via real con puente 2 archivos.
+    Total: False si ausente, nunca raise.
+    """
+    deca = deca_dir()
+    if not deca:
+        return False
+    if not _file_nonempty(os.path.join(deca, DEEP3D_EPOCH_NAME)):
+        return False
+    dat = _file_nonempty(os.path.join(deca, LM68_DAT_NAME))
+    pb = _file_nonempty(os.path.join(deca, LM68_PB_NAME))
+    return dat or pb
 
 
 def bridge_fingerprint() -> Ok[bytes] | Err[DomainError]:

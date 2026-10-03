@@ -21,6 +21,7 @@ from backend.domain import (
     CompleteUv,
     DomainError,
     Err,
+    EyeTexture,
     FitResult,
     GnmMesh,
     ImageBytes,
@@ -106,33 +107,96 @@ def _pad_bytes(buf: bytes) -> bytes:
     return buf + b"\x00" * pad
 
 
+# Rejilla coherente del fixture: piel lat-long para vecindad por indice.
+_SKIN_COLS = 64
+_SKIN_ROWS = 62
+_EYE_COLS = 26
+_EYE_ROWS = 21
+_EYE_PER_BALL = _EYE_COLS * _EYE_ROWS
+
+
 def _synthetic_flame_template() -> tuple[
     list[tuple[float, float, float]],
     list[tuple[float, float]],
     list[tuple[int, int, int]],
 ]:
+    """Fixture cabeza coherente: elipsoide piel + 2 esferas ojos, tris locales.
+
+    Sustituye la rejilla plana degenerada (area 0, lineas en visor).
+    Piel 3931 en lat-long 64x62 recortada, ojos 2x546 en 26x21.
+    UVs layout real: piel 0-1, ojos 2-3. Conteos 8000/1976 exactos.
+    Determinista, sin I/O, solo para paridad local sin pesos.
+    """
     positions: list[tuple[float, float, float]] = []
-    for i in range(VERT_COUNT):
-        x = (float(i % 71) / 70.0) - 0.5
-        y = (float((i // 71) % 71) / 70.0) - 0.5
-        z = (float(i) / float(VERT_COUNT)) - 0.5
-        positions.append((x, y, z))
     uvs: list[tuple[float, float]] = []
-    for i in range(VERT_COUNT):
-        u = float(i % 512) / 511.0
-        v = float((i // 512) % 512) / 511.0
-        uvs.append((u, v))
+    for idx in range(SKIN_VERT_COUNT):
+        col = idx % _SKIN_COLS
+        row = idx // _SKIN_COLS
+        theta = 2.0 * math.pi * float(col) / float(_SKIN_COLS)
+        phi = math.pi * (float(row) + 0.5) / float(_SKIN_ROWS)
+        sin_phi = math.sin(phi)
+        x = 0.30 * sin_phi * math.cos(theta)
+        y = 0.42 * math.cos(phi) + 0.02
+        z = 0.36 * sin_phi * math.sin(theta) + 0.02
+        positions.append((x, y, z))
+        uvs.append((float(col) / 63.0, float(row) / 61.0))
+    eye_centers = ((-0.115, 0.06, 0.30), (0.115, 0.06, 0.30))
+    for ball in range(2):
+        cx, cy, cz = eye_centers[ball]
+        for k in range(_EYE_PER_BALL):
+            col = k % _EYE_COLS
+            row = k // _EYE_COLS
+            theta = 2.0 * math.pi * float(col) / float(_EYE_COLS)
+            phi = math.pi * (float(row) + 0.5) / float(_EYE_ROWS)
+            sin_phi = math.sin(phi)
+            x = cx + 0.055 * sin_phi * math.cos(theta)
+            y = cy + 0.055 * math.cos(phi)
+            z = cz + 0.055 * sin_phi * math.sin(theta)
+            positions.append((x, y, z))
+            uvs.append((2.0 + float(col) / 25.0, float(row) / 20.0))
     indices: list[tuple[int, int, int]] = []
-    for t in range(FLAME_SKIN_TRIS):
-        a = t % SKIN_VERT_COUNT
-        b = (t + 1) % SKIN_VERT_COUNT
-        c = (t + 2) % SKIN_VERT_COUNT
-        indices.append((a, b, c))
-    for t in range(FLAME_EYE_TRIS):
-        a = EYE_VERT_START + (t % EYE_COUNT)
-        b = EYE_VERT_START + ((t + 1) % EYE_COUNT)
-        c = EYE_VERT_START + ((t + 2) % EYE_COUNT)
-        indices.append((a, b, c))
+    quads: list[tuple[int, int, int, int]] = []
+    for r in range(_SKIN_ROWS - 1):
+        for c in range(_SKIN_COLS):
+            c2 = (c + 1) % _SKIN_COLS
+            v0 = r * _SKIN_COLS + c
+            v1 = r * _SKIN_COLS + c2
+            v2 = (r + 1) * _SKIN_COLS + c
+            v3 = (r + 1) * _SKIN_COLS + c2
+            if v0 < SKIN_VERT_COUNT and v1 < SKIN_VERT_COUNT and v2 < SKIN_VERT_COUNT and v3 < SKIN_VERT_COUNT:
+                quads.append((v0, v1, v2, v3))
+    for q in quads:
+        indices.append((q[0], q[1], q[2]))
+        if len(indices) >= FLAME_SKIN_TRIS:
+            break
+        indices.append((q[1], q[3], q[2]))
+        if len(indices) >= FLAME_SKIN_TRIS:
+            break
+    qi = 0
+    while len(indices) < FLAME_SKIN_TRIS:
+        q = quads[qi % len(quads)]
+        indices.append((q[0], q[1], q[2]) if len(indices) % 2 == 0 else (q[1], q[3], q[2]))
+        qi += 1
+    for ball in range(2):
+        base = EYE_VERT_START + ball * _EYE_PER_BALL
+        stworzone = 0
+        for r in range(_EYE_ROWS - 1):
+            for c in range(_EYE_COLS):
+                if stworzone >= FLAME_EYE_TRIS // 2:
+                    break
+                c2 = (c + 1) % _EYE_COLS
+                v0 = base + r * _EYE_COLS + c
+                v1 = base + r * _EYE_COLS + c2
+                v2 = base + (r + 1) * _EYE_COLS + c
+                v3 = base + (r + 1) * _EYE_COLS + c2
+                indices.append((v0, v1, v2))
+                stworzone += 1
+                if stworzone >= FLAME_EYE_TRIS // 2:
+                    break
+                indices.append((v1, v3, v2))
+                stworzone += 1
+            if stworzone >= FLAME_EYE_TRIS // 2:
+                break
     return positions, uvs, indices
 
 
@@ -149,8 +213,9 @@ def load_flame_template() -> Ok[
     el sha; waiver fixture registrado si Modal inalcanzable (el sintetico es
     determinista y el sha queda registrado en `flame_template_sha`).
     Valida el bin como `gnm.py`: NaN/inf e indices>=verts son Err(MlFailed),
-    nunca aceptacion silenciosa ni raise por expected. La falta local no es
-    Err (waiver sintetico); ver `is_flame_synthetic` para distinguirlas.
+    nunca aceptacion silenciosa ni raise por expected. La falta local es
+    waiver sintetico salvo con VULTUS_REAL_ML=1 que falla loud;
+    ver `is_flame_synthetic` para distinguirlas.
     """
     global _flame_cache
     if _flame_cache is not None:
@@ -188,6 +253,8 @@ def load_flame_template() -> Ok[
                             indices.append((int(a), int(b), int(c)))
                         _flame_cache = (positions, uvs, indices)
                         return Ok(_flame_cache)
+    if os.environ.get("VULTUS_REAL_ML") == "1":
+        return Err(MlFailed(detail=MlDecode(details="real flame template required but flame_template.bin missing")))
     _flame_cache = _synthetic_flame_template()
     return Ok(_flame_cache)
 
@@ -246,16 +313,20 @@ def _eye_png() -> bytes:
 
 
 def build_personalized_glb(
-    fit: FitResult, albedo: CompleteUv | RenderedImage, atlas_png: ImageBytes | None = None
+    fit: FitResult,
+    albedo: CompleteUv | RenderedImage,
+    atlas_png: ImageBytes | None = None,
+    eye_texture: EyeTexture | None = None,
 ) -> Ok[GnmMesh] | Err[DomainError]:
     """GLB FLAME con 2 primitivas: piel (<3931) y ojo ([3931:5023)).
 
     PBR real: baseColor blanca + baseColorTexture, sin emisivo. La piel usa
     el albedo (CompleteUv legacy o RenderedImage completion; ambos UV_LEN por
-    as_bytes) o `atlas_png` si se da; el ojo usa textura propia (blanca
-    determinista). Las UVs van en convencion glTF (`v = 1 - v_uv`).
-    Tris a caballo (algun vertice <3931 y otro >=3931) son Err explicito,
-    nunca drop silencioso: dropped==len(all)-len(skin)-len(eye) debe ser 0.
+    as_bytes) o `atlas_png` si se da; el ojo usa `eye_texture` real cuando
+    se provee (bake_eye_texture desde eye_ball_tex.png) o blanca
+    determinista como fallback local. Las UVs van en convencion glTF
+    (`v = 1 - v_uv`). Tris a caballo son Err explicito, nunca drop
+    silencioso: dropped==len(all)-len(skin)-len(eye) debe ser 0.
     Cada seccion del BIN va padded a 4 antes de offsets (pos/uv/skin/eye/pngs).
     """
     try:
@@ -286,7 +357,13 @@ def build_personalized_glb(
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             skin_png = buf.getvalue()
-        eye_png = _eye_png()
+        if eye_texture is not None:
+            eye_img = Image.frombytes("RGB", (UV_WIDTH, UV_HEIGHT), bytes(eye_texture.as_bytes()))
+            eye_buf_io = io.BytesIO()
+            eye_img.save(eye_buf_io, format="PNG")
+            eye_png = eye_buf_io.getvalue()
+        else:
+            eye_png = _eye_png()
         pos_buf = struct.pack(f"<{VERT_COUNT * 3}f", *[c for p in positions for c in p])
         uv_buf = struct.pack(f"<{VERT_COUNT * 2}f", *[c for t in split_uvs for c in t])
         skin_flat = [v for tri in skin_tris for v in tri]

@@ -120,37 +120,59 @@ def load_positions(pkl_path: str) -> np.ndarray:
 
 
 def load_uv_faces(obj_path: str) -> tuple[np.ndarray, np.ndarray]:
-    verts: list[tuple[float, float]] = []
-    faces: list[tuple[int, int, int]] = []
+    """UVs por vertice (last-wins sobre seams) + tris sobre v.
+
+    El OBJ HIFI3D trae 5023 v, 5150 vt (seams ojos/boca) y 9976 f v/vt.
+    Las caras v coinciden con la triangulacion del pkl; las vt se reducen
+    a una por vertice con last-wins (igual que extract_gnm_template).
+    """
+    vt: list[tuple[float, float]] = []
+    faces_v: list[tuple[int, int, int]] = []
+    faces_vt: list[tuple[int, int, int]] = []
     with open(obj_path, encoding="utf-8", errors="strict") as fh:
         for line in fh:
             if line.startswith("vt "):
                 parts = line.split()
-                verts.append((float(parts[1]), float(parts[2])))
+                vt.append((float(parts[1]), float(parts[2])))
             elif line.startswith("f "):
-                idx: list[int] = []
+                v_idx: list[int] = []
+                t_idx: list[int] = []
                 for tok in line.split()[1:]:
-                    # f v/vt/vn o v/vt : usa vt (indice 1 si hay /)
                     if "/" in tok:
-                        vt = tok.split("/")[1]
-                        idx.append(int(vt) - 1)
+                        segs = tok.split("/")
+                        v_idx.append(int(segs[0]) - 1)
+                        t_idx.append(int(segs[1]) - 1 if len(segs) > 1 and segs[1] else -1)
                     else:
-                        idx.append(int(tok) - 1)
-                if len(idx) == 3:
-                    faces.append((idx[0], idx[1], idx[2]))
-                elif len(idx) == 4:
-                    faces.append((idx[0], idx[1], idx[2]))
-                    faces.append((idx[0], idx[2], idx[3]))
-    uvs = np.asarray(verts, dtype=np.float32)
-    tris = np.asarray(faces, dtype=np.int64)
-    if uvs.shape != (VERTS, 2):
-        raise RuntimeError(f"uvs shape {uvs.shape} != ({VERTS}, 2) en {obj_path}")
+                        v_idx.append(int(tok) - 1)
+                        t_idx.append(-1)
+                if len(v_idx) == 3:
+                    faces_v.append((v_idx[0], v_idx[1], v_idx[2]))
+                    faces_vt.append((t_idx[0], t_idx[1], t_idx[2]))
+                elif len(v_idx) == 4:
+                    faces_v.append((v_idx[0], v_idx[1], v_idx[2]))
+                    faces_vt.append((t_idx[0], t_idx[1], t_idx[2]))
+                    faces_v.append((v_idx[0], v_idx[2], v_idx[3]))
+                    faces_vt.append((t_idx[0], t_idx[2], t_idx[3]))
+    vt_arr = np.asarray(vt, dtype=np.float32)
+    tris = np.asarray(faces_v, dtype=np.int64)
     if tris.shape != (TRIS, 3):
         raise RuntimeError(f"faces shape {tris.shape} != ({TRIS}, 3) en {obj_path}")
-    if not bool(np.all(np.isfinite(uvs))):
+    if not bool(np.all(np.isfinite(vt_arr))):
         raise RuntimeError("uv no finita en OBJ")
     if int(tris.min()) < 0 or int(tris.max()) >= VERTS:
         raise RuntimeError("faces con indice fuera de rango")
+    uvs = np.zeros((VERTS, 2), dtype=np.float32)
+    seen = np.zeros((VERTS,), dtype=bool)
+    for (a, b, c), (ta, tb, tc) in zip(reversed(faces_v), reversed(faces_vt)):
+        for v, t in ((a, ta), (b, tb), (c, tc)):
+            if not seen[v] and 0 <= t < len(vt):
+                uvs[v] = vt_arr[t]
+                seen[v] = True
+    if not bool(seen.all()):
+        missing = int((~seen).sum())
+        raise RuntimeError(f"vt no cubren {missing} verts en {obj_path}")
+    if not bool(np.all(np.isfinite(uvs))):
+        raise RuntimeError("uv derivada no finita")
     return uvs, tris
 
 

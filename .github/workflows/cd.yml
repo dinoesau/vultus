@@ -50,32 +50,37 @@ jobs:
         id: bump
         env:
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          EVENT_REPO: ${{ github.repository }}
           BUMP_DISPATCH: ${{ inputs.bump }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          BUMP=skip
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "bump=${BUMP_DISPATCH:-patch}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          PRS="$(jq -r '[.commits // [] | .[].message] + [(.head_commit.message // "")] | join("\n")' "$GITHUB_EVENT_PATH" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true)"
-          if [ -z "$PRS" ]; then
-            echo "bump=skip" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          LABELS=""
-          for N in $PRS; do
-            L="$(gh pr view "$N" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || true)"
-            LABELS="$LABELS,$L"
-          done
-          if echo ",$LABELS," | grep -q ",Release: Major,"; then
-            echo "bump=major" >> "$GITHUB_OUTPUT"
-          elif echo ",$LABELS," | grep -q ",Release: Minor,"; then
-            echo "bump=minor" >> "$GITHUB_OUTPUT"
-          elif echo ",$LABELS," | grep -q ",Release: Patch,"; then
-            echo "bump=patch" >> "$GITHUB_OUTPUT"
+            BUMP="${BUMP_DISPATCH:-patch}"
           else
-            echo "bump=skip" >> "$GITHUB_OUTPUT"
+            LABELS=""
+            API_LABELS="$(gh api "repos/$EVENT_REPO/commits/$EVENT_SHA/pulls" --jq '[.[]? | .labels[]? | .name?] | join(",")' 2>&1 || true)"
+            echo "api_labels=$API_LABELS"
+            LABELS="$LABELS,$API_LABELS"
+            PRS="$(jq -r '[(.commits // [])[].message, (.head_commit.message // "")] | join("\n")' "$GITHUB_EVENT_PATH" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true)"
+            echo "prs=$PRS"
+            for N in $PRS; do
+              L="$(gh pr view "$N" --json labels --jq '[.labels[].name] | join(",")' 2>&1 || true)"
+              echo "pr=$N labels=$L"
+              LABELS="$LABELS,$L"
+            done
+            echo "labels=$LABELS"
+            if echo ",$LABELS," | grep -q ",Release: Major,"; then
+              BUMP=major
+            elif echo ",$LABELS," | grep -q ",Release: Minor,"; then
+              BUMP=minor
+            elif echo ",$LABELS," | grep -q ",Release: Patch,"; then
+              BUMP=patch
+            fi
           fi
+          echo "bump=$BUMP"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
 
   version:
     needs: resolve

@@ -117,7 +117,7 @@ Fixture local es cabeza coherente (elipsoide piel + 2 esferas ojos, UVs piel 0-1
 Sin `flame_template.bin` hay waiver local salvo con `VULTUS_REAL_ML=1` que falla loud.
 Template real se congela con `scripts/extract_flame_template.py` desde `flame2023_Open.pkl` + `FLAME_w_HIFI3D_UV.obj`.
 Ojos reales via `bake_eye_texture` cuando el puente trae `eye_ball_tex.png`, si no blanco fallback.
-Imagen Modal trae `nvdiffrast==0.4.0` para futuro unwrap texgan/DPR.
+Sin rasterizadores CUDA en la imagen (pytorch3d/nvdiffrast removidos: el unwrap usa raster propio numpy y ningun modulo los importa).
 Puente ampliado a 7 archivos: base 4 mas `checkpoints/texgan_model/texgan_ffhq_uv.pth`, `checkpoints/deep3d_model/epoch_latest.pth` y `topo_assets/unwrap_1024_info.mat`.
 Env nuevos `TEXGAN_DIR`, `DEEP3D_DIR`, `TOPO_DIR` con defaults bajo `WEIGHTS_ROOT`, pasados a fit y texture workers.
 Template real `backend/assets/flame_template.bin` (5023/9976, sha `d4140b7b`) generado desde `flame2023_Open.pkl` + `FLAME_w_HIFI3D_UV.obj` con UVs last-wins (5150 vt con seams).

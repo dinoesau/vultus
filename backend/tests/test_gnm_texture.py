@@ -852,3 +852,25 @@ def test_flame_eye_bake_real_map_differs_from_skin(monkeypatch) -> None:  # type
     assert len(first.value.as_bytes()) == UV_LEN
     assert first.value.as_bytes() == second.value.as_bytes()
     assert max_abs_diff(first.value.as_bytes(), skin.value.as_bytes()) > 0
+
+
+def test_unwrap_extras_missing_fails_loud_when_real() -> None:
+    """Slice 3 RED: sin texgan/unwrap extras, unwrap real es Err."""
+    import os
+
+    from backend import flame_texture as _tex
+
+    assert _tex.TEXGAN_NAME == "texgan_ffhq_uv.pth"
+    assert _tex.UNWRAP_MAT_NAME == "unwrap_1024_info.mat"
+    # Helper debe existir y ser total sin raise.
+    assert hasattr(_tex, "ffhq_uv_extra_present")
+    assert _tex.ffhq_uv_extra_present() in (True, False)
+    if not _tex.ffhq_uv_extra_present():
+        os.environ["VULTUS_REAL_ML"] = "1"
+        try:
+            res = _tex.run_unwrap_texture()  # type: ignore[no-untyped-call]
+            from backend.domain import Err as _Err
+
+            assert isinstance(res, _Err)
+        finally:
+            os.environ.pop("VULTUS_REAL_ML", None)

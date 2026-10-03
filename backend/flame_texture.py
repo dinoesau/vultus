@@ -114,6 +114,42 @@ def ffhq_uv_dir() -> str:
     return _env("FFHQ_UV_DIR")
 
 
+def texgan_dir() -> str:
+    """Checkpoint TexGAN desde env. Vacio = ausente."""
+    return _env("TEXGAN_DIR")
+
+
+def topo_dir() -> str:
+    """Assets topologia unwrap desde env. Vacio = ausente."""
+    return _env("TOPO_DIR")
+
+
+def _texgan_candidate_dirs() -> list[str]:
+    cands: list[str] = []
+    for d in (texgan_dir(), ffhq_uv_dir()):
+        if d and d not in cands:
+            cands.append(d)
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    if root:
+        fallback = os.path.join(root, "checkpoints", "texgan_model")
+        if fallback not in cands:
+            cands.append(fallback)
+    return cands
+
+
+def _topo_candidate_dirs() -> list[str]:
+    cands: list[str] = []
+    for d in (topo_dir(), ffhq_uv_dir()):
+        if d and d not in cands:
+            cands.append(d)
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    if root:
+        fallback = os.path.join(root, "topo_assets")
+        if fallback not in cands:
+            cands.append(fallback)
+    return cands
+
+
 def _file_nonempty(path: str) -> bool:
     try:
         return os.path.isfile(path) and os.path.getsize(path) > 0
@@ -157,13 +193,14 @@ def ffhq_uv_extra_present() -> bool:
     Via futura texgan/DPR/parsing; no parte del puente canonico.
     Total: False si dir ausente o algun extra falta/vacio, nunca raise.
     """
-    bridge = ffhq_uv_dir()
-    if not bridge:
+    tex_ok = any(_file_nonempty(os.path.join(d, TEXGAN_NAME)) for d in _texgan_candidate_dirs())
+    if not tex_ok:
         return False
-    for name in (TEXGAN_NAME, UNWRAP_MAT_NAME, MEAN_FACE_NAME):
-        if not _file_nonempty(os.path.join(bridge, name)):
-            return False
-    return True
+    topo_dirs = _topo_candidate_dirs()
+    mat_ok = any(_file_nonempty(os.path.join(d, UNWRAP_MAT_NAME)) for d in topo_dirs)
+    # hifi3dpp_mean_face.obj falta en HF y Volume: documentado como ausente,
+    # no bloquea extras (unwrap usa mat + masks + texgan).
+    return mat_ok
 
 
 def run_unwrap_texture() -> Ok[RenderedImage] | Err[DomainError]:
@@ -175,7 +212,7 @@ def run_unwrap_texture() -> Ok[RenderedImage] | Err[DomainError]:
     Total: nunca raise, nunca doble silencioso.
     """
     if not ffhq_uv_extra_present():
-        return Err(MlFailed(detail=MlDecode(details="real unwrap requires texgan_ffhq_uv.pth + unwrap_1024_info.mat + hifi3dpp_mean_face.obj")))
+        return Err(MlFailed(detail=MlDecode(details="real unwrap requires texgan_ffhq_uv.pth + unwrap_1024_info.mat")))
     return Err(MlFailed(detail=MlDecode(details="real unwrap extras present but texgan path not yet wired (TODO Slice 3)")))
 
 
@@ -319,7 +356,14 @@ def _real_bake(image: ImageBytes, fit: FitResult, landmarks: Landmarks) -> Ok[Re
 
 
 def _texture_fingerprint() -> Ok[bytes] | Err[DomainError]:
-    """Huella FFHQ-UV: sha256 de nombre+tamano+primeros 64KiB por archivo."""
+    """Huella FFHQ-UV: sha256 de puente + texgan/unwrap mat cuando presentes.
+
+    El checkpoint texgan y el mat de unwrap parametrizan la completion junto
+    al OBJ: mismos pesos dan los mismos bytes; pesos distintos los cambian.
+    La inferencia GAN completa con torch vive en el worker GPU Modal
+    (sin torch top-level aqui). Total: Err solo si un archivo verificado
+    deja de leerse (TOCTOU), nunca raise.
+    """
     try:
         h = hashlib.sha256(REAL_TEXTURE_SALT)
         for name in (UV_OBJ_NAME, EYE_MAP_NAME):
@@ -329,6 +373,24 @@ def _texture_fingerprint() -> Ok[bytes] | Err[DomainError]:
             h.update(name.encode("utf-8"))
             h.update(struct.pack(">Q", os.path.getsize(path)))
             h.update(head)
+        for d in _texgan_candidate_dirs():
+            cand = os.path.join(d, TEXGAN_NAME)
+            if _file_nonempty(cand):
+                with open(cand, "rb") as fh:
+                    head = fh.read(_BRIDGE_HEAD_BYTES)
+                h.update(TEXGAN_NAME.encode("utf-8"))
+                h.update(struct.pack(">Q", os.path.getsize(cand)))
+                h.update(head)
+                break
+        for d in _topo_candidate_dirs():
+            cand = os.path.join(d, UNWRAP_MAT_NAME)
+            if _file_nonempty(cand):
+                with open(cand, "rb") as fh:
+                    head = fh.read(_BRIDGE_HEAD_BYTES)
+                h.update(UNWRAP_MAT_NAME.encode("utf-8"))
+                h.update(struct.pack(">Q", os.path.getsize(cand)))
+                h.update(head)
+                break
         return Ok(h.digest())
     except OSError as exc:
         return Err(MlFailed(detail=MlDecode(details=f"ffhq-uv bridge unreadable: {exc}")))

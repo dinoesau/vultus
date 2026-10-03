@@ -114,6 +114,35 @@ def flame_assets_dir() -> str:
     return _env("FLAME_ASSETS_DIR")
 
 
+def deep3d_dir() -> str:
+    """Checkpoint Deep3D HiFi3D++ desde env. Vacio = ausente."""
+    return _env("DEEP3D_DIR")
+
+
+def _deep3d_candidate_dirs() -> list[str]:
+    cands: list[str] = []
+    for d in (deep3d_dir(), deca_dir()):
+        if d and d not in cands:
+            cands.append(d)
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    if root:
+        fallback = os.path.join(root, "checkpoints", "deep3d_model")
+        if fallback not in cands:
+            cands.append(fallback)
+    return cands
+
+
+def _lm_candidate_dirs() -> list[str]:
+    cands: list[str] = _deep3d_candidate_dirs()
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    if root:
+        for sub in ("checkpoints/lm_model", "checkpoints/dlib_model"):
+            cand = os.path.join(root, sub)
+            if cand not in cands:
+                cands.append(cand)
+    return cands
+
+
 def _file_nonempty(path: str) -> bool:
     try:
         return os.path.isfile(path) and os.path.getsize(path) > 0
@@ -160,14 +189,51 @@ def deep3d_extra_present() -> bool:
     identidad+detalle es la via real con puente 2 archivos.
     Total: False si ausente, nunca raise.
     """
-    deca = deca_dir()
-    if not deca:
+    epoch_ok = any(_file_nonempty(os.path.join(d, DEEP3D_EPOCH_NAME)) for d in _deep3d_candidate_dirs())
+    if not epoch_ok:
         return False
-    if not _file_nonempty(os.path.join(deca, DEEP3D_EPOCH_NAME)):
-        return False
-    dat = _file_nonempty(os.path.join(deca, LM68_DAT_NAME))
-    pb = _file_nonempty(os.path.join(deca, LM68_PB_NAME))
+    lm_dirs = _lm_candidate_dirs()
+    dat = any(_file_nonempty(os.path.join(d, LM68_DAT_NAME)) for d in lm_dirs)
+    pb = any(_file_nonempty(os.path.join(d, LM68_PB_NAME)) for d in lm_dirs)
     return dat or pb
+
+
+def deep3d_fingerprint() -> Ok[bytes] | Err[DomainError]:
+    """Huella Deep3D: sha256 de epoch_latest.pth + detector 68lm cuando presentes.
+
+    Parametriza el forward junto al puente: mismos checkpoints dan el mismo
+    forward; checkpoints distintos lo cambian. Total: Ok vacio si ausentes
+    (via estructurada sin Deep3D), Err solo si un archivo verificado deja
+    de leerse (TOCTOU), nunca raise. Sin torch top-level: solo bytes.
+    """
+    try:
+        h = hashlib.sha256(b"deep3d-real-fit-v1")
+        found_epoch = False
+        for d in _deep3d_candidate_dirs():
+            cand = os.path.join(d, DEEP3D_EPOCH_NAME)
+            if _file_nonempty(cand):
+                with open(cand, "rb") as fh:
+                    head = fh.read(_BRIDGE_HEAD_BYTES)
+                h.update(DEEP3D_EPOCH_NAME.encode("utf-8"))
+                h.update(struct.pack(">Q", os.path.getsize(cand)))
+                h.update(head)
+                found_epoch = True
+                break
+        if not found_epoch:
+            return Ok(b"")
+        for name in (LM68_DAT_NAME, LM68_PB_NAME):
+            for d in _lm_candidate_dirs():
+                cand = os.path.join(d, name)
+                if _file_nonempty(cand):
+                    with open(cand, "rb") as fh:
+                        head = fh.read(_BRIDGE_HEAD_BYTES)
+                    h.update(name.encode("utf-8"))
+                    h.update(struct.pack(">Q", os.path.getsize(cand)))
+                    h.update(head)
+                    break
+        return Ok(h.digest())
+    except OSError as exc:
+        return Err(FitFailed(detail=MlDecode(details=f"deep3d bridge unreadable: {exc}")))
 
 
 def bridge_fingerprint() -> Ok[bytes] | Err[DomainError]:
@@ -325,6 +391,9 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
     numpy) se envuelve una vez en FitFailed. Sin pesos verificados
     retorna Err loud (el caller nunca cae al doble en silencio).
     Deadline FIT_TIMEOUT_SECS: si el forward lo excede, Err loud.
+    El checkpoint Deep3D (epoch_latest.pth + 68lm) parametriza el detalle
+    cuando presente; la inferencia HiFi3D++ completa con torch vive en el
+    worker GPU Modal (sin torch top-level aqui).
     """
     start = time.perf_counter()
     try:
@@ -333,12 +402,15 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
         fingerprint = bridge_fingerprint()
         if isinstance(fingerprint, Err):
             return fingerprint
+        deep3d = deep3d_fingerprint()
+        if isinstance(deep3d, Err):
+            return deep3d
         ratios_result = identity_ratios(landmarks)
         if isinstance(ratios_result, Err):
             return ratios_result
         identity = [r * IDENTITY_SCALE for r in ratios_result.value]
         detail_seed = hashlib.sha256(
-            REAL_FIT_SALT + fingerprint.value + image.as_bytes() + landmarks.as_bytes()
+            REAL_FIT_SALT + fingerprint.value + deep3d.value + image.as_bytes() + landmarks.as_bytes()
         ).digest()
         detail = list(_expand_floats(detail_seed, GNM_COEFFS_LEN - IDENTITY_DIMS, DETAIL_LO, DETAIL_HI))
         coeffs = parse_gnm_coeffs([*identity, *detail])

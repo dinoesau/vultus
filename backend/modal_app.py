@@ -86,6 +86,17 @@ DECA_DIR = _env("DECA_DIR", os.path.join(WEIGHTS_ROOT, "deca")) or os.path.join(
 FLAME_ASSETS_DIR = _env("FLAME_ASSETS_DIR", os.path.join(WEIGHTS_ROOT, "flame")) or os.path.join(
     WEIGHTS_ROOT, "flame"
 )
+# Pesos RGB fitting FFHQ-UV verificados en Volume (37 archivos).
+# Solo por env con defaults bajo WEIGHTS_ROOT; nada hardcodeado fuera de aqui.
+TEXGAN_DIR = _env("TEXGAN_DIR", os.path.join(WEIGHTS_ROOT, "checkpoints", "texgan_model")) or os.path.join(
+    WEIGHTS_ROOT, "checkpoints", "texgan_model"
+)
+DEEP3D_DIR = _env("DEEP3D_DIR", os.path.join(WEIGHTS_ROOT, "checkpoints", "deep3d_model")) or os.path.join(
+    WEIGHTS_ROOT, "checkpoints", "deep3d_model"
+)
+TOPO_DIR = _env("TOPO_DIR", os.path.join(WEIGHTS_ROOT, "topo_assets")) or os.path.join(
+    WEIGHTS_ROOT, "topo_assets"
+)
 # Nombre del Volume (Factor III: config por env, ver .env.example).
 MODAL_VOLUME_NAME = _env("MODAL_VOLUME", "vultus-weights") or "vultus-weights"
 # VULTUS_REAL_ML: 1 fuerza real, 0 fuerza dobles, auto decide por pesos+deps.
@@ -734,6 +745,9 @@ if HAVE_MODAL:
             "FFHQ_UV_DIR": FFHQ_UV_DIR,
             "DECA_DIR": DECA_DIR,
             "FLAME_ASSETS_DIR": FLAME_ASSETS_DIR,
+            "TEXGAN_DIR": TEXGAN_DIR,
+            "DEEP3D_DIR": DEEP3D_DIR,
+            "TOPO_DIR": TOPO_DIR,
         },
     )(fit_worker)
 
@@ -786,7 +800,11 @@ if HAVE_MODAL:
             "FFHQ_UV_DIR": FFHQ_UV_DIR,
             "DECA_DIR": DECA_DIR,
             "FLAME_ASSETS_DIR": FLAME_ASSETS_DIR,
+            "TEXGAN_DIR": TEXGAN_DIR,
+            "DEEP3D_DIR": DEEP3D_DIR,
+            "TOPO_DIR": TOPO_DIR,
         },
+
     )(texture_worker)
 
 

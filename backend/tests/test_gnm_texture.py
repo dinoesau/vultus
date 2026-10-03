@@ -905,9 +905,14 @@ def test_unwrap_projection_ok_sentinel_evidence_x2(monkeypatch) -> None:  # type
     """GWT2 RED: unwrap por proyeccion Ok, cero sentinel, evidence>=MIN, x2 identico."""
     import json as _json
 
-    import mediapipe as _mp
-    from mediapipe.tasks import python as _base
-    from mediapipe.tasks.python import vision as _vis
+    try:
+        import mediapipe as _mp
+        from mediapipe.tasks import python as _base
+        from mediapipe.tasks.python import vision as _vis
+    except ImportError:
+        import pytest as _pytest
+
+        _pytest.skip("sin mediapipe no hay landmarks reales")
 
     from backend.domain import Ok as _Ok
     from backend.domain import parse_image_bytes as _pimg
@@ -953,9 +958,14 @@ def test_unwrap_differs_from_blur_completion(monkeypatch) -> None:  # type: igno
     """GWT2 RED: unwrap proyectado no es el blur 64->512 (proyeccion UV real)."""
     import json as _json
 
-    import mediapipe as _mp
-    from mediapipe.tasks import python as _base
-    from mediapipe.tasks.python import vision as _vis
+    try:
+        import mediapipe as _mp
+        from mediapipe.tasks import python as _base
+        from mediapipe.tasks.python import vision as _vis
+    except ImportError:
+        import pytest as _pytest
+
+        _pytest.skip("sin mediapipe no hay landmarks reales")
 
     from backend.domain import Ok as _Ok
     from backend.domain import parse_image_bytes as _pimg

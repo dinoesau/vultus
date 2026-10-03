@@ -504,9 +504,14 @@ def test_fit_68_ratios_discriminate_identity_real(monkeypatch) -> None:  # type:
     """GWT1 RED: ratios 68 mismos discriminan (misma < distinta) con landmarks reales."""
     import json as _json
 
-    import mediapipe as _mp
-    from mediapipe.tasks import python as _base
-    from mediapipe.tasks.python import vision as _vis
+    try:
+        import mediapipe as _mp
+        from mediapipe.tasks import python as _base
+        from mediapipe.tasks.python import vision as _vis
+    except ImportError:
+        import pytest as _pytest
+
+        _pytest.skip("sin mediapipe no hay landmarks reales")
 
     from backend.domain import Ok as _Ok
     from backend.domain import parse_landmarks as _plm
@@ -545,9 +550,14 @@ def test_fit_real_loss_is_computed_symmetry_not_zero(monkeypatch) -> None:  # ty
     """GWT1 RED: loss real es residual geometrico finito, no 0 fijo."""
     import json as _json
 
-    import mediapipe as _mp
-    from mediapipe.tasks import python as _base
-    from mediapipe.tasks.python import vision as _vis
+    try:
+        import mediapipe as _mp
+        from mediapipe.tasks import python as _base
+        from mediapipe.tasks.python import vision as _vis
+    except ImportError:
+        import pytest as _pytest
+
+        _pytest.skip("sin mediapipe no hay landmarks reales")
 
     from backend.domain import Ok as _Ok
     from backend.domain import parse_image_bytes as _pimg

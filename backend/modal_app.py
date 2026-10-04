@@ -375,13 +375,11 @@ if HAVE_MODAL:
     # 2.13.0/0.28.0, variante GPU) y luego requirements.txt, que es
     # torch-free por diseno para no clobberar el cu126 con el build PyPI;
     # fvcore==0.1.5.post20221221 e iopath==0.1.10 espejan el lock.
-    # missing-evidence: el build de imagen (Modal, torch cu126 + requirements)
-    # no corre en este lane; el cambio de receta es build-deferred y
-    # lo verifica el job manual docker-gpu / `modal deploy`.
-    # Sin rasterizadores CUDA (pytorch3d/nvdiffrast removidos: el unwrap usa
-    # raster propio numpy, ningun modulo los importa): no hay compilacion
-    # desde source y el build es rapido. Reintroducirlos solo con el fitting
-    # iterativo, desde git source (PyPI no trae wheels), nunca `==` de PyPI.
+    # missing-evidence: el build de imagen (Modal, torch cu126 + compilacion
+    # pytorch3d ~9min desde source) no corre en este lane; el cambio de receta
+    # es build-deferred y lo verifica el job manual docker-gpu / `modal deploy`.
+    # Sin rasterizadores el build seria rapido, pero el fitting iterativo los
+    # pedira: se mantienen desde git source (PyPI no trae wheels).
     # Deploys estrictamente secuenciales: dos builds concurrentes no comparten
     # cache y ambos pagan el build completo.
     image = (
@@ -400,6 +398,23 @@ if HAVE_MODAL:
             # fvcore/iopath pineados igual que backend/requirements.txt:
             # prohibido `pip install` sin version en la imagen (Wave 2).
             "pip install --no-cache-dir fvcore==0.1.5.post20221221 iopath==0.1.10",
+            # pytorch3d desde source (PyPI no trae wheel cu126/torch 2.13).
+            # --no-build-isolation: su setup.py importa torch y el env aislado
+            # PEP 517 no lo trae (ahi moria con ModuleNotFoundError: torch).
+            # CXX=g++: torch elige clang++ por defecto y no existe en la imagen.
+            # FORCE_CUDA=1: el builder no tiene GPU y setup.py decidiria solo-CPU
+            # aunque haya nvcc; T4 es sm_75, una sola arch para compilar rapido.
+            # Pin al SHA de HEAD resuelto via `git ls-remote ... HEAD`
+            # (978cd99221b9e0a6a568f1d427854d73363265cf, verificado: rueda
+            # 0.7.9 compila ok en ~9min en CI). Sin este pin cada build podia
+            # traer un commit distinto de main.
+            "FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST=7.5 CXX=g++ CC=gcc pip install --no-cache-dir --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@978cd99221b9e0a6a568f1d427854d73363265cf",
+            # nvdiffrast desde source (PyPI no trae wheels: `==` rompe el build,
+            # ver CD run 37158154580). Best-effort con fallback: hoy ningun
+            # modulo lo importa (el unwrap usa raster propio); volverlo
+            # requerido solo cuando el fitting iterativo lo importe, con test
+            # que lo pruebe.
+            "pip install --no-cache-dir --no-build-isolation git+https://github.com/NVlabs/nvdiffrast.git@v0.4.0 || echo 'nvdiffrast opcional omitido: compila desde source solo con fitting iterativo'",
         )
         # Codigo compartido en la imagen: Modal solo monta `modal_app.py`;
         # sin esto el consumer muere con ModuleNotFoundError al importar

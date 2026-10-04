@@ -5,9 +5,8 @@
 # este Dockerfile: asi los deploys de solo-codigo no reconstruyen la imagen.
 # Mantener en paridad: misma base devel, mismo orden torch-cu126 primero.
 # Rust llama a este contenedor vía ML_SIDECAR_URL (POST /ml/landmarks|fit|texture).
-# Base devel (no runtime): se conserva por paridad con la receta Modal aunque
-# ya no se compila nada desde source (pytorch3d/nvdiffrast removidos: el
-# unwrap usa raster propio numpy y ningun modulo los importa).
+# Base devel (no runtime): rasterizadores CUDA se compilan desde source y sin
+# nvcc quedan solo-CPU. Se conservan para el fitting iterativo futuro.
 FROM nvidia/cuda:12.6.0-devel-ubuntu22.04
 # Sin PIP_NO_CACHE_DIR: los RUN de pip usan mount de cache BuildKit (no queda
 # en la imagen final) para no re-descargar torch en cada build.
@@ -34,11 +33,14 @@ COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip pip3 install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu126
 # hadolint ignore=DL3042,DL3059
 RUN --mount=type=cache,target=/root/.cache/pip pip3 install -r requirements.txt
-# Sin rasterizadores CUDA: pytorch3d/nvdiffrast removidos (el unwrap usa raster
-# propio numpy y ningun modulo los importa). Si el fitting iterativo los pide,
-# reintroducirlos desde git source (PyPI no trae wheels), nunca `==` de PyPI.
+# Sin rasterizadores CUDA: pytorch3d/nvdiffrast se instalan desde git source
+# (PyPI no trae wheels para cu126/torch 2.13); el unwrap actual usa raster
+# propio numpy. nvdiffrast es best-effort hasta que el fitting iterativo lo
+# importe.
 # Cache mount en vez de --no-cache-dir; fvcore/iopath sin pin es
 # pre-existente (solo warning, no falla el CI).
+# hadolint ignore=DL3042,DL3013
+RUN --mount=type=cache,target=/root/.cache/pip pip3 install fvcore iopath; pip3 install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git@978cd99221b9e0a6a568f1d427854d73363265cf || echo "pytorch3d opcional omitido: compila desde source solo con fitting iterativo"
 # Codigo al final: los cambios de codigo no invalidan las capas pesadas de pip.
 # Layout paquete (paridad con Dockerfile.runner): los delegados /ml/fit|texture
 # importan backend.domain/gnm_fit/gnm_texture/pipeline_local; en plano

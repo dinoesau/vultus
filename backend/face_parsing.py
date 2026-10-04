@@ -64,11 +64,12 @@ def _candidate_dirs() -> list[str]:
     direct = parsing_dir()
     if direct:
         cands.append(direct)
-    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
-    if root:
-        fallback = os.path.join(root, "checkpoints", "parsing_model")
-        if fallback not in cands:
-            cands.append(fallback)
+    # Default prod sin env: /weights (el Volume va montado ahi; ver
+    # modal_app.WEIGHTS_ROOT como autoridad del default).
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR") or "/weights"
+    fallback = os.path.join(root, "checkpoints", "parsing_model")
+    if fallback not in cands:
+        cands.append(fallback)
     return cands
 
 

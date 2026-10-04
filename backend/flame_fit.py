@@ -124,7 +124,7 @@ def _deep3d_candidate_dirs() -> list[str]:
     for d in (deep3d_dir(), deca_dir()):
         if d and d not in cands:
             cands.append(d)
-    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR") or "/weights"
     if root:
         fallback = os.path.join(root, "checkpoints", "deep3d_model")
         if fallback not in cands:
@@ -134,7 +134,7 @@ def _deep3d_candidate_dirs() -> list[str]:
 
 def _lm_candidate_dirs() -> list[str]:
     cands: list[str] = _deep3d_candidate_dirs()
-    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR") or "/weights"
     if root:
         for sub in ("checkpoints/lm_model", "checkpoints/dlib_model"):
             cand = os.path.join(root, sub)

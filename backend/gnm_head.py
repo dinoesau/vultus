@@ -109,7 +109,7 @@ def _candidate_npz_paths() -> list[str]:
     assets_dir = os.environ.get("GNM_ASSETS_DIR", "").strip()
     if assets_dir:
         cands.append(os.path.join(assets_dir, "versions", "v3_0", "gnm_head.npz"))
-    weights_dir = os.environ.get("WEIGHTS_DIR", "").strip()
+    weights_dir = os.environ.get("WEIGHTS_DIR", "").strip() or os.environ.get("WEIGHTS_ROOT", "").strip() or "/weights"
     if weights_dir:
         cands.append(os.path.join(weights_dir, "gnm", "versions", "v3_0", "gnm_head.npz"))
     cands.append(os.path.join(_repo_root(), _NPZ_REL))
@@ -129,7 +129,7 @@ def _candidate_landmark_paths() -> list[str]:
     assets_dir = os.environ.get("GNM_ASSETS_DIR", "").strip()
     if assets_dir:
         cands.append(os.path.join(assets_dir, "landmarks", "head_sparse_68.txt"))
-    weights_dir = os.environ.get("WEIGHTS_DIR", "").strip()
+    weights_dir = os.environ.get("WEIGHTS_DIR", "").strip() or os.environ.get("WEIGHTS_ROOT", "").strip() or "/weights"
     if weights_dir:
         cands.append(os.path.join(weights_dir, "gnm", "landmarks", "head_sparse_68.txt"))
     cands.append(os.path.join(_repo_root(), _LM_REL))

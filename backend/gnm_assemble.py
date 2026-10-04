@@ -68,7 +68,7 @@ def _candidate_flame_paths() -> list[str]:
     direct = flame_assets_dir()
     if direct:
         cands.append(os.path.join(direct, FLAME_TEMPLATE_NAME))
-    weights_dir = _env("WEIGHTS_DIR")
+    weights_dir = _env("WEIGHTS_DIR") or _env("WEIGHTS_ROOT") or "/weights"
     if weights_dir:
         cands.append(os.path.join(weights_dir, "flame", FLAME_TEMPLATE_NAME))
     here = os.path.dirname(os.path.abspath(__file__))

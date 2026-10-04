@@ -95,7 +95,7 @@ def _build_net():
     Lanza RuntimeError con causa si torch o los pesos faltan.
     """
     try:
-        import torch  # type: ignore[import-not-found]
+        import torch
         from torch import nn  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError(f"torch missing for face parsing: {exc}") from exc
@@ -288,7 +288,7 @@ def _net():
 def face_skin_mask(photo: NDArray[np.float64]) -> NDArray[np.bool_]:
     """Mascara de piel HxW sobre foto RGB float64. Total: lanza RuntimeError
     si torch o pesos faltan (el caller decide el fallback documentado)."""
-    import torch  # type: ignore[import-not-found]
+    import torch
 
     if photo.ndim != 3 or photo.shape[2] != 3:
         raise ValueError("photo must be HxWx3")

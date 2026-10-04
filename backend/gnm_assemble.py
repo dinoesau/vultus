@@ -304,10 +304,14 @@ def skin_vertex_indices() -> list[int]:
     return list(range(EYE_VERT_START))
 
 
-# Desplazamiento geometrico acotado: los coefs de identidad son O(1-9) y
-# con *0.01 generaban picos de hasta 9cm (40 por ciento del ancho de cabeza,
-# patron periodo-253). Personalizacion sana es milimetrica.
-_DISPLACE_MAX = 0.005
+# Desplazamiento real (Fase 2): la moneda fit 253 porta identidad HiFi3D++
+# (id200/exp45) y el delta se reconstruye con la base + transfer IDW en
+# unidades del template. Fail-safe absoluto 3-4x sobre el maximo
+# observado (Bush 0.048, Eckhart 0.035): la base PCA es suave por
+# construccion, los picos locales los guarda el test de suavidad, no el
+# clamp. Sin base/transfer (CI/dobles) rige el legado geometrico 5mm.
+_DISPLACE_MAX = 0.15
+_LEGACY_DISPLACE_MAX = 0.005
 
 
 def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] | Err[DomainError]:
@@ -316,10 +320,31 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
         return loaded
     positions, _, _ = loaded.value
     coeffs = fit.coeffs.as_tuple()
+    try:
+        from backend.deep3d import real_displacement as _real_delta
+    except ImportError:
+        _real_delta = None  # type: ignore[assignment]
+    delta = None
+    if _real_delta is not None:
+        try:
+            delta = _real_delta(coeffs)
+        except Exception:  # noqa: BLE001 - desplazamiento invalido: via legado
+            delta = None
+    if delta is not None and len(delta) == len(positions):
+        return Ok(
+            [
+                (
+                    x + min(max(float(dx), -_DISPLACE_MAX), _DISPLACE_MAX),
+                    y + min(max(float(dy), -_DISPLACE_MAX), _DISPLACE_MAX),
+                    z + min(max(float(dz), -_DISPLACE_MAX), _DISPLACE_MAX),
+                )
+                for (x, y, z), (dx, dy, dz) in zip(positions, [tuple(map(float, row)) for row in delta])
+            ]
+        )
     width = len(coeffs)
     return Ok(
         [
-            (x + min(max(coeffs[idx % width] * 0.01, -_DISPLACE_MAX), _DISPLACE_MAX), y, z)
+            (x + min(max(coeffs[idx % width] * 0.01, -_LEGACY_DISPLACE_MAX), _LEGACY_DISPLACE_MAX), y, z)
             for idx, (x, y, z) in enumerate(positions)
         ]
     )

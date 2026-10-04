@@ -68,7 +68,7 @@ from backend.domain import (
     parse_gnm_coeffs,
 )
 
-_LAST_FIT_STATS = ThreadLocalStats({"iterations": 0.0, "loss": 0.0, "duration_ms": 0.0})
+_LAST_FIT_STATS = ThreadLocalStats({"iterations": 0.0, "loss": 0.0, "duration_ms": 0.0, "deep3d": 0.0})
 
 # --- Puente DECA/FLAME: archivos canonicos (mirror de
 # scripts/modal-weights-sync.sh BRIDGE_FILES). Solo nombres, nunca rutas.
@@ -502,6 +502,22 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
         deep3d = deep3d_fingerprint()
         if isinstance(deep3d, Err):
             return deep3d
+        via_deep3d = _deep3d_fit(image, landmarks)
+        if isinstance(via_deep3d, Err):
+            return via_deep3d
+        if via_deep3d.value is not None:
+            loss_result = symmetry_loss(landmarks)
+            if isinstance(loss_result, Err):
+                return loss_result
+            elapsed = time.perf_counter() - start
+            if elapsed > FIT_TIMEOUT_SECS:
+                return Err(FitFailed(detail=MlDecode(details=f"real flame fit deadline exceeded: {elapsed:.2f}s")))
+            _LAST_FIT_STATS["iterations"] = 1.0
+            _LAST_FIT_STATS["loss"] = loss_result.value
+            _LAST_FIT_STATS["duration_ms"] = elapsed * 1000.0
+            _LAST_FIT_STATS["deep3d"] = 1.0
+            return Ok(via_deep3d.value)
+        _LAST_FIT_STATS["deep3d"] = 0.0
         ratios_result = identity_ratios_68(landmarks)
         if isinstance(ratios_result, Err):
             return ratios_result
@@ -531,6 +547,63 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
         return Ok(FitResult(coeffs=coeffs.value, camera=camera.value))
     except Exception as exc:  # noqa: BLE001 - forward caido es FitFailed, no crash
         return Err(FitFailed(detail=MlDecode(details=f"real flame fit failed: {exc}")))
+
+
+def _deep3d_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult | None] | Err[DomainError]:
+    """Forward Deep3D-HiFi3D++ foto->1049 coefs, empaquetado a la moneda 253.
+
+    Via `backend.deep3d` (ResNet50 V1.5 + 7 cabezas, inferencia real de
+    una pasada). Total: Ok(None) si no hay backend/pesos (el caller cae
+    al frente geometrico, via documentada en stats `deep3d`); Err solo
+    si los parses de dominio fallan. Nunca lanza por inputs esperados.
+    """
+    try:
+        from backend.deep3d import (
+            deep3d_available,
+            encode_fit253,
+            face_crop224,
+            find_epoch,
+            load_recon,
+            split_coeff_vector,
+        )
+        from backend.deep3d import photo_array as _photo_array
+    except ImportError:
+        return Ok(None)
+    try:
+        if not deep3d_available():
+            return Ok(None)
+        pts_result = _landmark_array(landmarks)
+        if isinstance(pts_result, Err):
+            return pts_result
+        pts = pts_result.value
+        photo_result = _photo_array(image)
+        if isinstance(photo_result, Err):
+            return photo_result
+        crop = face_crop224(photo_result.value, pts[:, 0], pts[:, 1])
+    except Exception:  # noqa: BLE001 - crop caido: via geometrica
+        return Ok(None)
+    try:
+        import torch  # type: ignore[import-not-found]
+
+        epoch = find_epoch()
+        if epoch is None:
+            return Ok(None)
+        recon = load_recon(epoch)
+        tensor = torch.from_numpy(np.ascontiguousarray(crop)).permute(2, 0, 1).unsqueeze(0)
+        with torch.no_grad():
+            out = recon.forward_coeffs(tensor)
+        vec = np.asarray(out.detach().cpu().numpy(), dtype=np.float64).reshape(-1)
+        parts = split_coeff_vector(vec)
+        packed = encode_fit253(parts["id"], parts["exp"], parts["angle"], parts["trans"])
+        coeffs = parse_gnm_coeffs(list(packed))
+        if isinstance(coeffs, Err):
+            return coeffs
+        camera = _similarity_camera(landmarks)
+        if isinstance(camera, Err):
+            return camera
+        return Ok(FitResult(coeffs=coeffs.value, camera=camera.value))
+    except Exception:  # noqa: BLE001 - forward caido: via geometrica
+        return Ok(None)
 
 
 def _similarity_camera(landmarks: Landmarks) -> Ok[CameraParams] | Err[DomainError]:

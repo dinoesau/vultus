@@ -486,11 +486,17 @@ def test_glb_embeds_eye_texture_when_provided() -> None:
     assert raw_eye[:100] != bytes([240, 240, 240] * 34)[:100]
 
 
-def test_displaced_clamps_identity_spikes_a_5mm() -> None:
-    """Coefs O(9) de identidad no generan picos: dx clamp a +-5mm."""
+def test_displaced_bounded_and_smooth() -> None:
+    """Desplazamiento acotado al fail-safe y suave por construccion.
+
+    Fase 2: la moneda 253 porta identidad HiFi3D++ (via real con base)
+    o geometria legada (CI/dobles sin scipy). En ambas vias el delta es
+    suave (base PCA o patron uniforme) y acotado a _DISPLACE_MAX; los
+    picos locales (>5mm entre vecinos) son el bug, no la magnitud abs.
+    """
     from backend.gnm_assemble import _DISPLACE_MAX, displaced_positions
 
-    assert _DISPLACE_MAX == 0.005
+    assert _DISPLACE_MAX == 0.15
     out = displaced_positions(_fit(8.9))
     assert isinstance(out, Ok)
 
@@ -498,9 +504,15 @@ def test_displaced_clamps_identity_spikes_a_5mm() -> None:
 
     tpl = load_flame_template()
     assert isinstance(tpl, Ok)
-    xs = [p[0] for p in tpl.value[0]]
+    positions, _uvs, tris = tpl.value
+    xs = [p[0] for p in positions]
     for (x, _y, _z), x0 in zip(out.value, xs):
-        assert abs(x - x0) <= 0.005 + 1e-9
+        assert abs(x - x0) <= 0.15 + 1e-9
+    deltas = [(x - x0) for (x, _y, _z), x0 in zip(out.value, xs)]
+    peak_jump = 0.0
+    for a, b, c in tris:
+        peak_jump = max(peak_jump, abs(deltas[a] - deltas[b]), abs(deltas[b] - deltas[c]))
+    assert peak_jump <= 0.005 + 1e-9
 
 
 def test_raster_skips_backfacing_tris() -> None:

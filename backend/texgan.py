@@ -30,6 +30,7 @@ existentes). Entradas bytes probados, salidas bytes. Sin logging.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Iterable
 from typing import Any
@@ -493,6 +494,36 @@ def synth_to_bytes(synth_01: NDArray[np.float64]) -> bytes:
     return np.rint(arr * 255.0).astype(np.uint8).tobytes()
 
 
+def match_color_to_sampled(
+    synth_255: NDArray[np.float64], sampled_255: NDArray[np.float64], valid: NDArray[np.bool_]
+) -> NDArray[np.float64]:
+    """Iguala tono del decoder al de la foto (espejo de `match_color` upstream).
+
+    Ajuste afin por canal sobre texeles validos: el latente ajustado por
+    MSE puede derivar en tono global (p.ej. verdoso bajo target DPR);
+    sin esto la completion canta contra lo muestreado. Puro numpy.
+    Total: retorna synth intacta si no hay validos o varianza nula.
+    """
+    try:
+        if not bool(valid.any()):
+            return synth_255
+        out = np.asarray(synth_255, dtype=np.float64).copy()
+        ref = np.asarray(sampled_255, dtype=np.float64)
+        for c in range(3):
+            sv = ref[valid, c]
+            gv = out[valid, c]
+            mu_s, mu_g = float(sv.mean()), float(gv.mean())
+            sd_s, sd_g = float(sv.std()), float(gv.std())
+            if sd_g < 1e-9 or not (math.isfinite(mu_s) and math.isfinite(mu_g)):
+                continue
+            out[..., c] = (out[..., c] - mu_g) * (sd_s / sd_g) + mu_s
+        if not bool(np.isfinite(out).all()):
+            return synth_255
+        return np.clip(out, 0.0, 255.0)
+    except (IndexError, ValueError, TypeError):
+        return synth_255
+
+
 def neural_completion(
     sampled_255: NDArray[np.float64],
     valid: NDArray[np.bool_],
@@ -524,6 +555,7 @@ def neural_completion(
         small = Image.fromarray(np.rint(np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)).resize(
             (512, 512), Image.Resampling.BILINEAR
         )
-        return np.asarray(small, dtype=np.float64)
+        synth = np.asarray(small, dtype=np.float64)
+        return match_color_to_sampled(synth, np.asarray(sampled_255, dtype=np.float64), np.asarray(valid, dtype=bool))
     except Exception:  # noqa: BLE001 - sin backend/pesos o fallo numerico: via piel media
         return None

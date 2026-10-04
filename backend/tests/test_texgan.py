@@ -186,6 +186,24 @@ def test_texgan_unwrap_neural_hole_differs_from_flat_mean(monkeypatch: pytest.Mo
     assert second.value.as_bytes() == raw_a
 
 
+def test_texgan_match_color_to_sampled() -> None:
+    import numpy as np
+
+    from backend.texgan import match_color_to_sampled
+
+    rng = np.random.RandomState(9)
+    sampled = (rng.rand(512, 512, 3) * 60 + 120).astype(np.float64)
+    synth = (rng.rand(512, 512, 3) * 40 + 20).astype(np.float64)
+    valid = np.zeros((512, 512), dtype=bool)
+    valid[100:400, 100:400] = True
+    out = match_color_to_sampled(synth, sampled, valid)
+    assert out.shape == (512, 512, 3)
+    for c in range(3):
+        assert abs(float(out[valid, c].mean()) - float(sampled[valid, c].mean())) < 1.0
+    intact = match_color_to_sampled(synth, sampled, np.zeros((512, 512), dtype=bool))
+    np.testing.assert_array_equal(intact, synth)
+
+
 def test_texgan_strict_load_real_checkpoint() -> None:
     torch = pytest.importorskip("torch")
     _ = torch

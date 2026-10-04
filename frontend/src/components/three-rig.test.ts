@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
+  LIGHT_PROBES,
   PBR_MAP_TINT_FREE_HEX,
   SKIN_MATERIAL,
   STUDIO_BACKGROUND_HEX,
@@ -8,6 +9,7 @@ import {
   STUDIO_CANVAS_WIDTH,
   STUDIO_LIGHTS,
   buildStudioLights,
+  checkLightProbes,
   checkStudioLights,
   parseStudioBackground,
   parseViewerStatus,
@@ -272,5 +274,40 @@ describe("three-rig: estudio blanco 3 luces (seam publica ThreeViewer)", () => {
     expect(src.includes("InvalidHealthVersion")).toBe(true);
     expect(src.includes("fail-open")).toBe(true);
     expect(src.includes("if (!healthy.ok) return")).toBe(true);
+  });
+
+  it("sondas de luz del paper: cromo + grafito metalicas con posiciones finitas", () => {
+    expect(LIGHT_PROBES.length).toBe(2);
+    expect(LIGHT_PROBES.map((p) => p.name)).toEqual(["chrome", "graphite"]);
+    for (const probe of LIGHT_PROBES) {
+      expect(probe.metalness).toBeGreaterThan(0);
+      expect(probe.metalness).toBeLessThanOrEqual(1);
+      expect(probe.roughness).toBeGreaterThan(0);
+      expect(probe.roughness).toBeLessThan(1);
+      expect(probe.radius).toBeGreaterThan(0);
+      expect(probe.position.length).toBe(3);
+      for (const axis of probe.position) expect(Number.isFinite(axis)).toBe(true);
+    }
+  });
+
+  it("checkLightProbes exige duo exacto con metal y radios sanos", () => {
+    expect(checkLightProbes(LIGHT_PROBES)).toEqual({ ok: true, value: LIGHT_PROBES });
+    const bad = LIGHT_PROBES.map((p) => ({ ...p }));
+    bad[0] = { ...bad[0], metalness: 0 };
+    const parsed = checkLightProbes(bad);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error.kind).toBe("InvalidProbeMetal");
+    const short = LIGHT_PROBES.slice(0, 1);
+    const parsed2 = checkLightProbes(short);
+    expect(parsed2.ok).toBe(false);
+    if (!parsed2.ok) expect(parsed2.error.kind).toBe("InvalidProbeCount");
+  });
+
+  it("visor monta sondas + entorno: RoomEnvironment y metalness sin emisivo", () => {
+    const src = readViewer("ThreeViewer.astro");
+    expect(src.includes("RoomEnvironment")).toBe(true);
+    expect(src.includes("LIGHT_PROBES")).toBe(true);
+    expect(src.includes("metalness")).toBe(true);
+    expect(src.includes("emissive")).toBe(false);
   });
 });

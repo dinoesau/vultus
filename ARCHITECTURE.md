@@ -105,23 +105,28 @@ Deps compute local: `httpx/Pillow/numpy` (ver `backend/requirements-api.txt`).
 
 Cada worker es módulo deep con una sola responsabilidad.
 `Worker 1/2/3 ML` viven en sidecar Python Modal tras `POST /ml/landmarks|fit|texture` consumido por `MlSidecarClient` con firmas tipadas (`-> Landmarks`, `-> FitResult`, `-> RenderedImage`).
-`fit` es frente geometrico 68 landmarks estilo Deep3D (`backend/flame_fit.py`, determinista x2, deadline 10s, `Result` total sin `raise`).
-Identidad desde 10 ratios 68lm, detalle condicionado a identidad+pesos sin bytes de foto, loss = residual de simetria (no 0 fijo).
-La regresion sobre base HiFi3D++ con torch vive en el worker GPU Modal; sin `torch` top-level.
+`fit` es forward Deep3D-HiFi3D++ real (`backend/deep3d.py`, ResNet50 V1.5 funcional bit-identico a torchvision + 7 cabezas -> 1049 coefs empaquetados a la moneda 253 `[id200 exp45 angle3 txtytz spare2]`, carga strict de `net_recon` con 0 faltantes, determinista x2, deadline 10s, `Result` total sin `raise`).
+Sin torch/pesos/mat cae al frente geometrico 68 landmarks (via documentada en stats `deep3d`).
+La malla se personaliza con la base HiFi3D++ (`idBase`/`exBase` del `.mat`) transferida 20481->5023 via asset IDW (`backend/assets/flame_hifi_transfer.npz`, solo numpy): fail-safe 0.15, picos = salto entre vecinos <=5mm por test.
+Camara afin 2x4 ajustada a 50 landmarks via embedding oficial MediaPipe->FLAME (`backend/assets/flame68_embed.npz`, RMSE ~1px; PnP/DLT descartados con evidencia: focal desconocida + degeneracion planar + espejo Necker), con fallback a similaridad por bbox (via en stats `pose`).
 `texture` es unwrap por proyeccion FFHQ-UV (`backend/flame_texture.py`, `SKIN_SENTINEL` const en codigo, `evidence >= 0.99`, `concurrency_limit=1`).
-Atlas 512 = pixel <-> UV piel 0-1; cada texel cubierto se muestrea de la foto por proyeccion afine del template real, ocluidas con completion + detalle de checkpoint.
+Atlas 512 = pixel <-> UV piel 0-1; cada texel cubierto se muestrea de la foto por la camara afin ajustada; ocluidas con completion neuronal texgan (decoder StyleGAN2 portado bit-identico al upstream, latente desde `w_avg` + Adam enmascarado de presupuesto fijo, solo en texeles no validos, `match_color` al tono muestreado) o piel media sin backend (via en stats `texgan`).
+Luz DPR SH9 (`backend/dpr.py`, HourglassNet gris strict 250 keys, tono preservado, cota [0.5, 2.0]) con fallback a gray-world (via en stats `dpr`).
 Ojos en textura aparte via `bake_eye_texture`; el atlas nunca muestrea fondo (cobertura de malla 88.7%).
-El `.mat` denso apunta a malla 20k (divergencia documentada): gate de presencia + mascara, mapeo rasterizado del FLAME 5023.
+Puente ampliado a 8 archivos: base 4 mas `checkpoints/texgan_model/texgan_ffhq_uv.pth`, `checkpoints/deep3d_model/epoch_latest.pth`, `topo_assets/unwrap_1024_info.mat` y `topo_assets/hifi3dpp_mean_face.obj` (generado del `.mat`, round-trip bit-exacto; el `data/HIFI3D.obj` de REALY es media HIFI3D v1, descartado como sustituto).
+Env nuevos `TEXGAN_DIR`, `DEEP3D_DIR`, `TOPO_DIR`, `DPR_DIR` con defaults bajo `WEIGHTS_ROOT`, pasados a fit y texture workers.
+Malla densa HiFi3D++ evaluada y rechazada este ciclo (ver ADR-009): `reconstruct_dense` solo para la decision, el contrato sirve FLAME 5023.
 `Worker 4 CPU` (`assemble`) vive en `backend/gnm_assemble.py`: malla FLAME `VERT_COUNT = 5023`, ojos `[EYE_VERT_START:EYE_VERT_END) = [3931:5023)` (1092 verts) con material propio, 2 primitivas PBR real (`SkinPBR` + `EyePBR`, sin emisivo), `build_personalized_glb(fit, albedo, eye_texture?) -> GnmMesh`, zip-6 via `build_result_zip` en `backend/gnm.py` (sin dep `torch/diffusers/mediapipe`).
 Fixture local es cabeza coherente (elipsoide piel + 2 esferas ojos, UVs piel 0-1 ojos 2-3), no rejilla plana.
 Sin `flame_template.bin` hay waiver local salvo con `VULTUS_REAL_ML=1` que falla loud.
 Template real se congela con `scripts/extract_flame_template.py` desde `flame2023_Open.pkl` + `FLAME_w_HIFI3D_UV.obj`.
 Ojos reales via `bake_eye_texture` cuando el puente trae `eye_ball_tex.png`, si no blanco fallback.
 Imagen Modal trae `pytorch3d@978cd99` desde source y `nvdiffrast` best-effort para futuro fitting iterativo (el unwrap actual usa raster propio numpy).
-Puente ampliado a 7 archivos: base 4 mas `checkpoints/texgan_model/texgan_ffhq_uv.pth`, `checkpoints/deep3d_model/epoch_latest.pth` y `topo_assets/unwrap_1024_info.mat`.
+Puente ampliado a 8 archivos: base 4 mas `checkpoints/texgan_model/texgan_ffhq_uv.pth`, `checkpoints/deep3d_model/epoch_latest.pth`, `topo_assets/unwrap_1024_info.mat` y `topo_assets/hifi3dpp_mean_face.obj`.
 Env nuevos `TEXGAN_DIR`, `DEEP3D_DIR`, `TOPO_DIR` con defaults bajo `WEIGHTS_ROOT`, pasados a fit y texture workers.
 Template real `backend/assets/flame_template.bin` (5023/9976, sha `d4140b7b`) generado desde `flame2023_Open.pkl` + `FLAME_w_HIFI3D_UV.obj` con UVs last-wins (5150 vt con seams).
-`hifi3dpp_mean_face.obj` ausente en HF y Volume: documentado, no bloquea extras.
+`hifi3dpp_mean_face.obj` generado del `.mat` local (meanshape + head_tri, round-trip bit-exacto) y subido al Volume: el `data/HIFI3D.obj` de REALY es media HIFI3D v1 (p99 residual 0.029), descartado como sustituto.
+La variante interpolate del texgan (`texgan_cropface630resize1024_ffhq_uv_interpolate.pth`) esta ausente (OneDrive sin DNS, Baidu con login, sin espejo HF): se sigue solo con el base, documentado.
 Fitting sigue feed-forward una pasada dentro de `5+10+30` en TTL 60 con drain `visibility180`; sin fitting iterativo.
 Loader GNM `17821/35324` se conserva solo hasta el cutover (ver ADR-008); el bake gris legacy (`gnm_texture.build_albedo`) falla ruidoso sin pesos, sin caller productivo.
 Sin pesos los dobles locales siguen (gateway en verde); con `VULTUS_REAL_ML=1` el fallo es ruidoso (`FitFailed`/`MlFailed`).
@@ -137,7 +142,7 @@ Son los únicos lugares donde viven esas dependencias (`torch/mediapipe` solo v�
 ### 4.5 frontend
 
 Astro 4 con React islands desplegado en `Cloudflare Pages` en prod (static, free, global CDN).
-Islas: subida + progreso, `UvViewers` (paneles `uv_a/uv_b` + `pbr_a/pbr_b`, sin heatmap ni slider), `ThreeViewer` (estudio blanco, 2 canvas `viewer-3d-a/b`, conserva materiales GLB + fallback PBR).
+Islas: subida + progreso, `UvViewers` (paneles `uv_a/uv_b` + `pbr_a/pbr_b`, sin heatmap ni slider), `ThreeViewer` (estudio blanco, 2 canvas `viewer-3d-a/b`, conserva materiales GLB + fallback PBR, sondas de luz cromo + grafito estilo paper con `RoomEnvironment`, nunca del zip).
 Comunicación solo vía Seam 1 (en prod `Pages -> Workers` via `wrangler.toml` routing).
 `/health` expone `contract_version` (v2 = zip-6); el frontend valida y muestra `actualiza` ante mismatch, cero panel roto.
 

@@ -544,3 +544,53 @@ def test_template_uvs_v_upright_chin_down_brow_up() -> None:
     brow = int(_np.argmax(pa[:, 1]))
     assert float(ua[chin, 1]) > 0.9
     assert float(ua[brow, 1]) < 0.1
+
+
+def test_glb_embeds_real_eye_texture_not_fallback(monkeypatch) -> None:
+    """Fase 5: el GLB lleva la textura ocular real embebida (no fallback).
+
+    Con puente FFHQ-UV, `bake_eye_texture` da el mapa real y el GLB debe
+    contener sus bytes PNG exactos como segunda imagen (primitiva EyePBR).
+    Sin puente local (CI) se salta; sin puente con REAL_ML=1 falla loud.
+    """
+    import os as _os
+
+    from backend.domain import Err as _Err
+
+    candidates = [
+        _os.environ.get("FFHQ_UV_DIR", "").strip(),
+        "/Users/esau.martinez/Code/vultus/weights/ffhq-uv",
+        "/Users/esau.martinez/code/weights/ffhq-uv",
+    ]
+    bridge = next(
+        (
+            c
+            for c in candidates
+            if c and _os.path.isfile(_os.path.join(c, "eye_ball_tex.png")) and _os.path.isfile(_os.path.join(c, "FLAME_w_HIFI3D_UV.obj"))
+        ),
+        None,
+    )
+    if bridge is None:
+        import pytest as _pytest
+
+        _pytest.skip("sin puente ffhq-uv local (CI)")
+    monkeypatch.setenv("FFHQ_UV_DIR", bridge)
+    from backend.flame_texture import bake_eye_texture
+
+    eye = bake_eye_texture()
+    assert not isinstance(eye, _Err)
+    from PIL import Image as _Image
+
+    eye_png_io = io.BytesIO()
+    _Image.frombytes("RGB", (512, 512), bytes(eye.value.as_bytes())).save(eye_png_io, format="PNG")
+    eye_png = eye_png_io.getvalue()
+    assert eye_png[:8] == b"\x89PNG\r\n\x1a\n"
+    white = _Image.new("RGB", (32, 32), (240, 240, 240))
+    white_io = io.BytesIO()
+    white.save(white_io, format="PNG")
+    assert eye_png != white_io.getvalue()
+    built = build_personalized_glb(_fit(0.1), _albedo(0xA1), eye_texture=eye.value)
+    assert isinstance(built, Ok)
+    glb = built.value.as_bytes()
+    assert glb[:4] == b"glTF"
+    assert eye_png in glb

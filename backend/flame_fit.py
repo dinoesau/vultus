@@ -91,9 +91,8 @@ DETAIL_HI = 0.02
 # Indices FaceMesh canonicos (validos en FaceLandmarker 478 = 468 + 10 iris).
 _LM_L_OUT = 33
 # Fraccion del lado mayor como RMSE maximo de re-proyeccion para aceptar
-# la pose PnP (el template generico nunca clava la cara real; la pose
-# aproximada sigue mejorando el muestreo frente al afin por bbox).
-# Sobre el umbral cae a similaridad. Calibrado: Bush frontal 9.6%.
+# la camara afin ajustada. Sobre el umbral cae a similaridad por bbox.
+# Calibrado: Bush frontal ~1px (0.5%).
 _POSE_RMSE_FRACTION = 0.15
 _LM_L_IN = 133
 _LM_R_IN = 362
@@ -675,10 +674,6 @@ def _affine_pose(
     Total: Err si degenera o el RMSE excede la fraccion (el caller cae
     a similaridad por bbox).
     """
-    try:
-        import cv2  # type: ignore[import-not-found]  # noqa: F401
-    except ImportError as exc:
-        return Err(FitFailed(detail=MlDecode(details=f"perspective camera requires cv2: {exc}")))
     pts_result = landmark68(landmarks)
     if isinstance(pts_result, Err):
         return pts_result
@@ -744,9 +739,9 @@ def _resolve_camera(
 
 
 def _displaced_for_pose(coeffs: GnmCoeffs) -> list[tuple[float, float, float]] | None:
-    """Malla desplazada para el PnP (personalizada > generica).
+    """Malla desplazada para la camara (personalizada > generica).
 
-    None si el assemble falla: el PnP usa el template (via documentada).
+    None si el assemble falla: el ajuste usa el template (via documentada).
     Total: nunca lanza.
     """
     try:
@@ -762,7 +757,7 @@ def _displaced_for_pose(coeffs: GnmCoeffs) -> list[tuple[float, float, float]] |
         if isinstance(placed, _ErrD):
             return None
         return [tuple(map(float, p)) for p in placed.value]
-    except Exception:  # noqa: BLE001 - assemble caido: PnP usa el template
+    except Exception:  # noqa: BLE001 - assemble caido: afin usa el template
         return None
 
 

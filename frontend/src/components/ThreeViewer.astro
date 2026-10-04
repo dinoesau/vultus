@@ -38,12 +38,14 @@
 
 <script>
   import {
+    LIGHT_PROBES,
     SKIN_MATERIAL,
     STUDIO_BACKGROUND_HEX,
     STUDIO_CAMERA_FOV,
     STUDIO_CANVAS_HEIGHT,
     STUDIO_CANVAS_WIDTH,
     STUDIO_LIGHTS,
+    checkLightProbes,
     checkStudioLights,
     parseStudioBackground,
     resolveSkinColorHex,
@@ -117,6 +119,10 @@
       setStatus("visor 3D no disponible (config estudio)");
       return false;
     }
+    if (!checkLightProbes(LIGHT_PROBES).ok) {
+      setStatus("visor 3D no disponible (config estudio)");
+      return false;
+    }
     return true;
   }
 
@@ -128,6 +134,32 @@
       const dir = new THREE.DirectionalLight(light.colorHex, light.intensity);
       dir.position.set(light.position[0], light.position[1], light.position[2]);
       scene.add(dir);
+    }
+  }
+
+  // Sondas de luz estilo paper: esferas metalicas que reflejan el estudio.
+  // Entorno via RoomEnvironment (PMREM, sin HDR externo): sin el, el metal
+  // sale negro y las sondas no dicen nada.
+  async function applyProbes(
+    THREE: ThreeModule,
+    scene: import("three").Scene,
+    renderer: import("three").WebGLRenderer,
+  ): Promise<void> {
+    const { RoomEnvironment } = await import("three/examples/jsm/environments/RoomEnvironment.js");
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    pmrem.dispose();
+    for (const probe of LIGHT_PROBES) {
+      const geo = new THREE.SphereGeometry(probe.radius, 48, 32);
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        metalness: probe.metalness,
+        roughness: probe.roughness,
+      });
+      const ball = new THREE.Mesh(geo, mat);
+      ball.position.set(probe.position[0], probe.position[1], probe.position[2]);
+      ball.name = `VultusProbe-${probe.name}`;
+      scene.add(ball);
     }
   }
 
@@ -169,6 +201,7 @@
       const head = new THREE.Mesh(geo, skinMaterial(THREE));
       head.name = "VultusFaceNeutral";
       scene.add(head);
+      await applyProbes(THREE, scene, renderer);
       let frames = 0;
       const tick = () => {
         head.rotation.y += 0.01;
@@ -321,6 +354,7 @@
     applyStudio(THREE, scene);
     const camera = makeCamera(THREE);
     scene.add(gltf.scene);
+    await applyProbes(THREE, scene, renderer);
     renderer.render(scene, camera);
     let frames = 0;
     const tick = () => {

@@ -13,6 +13,8 @@ import math
 import os
 import struct
 
+import numpy as np
+from numpy.typing import NDArray
 from PIL import Image
 
 from backend.domain import (
@@ -78,6 +80,83 @@ def _candidate_flame_paths() -> list[str]:
         if c and c not in seen:
             seen.append(c)
     return seen
+
+
+# Embedding baricentrico oficial MediaPipe->FLAME (105 landmarks FLAME,
+# subconjunto dlib-68 util horneado offline a 50 filas; ver asset).
+FLAME68_NAME = "flame68_embed.npz"
+
+_embed_cache: tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.float64]] | None = None
+
+
+def _candidate_embed_paths() -> list[str]:
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [os.path.join(here, "assets", FLAME68_NAME)]
+
+
+def load_flame68_embed() -> (
+    Ok[tuple[list[int], list[tuple[int, int, int]], list[tuple[float, float, float]]]] | Err[DomainError]
+):
+    """Embedding dlib->FLAME (50 filas: dlib_idx, tri, pesos). Solo numpy.
+
+    Horneado offline del `mediapipe_landmark_embedding.npz` oficial sobre
+    `flame_template.bin` (sha d4140b7b). Total: Err si el asset falta o es
+    invalido (el caller cae a similaridad), nunca raise por expected.
+    """
+    global _embed_cache
+    if _embed_cache is not None:
+        dlib_idx, tri, w = _embed_cache
+        rows: list[int] = [int(i) for i in dlib_idx]
+        tris: list[tuple[int, int, int]] = [(int(t[0]), int(t[1]), int(t[2])) for t in tri]
+        weights: list[tuple[float, float, float]] = [(float(r[0]), float(r[1]), float(r[2])) for r in w]
+        return Ok((rows, tris, weights))
+    for cand in _candidate_embed_paths():
+        if os.path.isfile(cand):
+            try:
+                z = np.load(cand)
+                dlib_idx = np.asarray(z["dlib_idx"], dtype=np.int64)
+                tri = np.asarray(z["tri"], dtype=np.int64)
+                w = np.asarray(z["w"], dtype=np.float64)
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if dlib_idx.shape != (50,) or tri.shape != (50, 3) or w.shape != (50, 3):
+                continue
+            if tri.min() < 0 or tri.max() >= VERT_COUNT:
+                continue
+            if not bool(np.isfinite(w).all()) or not bool(np.allclose(w.sum(axis=1), 1.0)):
+                continue
+            _embed_cache = (dlib_idx, tri, w)
+            rows = [int(i) for i in dlib_idx]
+            tris = [(int(t[0]), int(t[1]), int(t[2])) for t in tri]
+            weights = [(float(r[0]), float(r[1]), float(r[2])) for r in w]
+            typed: tuple[list[int], list[tuple[int, int, int]], list[tuple[float, float, float]]] = (rows, tris, weights)
+            return Ok(typed)
+    return Err(MlFailed(detail=MlDecode(details="flame68 embed asset missing")))
+
+
+def flame68_positions(
+    positions: list[tuple[float, float, float]],
+) -> Ok[tuple[list[int], NDArray[np.float64]]] | Err[DomainError]:
+    """Posiciones 3D de los 50 landmarks dlib sobre la malla dada.
+
+    Interpola baricentrica sobre la malla desplazada (personalizada) o el
+    template. Retorna (dlib_rows, xyz 50x3). Total: Err si el asset o los
+    indices fallan.
+    """
+    loaded = load_flame68_embed()
+    if isinstance(loaded, Err):
+        return loaded
+    dlib_idx, tri, w = loaded.value
+    try:
+        pos = np.asarray(positions, dtype=np.float64)
+        if pos.shape != (VERT_COUNT, 3):
+            return Err(MlFailed(detail=MlDecode(details="flame68 mesh verts != 5023")))
+        out = np.stack(
+            [w[k][0] * pos[tri[k][0]] + w[k][1] * pos[tri[k][1]] + w[k][2] * pos[tri[k][2]] for k in range(50)]
+        )
+    except (IndexError, ValueError, TypeError) as exc:
+        return Err(MlFailed(detail=MlDecode(details=f"flame68 interp failed: {exc}")))
+    return Ok((dlib_idx, np.asarray(out, dtype=np.float64)))
 
 
 def is_flame_synthetic() -> bool:
@@ -304,10 +383,14 @@ def skin_vertex_indices() -> list[int]:
     return list(range(EYE_VERT_START))
 
 
-# Desplazamiento geometrico acotado: los coefs de identidad son O(1-9) y
-# con *0.01 generaban picos de hasta 9cm (40 por ciento del ancho de cabeza,
-# patron periodo-253). Personalizacion sana es milimetrica.
-_DISPLACE_MAX = 0.005
+# Desplazamiento real (Fase 2): la moneda fit 253 porta identidad HiFi3D++
+# (id200/exp45) y el delta se reconstruye con la base + transfer IDW en
+# unidades del template. Fail-safe absoluto 3-4x sobre el maximo
+# observado (Bush 0.048, Eckhart 0.035): la base PCA es suave por
+# construccion, los picos locales los guarda el test de suavidad, no el
+# clamp. Sin base/transfer (CI/dobles) rige el legado geometrico 5mm.
+_DISPLACE_MAX = 0.15
+_LEGACY_DISPLACE_MAX = 0.005
 
 
 def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] | Err[DomainError]:
@@ -316,10 +399,31 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
         return loaded
     positions, _, _ = loaded.value
     coeffs = fit.coeffs.as_tuple()
+    try:
+        from backend.deep3d import real_displacement as _real_delta
+    except ImportError:
+        _real_delta = None  # type: ignore[assignment]
+    delta = None
+    if _real_delta is not None:
+        try:
+            delta = _real_delta(coeffs)
+        except Exception:  # noqa: BLE001 - desplazamiento invalido: via legado
+            delta = None
+    if delta is not None and len(delta) == len(positions):
+        return Ok(
+            [
+                (
+                    x + min(max(float(dx), -_DISPLACE_MAX), _DISPLACE_MAX),
+                    y + min(max(float(dy), -_DISPLACE_MAX), _DISPLACE_MAX),
+                    z + min(max(float(dz), -_DISPLACE_MAX), _DISPLACE_MAX),
+                )
+                for (x, y, z), (dx, dy, dz) in zip(positions, [tuple(map(float, row)) for row in delta])
+            ]
+        )
     width = len(coeffs)
     return Ok(
         [
-            (x + min(max(coeffs[idx % width] * 0.01, -_DISPLACE_MAX), _DISPLACE_MAX), y, z)
+            (x + min(max(coeffs[idx % width] * 0.01, -_LEGACY_DISPLACE_MAX), _LEGACY_DISPLACE_MAX), y, z)
             for idx, (x, y, z) in enumerate(positions)
         ]
     )

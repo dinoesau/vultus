@@ -782,6 +782,9 @@ if HAVE_MODAL:
             "DEEP3D_DIR": DEEP3D_DIR,
             "TOPO_DIR": TOPO_DIR,
             "PARSING_DIR": PARSING_DIR,
+            # Determinismo x2 exigible en T4 (ver ensure_deterministic_*):
+            # cublas determinista para el ajuste texgan (Fase 5 GPU ok).
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
         },
     )(fit_worker)
 
@@ -838,6 +841,9 @@ if HAVE_MODAL:
             "DEEP3D_DIR": DEEP3D_DIR,
             "TOPO_DIR": TOPO_DIR,
             "PARSING_DIR": PARSING_DIR,
+            # Determinismo x2 exigible en T4 (ver ensure_deterministic_*):
+            # cublas determinista para el ajuste texgan (Fase 5 GPU ok).
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
         },
 
     )(texture_worker)

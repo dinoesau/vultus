@@ -64,6 +64,7 @@ from backend.domain import (
     MlFailed,
     Ok,
     RenderedImage,
+    ThreadLocalStats,
     parse_eye_texture,
     parse_rendered_image,
 )
@@ -108,7 +109,7 @@ _BRIDGE_HEAD_BYTES = 65536
 # El doble da 1.0; el real debe superar el umbral o el eval falla.
 EVIDENCE_MIN = 0.99
 
-_LAST_TEXTURE_STATS: dict[str, float] = {"evidence": 0.0, "sentinel_count": 0.0, "duration_ms": 0.0, "parsing": 0.0}
+_LAST_TEXTURE_STATS = ThreadLocalStats({"evidence": 0.0, "sentinel_count": 0.0, "duration_ms": 0.0, "parsing": 0.0})
 
 
 def _env(name: str) -> str:

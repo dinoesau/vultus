@@ -11,7 +11,7 @@ import json
 import math
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from typing import Generic, TypeAlias, TypeVar
@@ -66,6 +66,47 @@ ZIP_PBR_B = "pbr_b.png"
 
 
 ZIP_NAMES = (ZIP_UV_A, ZIP_UV_B, ZIP_MESH_A, ZIP_MESH_B, ZIP_PBR_A, ZIP_PBR_B)
+
+
+class ThreadLocalStats:
+    """Mapa str->float con un dict por hilo (misma API de lectura que dict).
+
+    Los workers Modal atienden inputs concurrentes en un contenedor: un
+    global compartido cruza valores entre jobs (parsing=1 de A leido como
+    0 tras el reset de B). Cada hilo ve sus defaults frescos; lecturas
+    con [] y .get() no cambian de forma.
+    """
+
+    def __init__(self, defaults: dict[str, float]) -> None:
+        import threading as _threading
+
+        self._defaults = dict(defaults)
+        self._local = _threading.local()
+
+    def _store(self) -> dict[str, float]:
+        store = getattr(self._local, "store", None)
+        if not isinstance(store, dict):
+            store = dict(self._defaults)
+            self._local.store = store
+        return store
+
+    def __getitem__(self, key: str) -> float:
+        return self._store()[key]
+
+    def __setitem__(self, key: str, value: float) -> None:
+        self._store()[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._store()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._store())
+
+    def __len__(self) -> int:
+        return len(self._store())
+
+    def get(self, key: str, default: float = 0.0) -> float:
+        return self._store().get(key, default)
 
 
 @dataclass(frozen=True, slots=True)

@@ -314,3 +314,35 @@ def test_rendered_eye_value_objects() -> None:
     assert isinstance(parse_rendered_image(bytes(UV_LEN - 1)), Err)
     assert isinstance(parse_eye_texture(bytes(UV_LEN)), Ok)
     assert isinstance(parse_eye_texture(bytes(UV_LEN - 1)), Err)
+
+
+def test_thread_local_stats_no_crosstalk() -> None:
+    """Workers concurrentes en un container no se pisan los stats."""
+    import threading
+
+    from backend.domain import ThreadLocalStats
+
+    stats: ThreadLocalStats = ThreadLocalStats({"parsing": 0.0})
+    assert stats["parsing"] == 0.0
+    assert stats.get("missing", 0.0) == 0.0
+    barrier = threading.Barrier(3)
+    seen: dict[str, float] = {}
+
+    def worker(name: str, value: float) -> None:
+        stats["parsing"] = value
+        barrier.wait(timeout=10.0)
+        seen[name] = stats["parsing"]
+        barrier.wait(timeout=10.0)
+
+    ta = threading.Thread(target=worker, args=("a", 1.0))
+    tb = threading.Thread(target=worker, args=("b", 2.0))
+    ta.start()
+    tb.start()
+    barrier.wait(timeout=10.0)
+    barrier.wait(timeout=10.0)
+    ta.join(timeout=10.0)
+    tb.join(timeout=10.0)
+    assert seen == {"a": 1.0, "b": 2.0}
+    assert stats["parsing"] == 0.0
+    assert len(stats) == 1
+    assert list(stats) == ["parsing"]

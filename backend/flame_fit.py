@@ -62,12 +62,13 @@ from backend.domain import (
     Landmarks,
     MlDecode,
     Ok,
+    ThreadLocalStats,
     decode_fit_request,
     parse_camera_params,
     parse_gnm_coeffs,
 )
 
-_LAST_FIT_STATS: dict[str, float] = {"iterations": 0.0, "loss": 0.0, "duration_ms": 0.0}
+_LAST_FIT_STATS = ThreadLocalStats({"iterations": 0.0, "loss": 0.0, "duration_ms": 0.0})
 
 # --- Puente DECA/FLAME: archivos canonicos (mirror de
 # scripts/modal-weights-sync.sh BRIDGE_FILES). Solo nombres, nunca rutas.

@@ -104,7 +104,7 @@ def _build_net():
     def _conv3x3(in_planes: int, out_planes: int, stride: int = 1) -> Any:
         return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
-    class _BasicBlock(nn.Module):
+    class _BasicBlock(nn.Module):  # type: ignore[misc]  # torch ausente en CI: nn.Module es Any
         def __init__(self, in_chan: int, out_chan: int, stride: int = 1):
             super().__init__()
             self.conv1 = _conv3x3(in_chan, out_chan, stride)
@@ -133,7 +133,7 @@ def _build_net():
             layers.append(_BasicBlock(out_chan, out_chan, stride=1))
         return nn.Sequential(*layers)
 
-    class _Resnet18(nn.Module):
+    class _Resnet18(nn.Module):  # type: ignore[misc]  # torch ausente en CI: nn.Module es Any
         def __init__(self) -> None:
             super().__init__()
             self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
@@ -157,7 +157,7 @@ def _build_net():
             feat32 = self.layer4(feat16)
             return feat8, feat16, feat32
 
-    class _ConvBNReLU(nn.Module):
+    class _ConvBNReLU(nn.Module):  # type: ignore[misc]  # torch ausente en CI: nn.Module es Any
         def __init__(self, in_chan: int, out_chan: int, ks: int = 3, stride: int = 1):
             super().__init__()
             self.conv = nn.Conv2d(in_chan, out_chan, kernel_size=ks, stride=stride, padding=ks // 2, bias=False)
@@ -170,7 +170,7 @@ def _build_net():
         def forward(self, x):
             return self.relu(self.bn(self.conv(x)))
 
-    class _BiSeNetOutput(nn.Module):
+    class _BiSeNetOutput(nn.Module):  # type: ignore[misc]  # torch ausente en CI: nn.Module es Any
         def __init__(self, in_chan: int, mid_chan: int, n_classes: int):
             super().__init__()
             self.conv = _ConvBNReLU(in_chan, mid_chan, ks=3, stride=1)
@@ -179,7 +179,7 @@ def _build_net():
         def forward(self, x):
             return self.conv_out(self.conv(x))
 
-    class _AttentionRefinementModule(nn.Module):
+    class _AttentionRefinementModule(nn.Module):  # type: ignore[misc]  # torch ausente en CI: nn.Module es Any
         def __init__(self, in_chan: int, out_chan: int):
             super().__init__()
             self.conv = _ConvBNReLU(in_chan, out_chan, ks=3, stride=1)
@@ -195,7 +195,7 @@ def _build_net():
             atten = self.sigmoid_atten(atten)
             return feat * atten
 
-    class _ContextPath(nn.Module):
+    class _ContextPath(nn.Module):  # type: ignore[misc]  # torch ausente en CI: nn.Module es Any
         def __init__(self) -> None:
             super().__init__()
             self.resnet = _Resnet18()
@@ -221,7 +221,7 @@ def _build_net():
             feat16_up = self.conv_head16(feat16_up)
             return feat8, feat16_up, _F.interpolate(feat32_up, (h // 8, w // 8), mode="nearest")
 
-    class _FeatureFusionModule(nn.Module):
+    class _FeatureFusionModule(nn.Module):  # type: ignore[misc]  # torch ausente en CI: nn.Module es Any
         def __init__(self, in_chan: int, out_chan: int):
             super().__init__()
             self.convblk = _ConvBNReLU(in_chan, out_chan, ks=1, stride=1)
@@ -240,7 +240,7 @@ def _build_net():
             atten = self.sigmoid(atten)
             return feat * atten + feat
 
-    class _BiSeNet(nn.Module):
+    class _BiSeNet(nn.Module):  # type: ignore[misc]  # torch ausente en CI: nn.Module es Any
         def __init__(self, n_classes: int):
             super().__init__()
             self.cp = _ContextPath()

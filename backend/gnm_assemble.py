@@ -200,6 +200,20 @@ def _synthetic_flame_template() -> tuple[
     return positions, uvs, indices
 
 
+def _upright_uv(u: float, v: float) -> tuple[float, float]:
+    """PNG crudo upright: chin abajo, brow arriba (rango piel 0-1).
+
+    El bin trae v=0 en chin (convención OBJ): sin flip la cara sale
+    invertida en el PNG. Solo rama archivo; el fixture sintético ya trae
+    v=0 arriba. Ojos (2-3, textura aparte) intactos. GLB y raster usan las
+    mismas UVs, asi que malla y atlas siguen consistentes; el flipY del
+    visor cancela igual que antes.
+    """
+    if v <= 1.0:
+        return (u, 1.0 - v)
+    return (u, v)
+
+
 def load_flame_template() -> Ok[
     tuple[
         list[tuple[float, float, float]],
@@ -243,7 +257,7 @@ def load_flame_template() -> Ok[
                             off += 8
                             if not (math.isfinite(float(u)) and math.isfinite(float(v))):
                                 return Err(MlFailed(detail=MlDecode(details="flame template uv no finita")))
-                            uvs.append((float(u), float(v)))
+                            uvs.append(_upright_uv(float(u), float(v)))
                         indices: list[tuple[int, int, int]] = []
                         for _ in range(tris):
                             a, b, c = struct.unpack_from("<III", data, off)

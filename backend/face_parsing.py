@@ -95,8 +95,8 @@ def _build_net():
     Lanza RuntimeError con causa si torch o los pesos faltan.
     """
     try:
-        import torch
-        from torch import nn  # type: ignore[import-not-found]
+        import torch  # type: ignore[import-not-found]
+        from torch import nn
     except ImportError as exc:
         raise RuntimeError(f"torch missing for face parsing: {exc}") from exc
     import torch.nn.functional as _F  # type: ignore[import-not-found]

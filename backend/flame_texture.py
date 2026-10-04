@@ -108,7 +108,7 @@ _BRIDGE_HEAD_BYTES = 65536
 # El doble da 1.0; el real debe superar el umbral o el eval falla.
 EVIDENCE_MIN = 0.99
 
-_LAST_TEXTURE_STATS: dict[str, float] = {"evidence": 0.0, "sentinel_count": 0.0, "duration_ms": 0.0}
+_LAST_TEXTURE_STATS: dict[str, float] = {"evidence": 0.0, "sentinel_count": 0.0, "duration_ms": 0.0, "parsing": 0.0}
 
 
 def _env(name: str) -> str:
@@ -553,7 +553,7 @@ def run_unwrap_texture(
                 ix = np.clip(np.rint(tex_px[..., 0]).astype(np.int64), 0, width - 1)
                 iy = np.clip(np.rint(tex_px[..., 1]).astype(np.int64), 0, height - 1)
                 skin_valid = in_photo & photo_skin[iy, ix]
-        except Exception:  # noqa: BLE001 - sin torch/pesos: unwrap sin mascara, documentado
+        except Exception:  # noqa: BLE001 - sin torch/pesos: unwrap sin mascara (ver stats parsing)
             skin_valid = in_photo
         sampled = _bilinear_sample(photo, tex_px)
         skin_mean: NDArray[np.float64] | None = None

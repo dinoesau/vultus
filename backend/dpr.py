@@ -297,12 +297,19 @@ class LightNet:
         self._net = net
         self._missing = list(missing)
         self._unexpected = list(unexpected)
+        self._device = "cpu"
 
     def missing_keys(self) -> list[str]:
         return list(self._missing)
 
     def unexpected_keys(self) -> list[str]:
         return list(self._unexpected)
+
+    def _ensure_device(self, device: Any) -> None:
+        dev = str(device)
+        if dev != self._device:
+            self._net.to(dev)
+            self._device = dev
 
     def estimate(self, L01: NDArray[np.float64]) -> NDArray[np.float64] | None:
         """Estima 9 SH grises del canal L 512 en 0-1. Total: None si falla.
@@ -317,10 +324,12 @@ class LightNet:
             if arr.shape != (DPR_INPUT_SIZE, DPR_INPUT_SIZE):
                 return None
             inner = self._net
+            dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self._ensure_device(dev)
             inner.eval()
             with torch.no_grad():
-                x = torch.from_numpy(np.ascontiguousarray(arr)).reshape(1, 1, 512, 512).to(torch.float32)
-                dummy = torch.zeros(1, DPR_SH, 1, 1)
+                x = torch.from_numpy(np.ascontiguousarray(arr)).reshape(1, 1, 512, 512).to(torch.float32).to(dev)
+                dummy = torch.zeros(1, DPR_SH, 1, 1, device=dev)
                 _img, light = inner(x, dummy, 0)
                 if light is None:
                     return None

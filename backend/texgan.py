@@ -404,6 +404,14 @@ class TexGanDecoder:
         self._net = net
         self._missing = list(missing)
         self._unexpected = list(unexpected)
+        self._device = "cpu"
+
+    def _ensure_device(self, device: Any) -> None:
+
+        dev = str(device)
+        if dev != self._device:
+            self._net.to(dev)
+            self._device = dev
 
     def missing_keys(self) -> list[str]:
         return list(self._missing)
@@ -420,6 +428,7 @@ class TexGanDecoder:
     def synth_uv_map(self, w: Any) -> Any:
         import torch  # type: ignore[import-not-found]
 
+        self._ensure_device(w.device)
         self._net.eval()
         with torch.no_grad():
             img = self._net.synthesis(w.to(torch.float32), noise_mode="const")
@@ -437,10 +446,13 @@ class TexGanDecoder:
         net = self._net
         net.eval()
         w0 = self.w_avg_batch()
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._ensure_device(dev)
+        w0 = w0.to(dev)
         w = w0.clone().detach().requires_grad_(True)
         opt = torch.optim.Adam([w], lr=lr)
-        tgt = target_01.to(torch.float32)
-        mask = valid_01.to(torch.float32)
+        tgt = target_01.to(torch.float32).to(dev)
+        mask = valid_01.to(torch.float32).to(dev)
         denom = mask.sum().clamp_min(1.0)
         for _ in range(max(1, steps)):
             opt.zero_grad(set_to_none=True)

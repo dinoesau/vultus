@@ -596,6 +596,8 @@ def _deep3d_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult | None]
             return Ok(None)
         recon = load_recon(epoch)
         tensor = torch.from_numpy(np.ascontiguousarray(crop)).permute(2, 0, 1).unsqueeze(0)
+        if torch.cuda.is_available():
+            tensor = tensor.cuda()
         with torch.no_grad():
             out = recon.forward_coeffs(tensor)
         vec = np.asarray(out.detach().cpu().numpy(), dtype=np.float64).reshape(-1)

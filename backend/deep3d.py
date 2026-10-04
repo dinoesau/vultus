@@ -290,6 +290,16 @@ class ReconNet:
         self._params = dict(params)
         self._missing = list(missing)
         self._unexpected = list(unexpected)
+        self._dev_cache: dict[str, dict[str, Any]] = {"cpu": dict(params)}
+
+    def _params_for(self, device: Any) -> dict[str, Any]:
+        dev = str(device)
+        hit = self._dev_cache.get(dev)
+        if hit is not None:
+            return hit
+        moved = {k: (v.to(dev) if hasattr(v, "to") else v) for k, v in self._params.items()}
+        self._dev_cache[dev] = moved
+        return moved
 
     def missing_keys(self) -> list[str]:
         return list(self._missing)
@@ -301,7 +311,7 @@ class ReconNet:
         import torch  # type: ignore[import-not-found]
         import torch.nn.functional as _F  # type: ignore[import-not-found]
 
-        sd = self._params
+        sd = self._params_for(x01.device)
 
         def _bn(t: Any, p: str) -> Any:
             return _F.batch_norm(

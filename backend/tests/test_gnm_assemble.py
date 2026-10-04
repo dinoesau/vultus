@@ -515,3 +515,20 @@ def test_raster_skips_backfacing_tris() -> None:
     assert int(v_idx[5, 5, 0]) >= 0
     assert int(v_idx[30, 5, 0]) == -1
     _texmod._raster_cache = None
+
+
+def test_template_uvs_v_upright_chin_down_brow_up() -> None:
+    """El PNG crudo muestra la cara upright: chin v->abajo, brow v->arriba."""
+    import numpy as _np
+
+    from backend.gnm_assemble import load_flame_template
+
+    tpl = load_flame_template()
+    assert isinstance(tpl, Ok)
+    pos, uvs, _tris = tpl.value
+    pa = _np.asarray(pos, dtype=_np.float64)
+    ua = _np.asarray(uvs, dtype=_np.float64)
+    chin = int(_np.argmin(pa[:, 1]))
+    brow = int(_np.argmax(pa[:, 1]))
+    assert float(ua[chin, 1]) > 0.9
+    assert float(ua[brow, 1]) < 0.1

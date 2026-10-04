@@ -481,10 +481,11 @@ def run_unwrap_texture(
     El atlas 512 cubre UV piel 0-1 (pixel <-> UV directo; el flip del GLB se
     cancela con flipY del visor). Cada texel cubierto por un tri de piel del
     template real se muestrea de la foto por proyeccion afine alineada a
-    bbox; ocluidas (sin tri o fuera de foto) se rellenan con piel media
-    foto-derivada + detalle condicionado a checkpoint (fingerprint con
-    texgan). Sin mascara foranea: la del layout denso 20k no corresponde al
-    atlas propio 5023 y recortaba un ovalo ajeno.
+    bbox; ocluidas (sin tri, fuera de foto o fuera de piel parsing) se
+    rellenan con piel media foto-derivada + detalle condicionado a checkpoint
+    (fingerprint con texgan). Sin parsing (sin torch o sin pth) el unwrap
+    procede sin mascara, documentado y determinista por env. Sin mascara
+    foranea del layout denso 20k: no corresponde al atlas propio 5023.
     `bake_eye_texture`, nunca en este atlas. Balance gris-world sobre
     muestras validas (DPR SH completo en worker GPU Modal). Cero sentinel
     por construccion. Total: Err loud si falta el mat, el template o la
@@ -544,6 +545,16 @@ def run_unwrap_texture(
             & (tex_px[..., 1] < float(height))
         )
         skin_valid = in_photo
+        try:
+            from backend.face_parsing import face_skin_mask as _parse_mask
+
+            photo_skin = _parse_mask(photo)
+            if photo_skin.shape == (height, width):
+                ix = np.clip(np.rint(tex_px[..., 0]).astype(np.int64), 0, width - 1)
+                iy = np.clip(np.rint(tex_px[..., 1]).astype(np.int64), 0, height - 1)
+                skin_valid = in_photo & photo_skin[iy, ix]
+        except Exception:  # noqa: BLE001 - sin torch/pesos: unwrap sin mascara, documentado
+            skin_valid = in_photo
         sampled = _bilinear_sample(photo, tex_px)
         skin_mean: NDArray[np.float64] | None = None
         if bool(skin_valid.any()):

@@ -40,6 +40,7 @@ sin FastAPI, sin logging. Entradas ya probadas, salidas probadas.
 from __future__ import annotations
 
 import hashlib
+import io
 import math
 import os
 import struct
@@ -68,7 +69,7 @@ from backend.domain import (
     parse_gnm_coeffs,
 )
 
-_LAST_FIT_STATS = ThreadLocalStats({"iterations": 0.0, "loss": 0.0, "duration_ms": 0.0})
+_LAST_FIT_STATS = ThreadLocalStats({"iterations": 0.0, "loss": 0.0, "duration_ms": 0.0, "deep3d": 0.0, "pose": 0.0})
 
 # --- Puente DECA/FLAME: archivos canonicos (mirror de
 # scripts/modal-weights-sync.sh BRIDGE_FILES). Solo nombres, nunca rutas.
@@ -89,6 +90,10 @@ DETAIL_HI = 0.02
 
 # Indices FaceMesh canonicos (validos en FaceLandmarker 478 = 468 + 10 iris).
 _LM_L_OUT = 33
+# Fraccion del lado mayor como RMSE maximo de re-proyeccion para aceptar
+# la camara afin ajustada. Sobre el umbral cae a similaridad por bbox.
+# Calibrado: Bush frontal ~1px (0.5%).
+_POSE_RMSE_FRACTION = 0.15
 _LM_L_IN = 133
 _LM_R_IN = 362
 _LM_R_OUT = 263
@@ -502,6 +507,22 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
         deep3d = deep3d_fingerprint()
         if isinstance(deep3d, Err):
             return deep3d
+        via_deep3d = _deep3d_fit(image, landmarks)
+        if isinstance(via_deep3d, Err):
+            return via_deep3d
+        if via_deep3d.value is not None:
+            loss_result = symmetry_loss(landmarks)
+            if isinstance(loss_result, Err):
+                return loss_result
+            elapsed = time.perf_counter() - start
+            if elapsed > FIT_TIMEOUT_SECS:
+                return Err(FitFailed(detail=MlDecode(details=f"real flame fit deadline exceeded: {elapsed:.2f}s")))
+            _LAST_FIT_STATS["iterations"] = 1.0
+            _LAST_FIT_STATS["loss"] = loss_result.value
+            _LAST_FIT_STATS["duration_ms"] = elapsed * 1000.0
+            _LAST_FIT_STATS["deep3d"] = 1.0
+            return Ok(via_deep3d.value)
+        _LAST_FIT_STATS["deep3d"] = 0.0
         ratios_result = identity_ratios_68(landmarks)
         if isinstance(ratios_result, Err):
             return ratios_result
@@ -516,9 +537,10 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
         coeffs = parse_gnm_coeffs([*identity, *detail])
         if isinstance(coeffs, Err):
             return Err(FitFailed(detail=MlDecode(details="real flame fit produced invalid coeffs")))
-        camera = _similarity_camera(landmarks)
-        if isinstance(camera, Err):
-            return camera
+        resolved = _resolve_camera(image, landmarks, _displaced_for_pose(coeffs.value))
+        if isinstance(resolved, Err):
+            return resolved
+        camera = resolved.value[0]
         loss_result = symmetry_loss(landmarks)
         if isinstance(loss_result, Err):
             return loss_result
@@ -528,9 +550,218 @@ def _real_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult] | Err[Do
         _LAST_FIT_STATS["iterations"] = 1.0
         _LAST_FIT_STATS["loss"] = loss_result.value
         _LAST_FIT_STATS["duration_ms"] = elapsed * 1000.0
-        return Ok(FitResult(coeffs=coeffs.value, camera=camera.value))
+        return Ok(FitResult(coeffs=coeffs.value, camera=camera))
     except Exception as exc:  # noqa: BLE001 - forward caido es FitFailed, no crash
         return Err(FitFailed(detail=MlDecode(details=f"real flame fit failed: {exc}")))
+
+
+def _deep3d_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult | None] | Err[DomainError]:
+    """Forward Deep3D-HiFi3D++ foto->1049 coefs, empaquetado a la moneda 253.
+
+    Via `backend.deep3d` (ResNet50 V1.5 + 7 cabezas, inferencia real de
+    una pasada). Total: Ok(None) si no hay backend/pesos (el caller cae
+    al frente geometrico, via documentada en stats `deep3d`); Err solo
+    si los parses de dominio fallan. Nunca lanza por inputs esperados.
+    """
+    try:
+        from backend.deep3d import (
+            deep3d_available,
+            encode_fit253,
+            face_crop224,
+            find_epoch,
+            load_recon,
+            split_coeff_vector,
+        )
+        from backend.deep3d import photo_array as _photo_array
+    except ImportError:
+        return Ok(None)
+    try:
+        if not deep3d_available():
+            return Ok(None)
+        pts_result = _landmark_array(landmarks)
+        if isinstance(pts_result, Err):
+            return pts_result
+        pts = pts_result.value
+        photo_result = _photo_array(image)
+        if isinstance(photo_result, Err):
+            return photo_result
+        crop = face_crop224(photo_result.value, pts[:, 0], pts[:, 1])
+    except Exception:  # noqa: BLE001 - crop caido: via geometrica
+        return Ok(None)
+    try:
+        import torch
+
+        epoch = find_epoch()
+        if epoch is None:
+            return Ok(None)
+        recon = load_recon(epoch)
+        tensor = torch.from_numpy(np.ascontiguousarray(crop)).permute(2, 0, 1).unsqueeze(0)
+        if torch.cuda.is_available():
+            tensor = tensor.cuda()
+        with torch.no_grad():
+            out = recon.forward_coeffs(tensor)
+        vec = np.asarray(out.detach().cpu().numpy(), dtype=np.float64).reshape(-1)
+        parts = split_coeff_vector(vec)
+        packed = encode_fit253(parts["id"], parts["exp"], parts["angle"], parts["trans"])
+        coeffs = parse_gnm_coeffs(list(packed))
+        if isinstance(coeffs, Err):
+            return coeffs
+        resolved = _resolve_camera(image, landmarks, _displaced_for_pose(coeffs.value))
+        if isinstance(resolved, Err):
+            return resolved
+        return Ok(FitResult(coeffs=coeffs.value, camera=resolved.value[0]))
+    except Exception:  # noqa: BLE001 - forward caido: via geometrica
+        return Ok(None)
+
+
+def estimate_affine_camera(
+    object_points: NDArray[np.float64], image_points: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], float]:
+    """Camara afin 2x4 por minimos cuadrados (puro numpy, sin focal supuesta).
+
+    50 correspondencias (malla personalizada <-> landmarks): 8 DOF
+    lineales, sin degeneracion planar (el DLT proyectivo colapsa con
+    caras casi planas: camara degenerada en el plano). El flip Y
+    (template Y-up, foto Y-down) vive en la matriz, no es espejo.
+    Total: ValueError si degenera. Retorna (A 2x4, rmse px).
+    """
+    obj = np.asarray(object_points, dtype=np.float64)
+    img = np.asarray(image_points, dtype=np.float64)
+    if obj.ndim != 2 or obj.shape[1] != 3 or img.ndim != 2 or img.shape[1] != 2:
+        raise ValueError("affine points invalid")
+    if obj.shape[0] < 6 or obj.shape[0] != img.shape[0]:
+        raise ValueError("affine needs >=6 point pairs")
+    if not bool(np.isfinite(obj).all() and np.isfinite(img).all()):
+        raise ValueError("affine non-finite points")
+    n = obj.shape[0]
+    a = np.concatenate([obj, np.ones((n, 1))], axis=1)
+    sol, _, rank, _ = np.linalg.lstsq(a, img, rcond=None)
+    if rank < 4:
+        raise ValueError("affine degenerate system")
+    mat = np.asarray(sol.T, dtype=np.float64)
+    if mat.shape != (2, 4) or not bool(np.isfinite(mat).all()):
+        raise ValueError("affine invalid matrix")
+    pred = a @ sol
+    rmse = float(np.sqrt(((pred - img) ** 2).mean()))
+    if not math.isfinite(rmse):
+        raise ValueError("affine non-finite rmse")
+    return mat, rmse
+
+
+def _photo_dims(image: ImageBytes) -> Ok[tuple[int, int]] | Err[DomainError]:
+    """Dimensiones de la foto sin decodificar el array. Total."""
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image.as_bytes())) as handle:
+            width, height = int(handle.width), int(handle.height)
+        if width <= 0 or height <= 0:
+            return Err(FitFailed(detail=MlDecode(details="photo dimensions invalid")))
+        return Ok((width, height))
+    except Exception as exc:  # noqa: BLE001 - foto indecodificable es Err, no crash
+        return Err(FitFailed(detail=MlDecode(details=f"photo dims failed: {exc}")))
+
+
+def _affine_pose(
+    landmarks: Landmarks,
+    width: int,
+    height: int,
+    positions: list[tuple[float, float, float]] | None = None,
+) -> Ok[NDArray[np.float64]] | Err[DomainError]:
+    """Pose afin 2x4 ajustada a 50 landmarks (Fase 3).
+
+    3D: verts de la malla desplazada (personalizada Deep3D; template
+    generico si no se da) via embedding oficial MediaPipe->FLAME;
+    2D: landmarks en pixeles. 8 DOF lineales sin degeneracion planar.
+    Total: Err si degenera o el RMSE excede la fraccion (el caller cae
+    a similaridad por bbox).
+    """
+    pts_result = landmark68(landmarks)
+    if isinstance(pts_result, Err):
+        return pts_result
+    pts68 = pts_result.value
+    if positions is None:
+        try:
+            from backend.gnm_assemble import load_flame_template
+        except ImportError as exc:
+            return Err(FitFailed(detail=MlDecode(details=f"perspective camera requires template: {exc}")))
+        loaded = load_flame_template()
+        if isinstance(loaded, Err):
+            return loaded
+        positions, _, _ = loaded.value
+    try:
+        from backend.gnm_assemble import flame68_positions
+    except ImportError as exc:
+        return Err(FitFailed(detail=MlDecode(details=f"perspective camera requires embed: {exc}")))
+    placed = flame68_positions(list(positions))
+    if isinstance(placed, Err):
+        return placed
+    dlib_rows, obj3d = placed.value
+    pts2d = np.asarray([pts68[i, :2] for i in dlib_rows], dtype=np.float64) * np.array(
+        [float(width), float(height)]
+    )
+    try:
+        aff_mat, rmse = estimate_affine_camera(
+            np.asarray(obj3d, dtype=np.float64), np.asarray(pts2d, dtype=np.float64)
+        )
+    except ValueError as exc:
+        return Err(FitFailed(detail=MlDecode(details=f"affine camera fit failed: {exc}")))
+    if not math.isfinite(rmse) or rmse > _POSE_RMSE_FRACTION * float(max(width, height)):
+        return Err(FitFailed(detail=MlDecode(details=f"affine camera rmse too high: {rmse:.3f}")))
+    return Ok(aff_mat)
+
+
+def _resolve_camera(
+    image: ImageBytes, landmarks: Landmarks, positions: list[tuple[float, float, float]] | None = None
+) -> Ok[tuple[CameraParams, float]] | Err[DomainError]:
+    """Camara con pose si converge, si no similaridad (via en el flag).
+
+    `positions`: malla desplazada personalizada para el ajuste (mas cerca
+    de la persona que el template generico); None = template. Retorna
+    (camara, 1.0 afin / 0.0 similaridad). Los 12 floats con ajuste son
+    [A 2x4 row-major (8) | reserva 0 (4)]; opacos al contrato (finitos).
+    Total.
+    """
+    dims = _photo_dims(image)
+    if not isinstance(dims, Err):
+        width, height = dims.value
+        pose = _affine_pose(landmarks, width, height, positions)
+        if not isinstance(pose, Err):
+            aff_mat = pose.value
+            flat = [float(v) for v in aff_mat.reshape(-1)] + [0.0, 0.0, 0.0, 0.0]
+            parsed = parse_camera_params(flat)
+            if not isinstance(parsed, Err):
+                _LAST_FIT_STATS["pose"] = 1.0
+                return Ok((parsed.value, 1.0))
+    camera = _similarity_camera(landmarks)
+    if isinstance(camera, Err):
+        return camera
+    _LAST_FIT_STATS["pose"] = 0.0
+    return Ok((camera.value, 0.0))
+
+
+def _displaced_for_pose(coeffs: GnmCoeffs) -> list[tuple[float, float, float]] | None:
+    """Malla desplazada para la camara (personalizada > generica).
+
+    None si el assemble falla: el ajuste usa el template (via documentada).
+    Total: nunca lanza.
+    """
+    try:
+        from backend.domain import Err as _ErrD
+        from backend.domain import FitResult as _FitResult
+        from backend.domain import parse_camera_params as _parse_cam
+        from backend.gnm_assemble import displaced_positions
+
+        cam = _parse_cam([0.0] * 12)
+        if isinstance(cam, _ErrD):
+            return None
+        placed = displaced_positions(_FitResult(coeffs=coeffs, camera=cam.value))
+        if isinstance(placed, _ErrD):
+            return None
+        out: list[tuple[float, float, float]] = [(float(p[0]), float(p[1]), float(p[2])) for p in placed.value]
+        return out
+    except Exception:  # noqa: BLE001 - assemble caido: afin usa el template
+        return None
 
 
 def _similarity_camera(landmarks: Landmarks) -> Ok[CameraParams] | Err[DomainError]:

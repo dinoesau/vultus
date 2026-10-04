@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
 import os
 import struct
 import time
@@ -109,7 +110,18 @@ _BRIDGE_HEAD_BYTES = 65536
 # El doble da 1.0; el real debe superar el umbral o el eval falla.
 EVIDENCE_MIN = 0.99
 
-_LAST_TEXTURE_STATS = ThreadLocalStats({"evidence": 0.0, "sentinel_count": 0.0, "duration_ms": 0.0, "parsing": 0.0})
+_LAST_TEXTURE_STATS = ThreadLocalStats(
+    {
+        "evidence": 0.0,
+        "sentinel_count": 0.0,
+        "duration_ms": 0.0,
+        "parsing": 0.0,
+        "texgan": 0.0,
+        "dpr": 0.0,
+        "dpr_sh0": 0.0,
+        "pose_tex": 0.0,
+    }
+)
 
 
 def _env(name: str) -> str:
@@ -423,6 +435,179 @@ def _rasterize_skin_uv(
     return v_idx, bw
 
 
+def _texgan_completion(
+    sampled_255: NDArray[np.float64], valid: NDArray[np.bool_]
+) -> NDArray[np.float64] | None:
+    """Completion neuronal texgan (Fase 1): solo texeles no validos.
+
+    Via `backend.texgan.neural_completion` (latente desde w_avg + Adam
+    enmascarado, determinista). None si no hay backend/pesos o falla:
+    el caller cae a piel media (via documentada en stats `texgan`).
+    Total: nunca lanza.
+    """
+    try:
+        from backend.texgan import neural_completion as _neural
+    except ImportError:
+        return None
+    try:
+        result = _neural(sampled_255, valid)
+    except Exception:  # noqa: BLE001 - cualquier fallo cae a piel media (via documentada en stats)
+        return None
+    if result is None:
+        return None
+    if result.shape != (TEX_SIZE, TEX_SIZE, 3):
+        return None
+    return np.clip(np.asarray(result, dtype=np.float64), 0.0, 255.0)
+
+
+def _vertex_normals(
+    positions: list[tuple[float, float, float]], tris: list[tuple[int, int, int]]
+) -> NDArray[np.float64]:
+    """Normales por vertice (promedio de caras, normalizadas). Total."""
+    pos = np.asarray(positions, dtype=np.float64)
+    acc = np.zeros_like(pos)
+    for a, b, c in tris:
+        try:
+            n = np.cross(pos[int(b)] - pos[int(a)], pos[int(c)] - pos[int(a)])
+        except IndexError:
+            continue
+        acc[int(a)] += n
+        acc[int(b)] += n
+        acc[int(c)] += n
+    norm = np.linalg.norm(acc, axis=1, keepdims=True)
+    return acc / np.maximum(norm, 1e-12)
+
+
+def _dpr_normalize(
+    photo: NDArray[np.float64],
+    sampled: NDArray[np.float64],
+    valid: NDArray[np.bool_],
+    texel_normals: NDArray[np.float64] | None,
+) -> NDArray[np.float64]:
+    """Balance DPR SH9 con tono preservado, o gray-world sin backend.
+
+    Por texel valido: `albedo = sampled * mean(shading)/shading` con
+    `shading = Y(normal).sh` (SH grises, misma escala a los 3 canales:
+    preserva croma). Escala acotada [0.5, 2.0]: el sombreado facial real
+    rara vez excede 2x; sin la cota los outliers tiran del latente texgan
+    a blancos/quemados en la completion. Fija stats `dpr` 1.0/0.0 (+`dpr_sh0`). Total: nunca
+    lanza, siempre finito.
+    """
+    try:
+        from backend.dpr import (
+            dpr_available,
+            estimate_sh,
+            find_t7,
+            load_light_net,
+            sh_basis,
+        )
+    except ImportError:
+        return _gray_world(sampled, valid)
+    try:
+        if not dpr_available() or texel_normals is None:
+            _LAST_TEXTURE_STATS["dpr"] = 0.0
+            return _gray_world(sampled, valid)
+        from PIL import Image
+
+        small = Image.fromarray(np.clip(photo, 0.0, 255.0).astype(np.uint8)).resize(
+            (512, 512), Image.Resampling.BILINEAR
+        )
+        lab = small.convert("LAB")
+        lum = np.asarray(lab, dtype=np.float64)[:, :, 0] / 255.0
+        t7 = find_t7()
+        if t7 is None:
+            _LAST_TEXTURE_STATS["dpr"] = 0.0
+            return _gray_world(sampled, valid)
+        sh = estimate_sh(load_light_net(t7), lum)
+        if sh is None or not bool(np.isfinite(sh).all()):
+            _LAST_TEXTURE_STATS["dpr"] = 0.0
+            return _gray_world(sampled, valid)
+        shading = (sh_basis(texel_normals) * sh[None, None, :]).sum(axis=-1)
+        if not bool(np.isfinite(shading).all()):
+            _LAST_TEXTURE_STATS["dpr"] = 0.0
+            return _gray_world(sampled, valid)
+        ref = float(np.mean(shading[valid])) if bool(valid.any()) else 0.0
+        if not math.isfinite(ref) or ref < 1e-6:
+            _LAST_TEXTURE_STATS["dpr"] = 0.0
+            return _gray_world(sampled, valid)
+        scale = np.clip(ref / np.maximum(shading, 1e-6), 0.5, 2.0)
+        _LAST_TEXTURE_STATS["dpr"] = 1.0
+        _LAST_TEXTURE_STATS["dpr_sh0"] = float(sh[0])
+        return sampled * scale[..., None]
+    except Exception:  # noqa: BLE001 - luz caida: gray-world documentado
+        _LAST_TEXTURE_STATS["dpr"] = 0.0
+        return _gray_world(sampled, valid)
+
+
+def _gray_world(sampled: NDArray[np.float64], valid: NDArray[np.bool_]) -> NDArray[np.float64]:
+    """Balance gris clasico sobre muestras validas (fallback de DPR)."""
+    if not bool(valid.any()):
+        return sampled
+    means = sampled[valid].mean(axis=0)
+    gray = float(means.mean())
+    if gray > 1e-9 and bool(np.all(means > 1e-9)):
+        return sampled * (gray / np.maximum(means, 1e-9))[None, None, :]
+    return sampled
+
+
+def _texture_pose(
+    landmarks: Landmarks,
+    width: int,
+    height: int,
+    positions: list[tuple[float, float, float]] | None = None,
+) -> NDArray[np.float64] | None:
+    """Camara afin 2x4 para el unwrap (hermetica: re-deriva, sin cross-proceso).
+
+    Retorna A 2x4 o None si degenera: el caller cae a afin por bbox (via
+    documentada en stats pose_tex). Total: nunca lanza.
+    """
+    try:
+        from backend.domain import Err as _ErrP
+        from backend.flame_fit import _affine_pose
+
+        pose = _affine_pose(landmarks, width, height, positions)
+        if isinstance(pose, _ErrP):
+            return None
+        return np.asarray(pose.value, dtype=np.float64).reshape(2, 4)
+    except Exception:  # noqa: BLE001 - pose invalida: via afin por bbox
+        return None
+
+
+def _project_pose(
+    dpa: NDArray[np.float64],
+    aff_mat: NDArray[np.float64],
+    width: int,
+    height: int,
+) -> NDArray[np.float64] | None:
+    """Proyecta verts con la camara afin 2x4. Total: nunca lanza."""
+    try:
+        pts = np.asarray(dpa, dtype=np.float64)
+        amat = np.asarray(aff_mat, dtype=np.float64).reshape(2, 4)
+        if pts.ndim != 2 or pts.shape[1] != 3 or not bool(np.isfinite(amat).all()):
+            return None
+        n = pts.shape[0]
+        out = (amat @ np.concatenate([pts, np.ones((n, 1))], axis=1).T).T
+        if not bool(np.isfinite(out).all()):
+            return None
+        return np.asarray(out, dtype=np.float64)
+    except Exception:  # noqa: BLE001 - proyeccion degenerada: via afin por bbox
+        return None
+
+
+def _texel_normals(
+    vert_normals: NDArray[np.float64], v_idx: NDArray[np.int64], bw: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Normales por texel interpoladas con los mismos baricentricos."""
+    idx = np.where(v_idx >= 0, v_idx, 0)
+    n = (
+        bw[..., 0:1] * vert_normals[idx[..., 0]]
+        + bw[..., 1:2] * vert_normals[idx[..., 1]]
+        + bw[..., 2:3] * vert_normals[idx[..., 2]]
+    )
+    norm = np.linalg.norm(n, axis=-1, keepdims=True)
+    return n / np.maximum(norm, 1e-12)
+
+
 def _bilinear_sample(photo: NDArray[np.float64], px: NDArray[np.float64]) -> NDArray[np.float64]:
     """Muestreo bilineal vectorizado. photo HxWx3, px (..., 2) en pixeles x,y."""
     height, width = int(photo.shape[0]), int(photo.shape[1])
@@ -522,16 +707,27 @@ def run_unwrap_texture(
         if isinstance(displaced, Err):
             return displaced
         dpa = np.asarray(displaced.value, dtype=np.float64)
-        facing: list[bool] = []
+        moved: list[tuple[float, float, float]] = [
+            (float(p[0]), float(p[1]), float(p[2])) for p in displaced.value
+        ]
+        aff = _texture_pose(landmarks, width, height, moved)
+        vert_px: NDArray[np.float64] | None = None
+        if aff is not None:
+            vert_px = _project_pose(dpa, aff, width, height)
+        if vert_px is None:
+            aff = None
+            proj_result = _project_verts_to_pixels(displaced.value, width, height, xs, ys)
+            if isinstance(proj_result, Err):
+                return proj_result
+            vert_px = proj_result.value
+        _LAST_TEXTURE_STATS["pose_tex"] = 1.0 if aff is not None else 0.0
+        vert_normals = _vertex_normals(displaced.value, template_tris)
+        facing = []
         for ta, tb, tc in template_tris:
             n = np.cross(dpa[tb] - dpa[ta], dpa[tc] - dpa[ta])
             facing.append(bool(n[2] > 0.0))
         v_idx, bw = _rasterize_skin_uv(list(template_uvs), list(template_tris), facing)
         covered = v_idx[..., 0] >= 0
-        proj_result = _project_verts_to_pixels(displaced.value, width, height, xs, ys)
-        if isinstance(proj_result, Err):
-            return proj_result
-        vert_px = proj_result.value
         safe_idx = np.where(covered[..., None], v_idx, 0)
         tex_px = (
             bw[..., 0:1] * vert_px[safe_idx[..., 0]]
@@ -559,31 +755,36 @@ def run_unwrap_texture(
         except Exception:  # noqa: BLE001 - sin torch/pesos: unwrap sin mascara (ver stats parsing)
             skin_valid = in_photo
         sampled = _bilinear_sample(photo, tex_px)
+        tex_normals = _texel_normals(vert_normals, v_idx, bw)
+        sampled = _dpr_normalize(photo, sampled, skin_valid, tex_normals)
         skin_mean: NDArray[np.float64] | None = None
         if bool(skin_valid.any()):
             means = sampled[skin_valid].mean(axis=0)
             skin_mean = np.array(means, dtype=np.float64)
-            gray = float(means.mean())
-            if gray > 1e-9 and bool(np.all(means > 1e-9)):
-                sampled = sampled * (gray / np.maximum(means, 1e-9))[None, None, :]
-        fingerprint = _texture_fingerprint()
-        if isinstance(fingerprint, Err):
-            return fingerprint
-        ratios_result = identity_ratios(landmarks)
-        if isinstance(ratios_result, Err):
-            return ratios_result
-        quantized = struct.pack(f"<{len(ratios_result.value)}f", *(round(r, 2) for r in ratios_result.value))
-        fit_quant = struct.pack("<253f", *(round(c, 1) for c in fit.coeffs.as_tuple()))
-        seed = hashlib.sha256(REAL_TEXTURE_SALT + fingerprint.value + quantized + fit_quant).digest()
-        detail = _identity_detail(seed)
-        if skin_mean is not None:
-            completion = np.clip(skin_mean[None, None, :] + detail, 0.0, 255.0)
+        sampled_u8 = np.clip(sampled, 0.0, 255.0)
+        completion = _texgan_completion(sampled_u8, skin_valid)
+        if completion is not None:
+            _LAST_TEXTURE_STATS["texgan"] = 1.0
         else:
-            crop_result = _face_crop(photo, landmarks)
-            if isinstance(crop_result, Err):
-                return crop_result
-            completion = np.clip(_photo_base(crop_result.value) + detail, 0.0, 255.0)
-        out = np.where(skin_valid[..., None], np.clip(sampled, 0.0, 255.0), completion)
+            _LAST_TEXTURE_STATS["texgan"] = 0.0
+            fingerprint = _texture_fingerprint()
+            if isinstance(fingerprint, Err):
+                return fingerprint
+            ratios_result = identity_ratios(landmarks)
+            if isinstance(ratios_result, Err):
+                return ratios_result
+            quantized = struct.pack(f"<{len(ratios_result.value)}f", *(round(r, 2) for r in ratios_result.value))
+            fit_quant = struct.pack("<253f", *(round(c, 1) for c in fit.coeffs.as_tuple()))
+            seed = hashlib.sha256(REAL_TEXTURE_SALT + fingerprint.value + quantized + fit_quant).digest()
+            detail = _identity_detail(seed)
+            if skin_mean is not None:
+                completion = np.clip(skin_mean[None, None, :] + detail, 0.0, 255.0)
+            else:
+                crop_result = _face_crop(photo, landmarks)
+                if isinstance(crop_result, Err):
+                    return crop_result
+                completion = np.clip(_photo_base(crop_result.value) + detail, 0.0, 255.0)
+        out = np.where(skin_valid[..., None], sampled_u8, completion)
         raw = np.rint(out).astype(np.uint8).tobytes()
         scrubbed = _scrub_sentinel(raw)
         parsed = parse_rendered_image(scrubbed)

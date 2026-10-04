@@ -40,6 +40,25 @@ export const SKIN_MATERIAL = {
   metalness: 0,
 } as const;
 
+export type LightProbeName = "chrome" | "graphite";
+
+export interface LightProbe {
+  readonly name: LightProbeName;
+  readonly metalness: number;
+  readonly roughness: number;
+  readonly radius: number;
+  readonly position: readonly [number, number, number];
+}
+
+// Sondas de luz estilo paper FFHQ-UV: esferas que reflejan el estudio
+// junto al busto (son del visor, nunca del zip). Cromo espejo a la
+// derecha, grafito satinado a la izquierda; el entorno (RoomEnvironment)
+// lo monta el shell Astro, aqui solo datos + validacion.
+export const LIGHT_PROBES: readonly LightProbe[] = [
+  { name: "chrome", metalness: 1, roughness: 0.06, radius: 0.18, position: [1.55, -0.45, 0.4] },
+  { name: "graphite", metalness: 0.9, roughness: 0.35, radius: 0.14, position: [-1.65, -0.55, 0.2] },
+] as const;
+
 // Blanco sin tinte cuando hay mapa: el albedo manda, el color no multiplica.
 export const PBR_MAP_TINT_FREE_HEX = 0xffffff as const;
 
@@ -52,7 +71,10 @@ export type StudioConfigError =
   | { readonly kind: "InvalidBackground" }
   | { readonly kind: "InvalidLightCount"; readonly received: number }
   | { readonly kind: "InvalidIntensity"; readonly light: StudioLightKind }
-  | { readonly kind: "InvalidPosition"; readonly light: StudioLightKind };
+  | { readonly kind: "InvalidPosition"; readonly light: StudioLightKind }
+  | { readonly kind: "InvalidProbeCount"; readonly received: number }
+  | { readonly kind: "InvalidProbeMetal"; readonly probe: LightProbeName }
+  | { readonly kind: "InvalidProbeShape"; readonly probe: LightProbeName };
 
 function assertNever(value: never, message = "Unhandled case"): never {
   throw new Error(`${message}: ${JSON.stringify(value)}`);
@@ -132,6 +154,39 @@ export function viewerStatusMessage(status: ViewerFaceStatus): string {
   }
 }
 
+/** Chequeo total del duo de sondas: nombres, metal y forma sanos. */
+export function checkLightProbes(
+  probes: readonly LightProbe[],
+): Result<readonly LightProbe[], StudioConfigError> {
+  if (probes.length !== 2) {
+    return { ok: false, error: { kind: "InvalidProbeCount", received: probes.length } };
+  }
+  if (probes[0]?.name !== "chrome" || probes[1]?.name !== "graphite") {
+    return { ok: false, error: { kind: "InvalidProbeCount", received: probes.length } };
+  }
+  for (const probe of probes) {
+    if (!Number.isFinite(probe.metalness) || probe.metalness <= 0 || probe.metalness > 1) {
+      return { ok: false, error: { kind: "InvalidProbeMetal", probe: probe.name } };
+    }
+    if (
+      !Number.isFinite(probe.roughness) ||
+      probe.roughness <= 0 ||
+      probe.roughness >= 1 ||
+      !Number.isFinite(probe.radius) ||
+      probe.radius <= 0 ||
+      probe.position.length !== 3
+    ) {
+      return { ok: false, error: { kind: "InvalidProbeShape", probe: probe.name } };
+    }
+    for (const axis of probe.position) {
+      if (!Number.isFinite(axis)) {
+        return { ok: false, error: { kind: "InvalidProbeShape", probe: probe.name } };
+      }
+    }
+  }
+  return { ok: true, value: probes };
+}
+
 export function studioConfigMessage(error: StudioConfigError): string {
   switch (error.kind) {
     case "InvalidBackground":
@@ -142,6 +197,12 @@ export function studioConfigMessage(error: StudioConfigError): string {
       return `luz ${error.light} con intensidad fuera de rango`;
     case "InvalidPosition":
       return `luz ${error.light} con posicion invalida (eje no finito)`;
+    case "InvalidProbeCount":
+      return `sondas incompletas: se esperaban cromo + grafito, llegaron ${error.received}`;
+    case "InvalidProbeMetal":
+      return `sonda ${error.probe} sin metal (metalness fuera de (0,1])`;
+    case "InvalidProbeShape":
+      return `sonda ${error.probe} con forma invalida (rugosidad/radio/posicion)`;
     default:
       return assertNever(error);
   }

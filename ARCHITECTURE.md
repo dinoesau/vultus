@@ -260,6 +260,23 @@ Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
 - `VersionMismatch` es variante frozen con mapeo exhaustivo para codec versionado (Wave 2).
 - Borrado seguro posterior: puente nuevo, cutover de código, y solo entonces borrado de pesos GNM del Volume, nunca antes.
 
+### ADR-009 Quedarse en FLAME 5023 (densa HiFi3D++ evaluada y rechazada este ciclo)
+
+**Decisión (issue 94 Fase 4):** la malla del contrato sigue siendo FLAME 5023/9976 personalizada. La malla densa HiFi3D++ (20481/40832) se evaluó con el mismo fit Bush en ambas topologías (renders comparativos efímeros fuera del repo): la densa captura más detalle geométrico (nariz, labios, orejas), pero se rechaza este ciclo.
+
+**Contexto:** la densa es la salida directa de Deep3D (`reconstruct_dense` en `backend/deep3d.py`, verificada: 20481v/40832f, determinista) sin pérdida de transferencia. La personalización FLAME ya converge en identidad (margen misma<distinta en verde) y el desplazamiento es milimétrico real, no template genérico.
+
+**Por qué no densa ahora:**
+- Rompe el contrato 5023 en `edge/contract.ts`, zip-6, visor, extractor, Volume, tests y `BRIDGE_FILES`: migración mayor (versión de contrato + migración de `flame_template.bin` + visor nuevo) sin beneficio forense proporcional (el comparador vive de distancia de coefs + albedo, ambos verdes en FLAME).
+- HiFi3D++ no trae globos oculares: el contrato exige la primitiva `EyePBR` con textura real (ya cableada en FLAME); la densa pediría el port de `Mesh_Add_EyeBall` upstream.
+- El unwrap 512 y el raster están construidos sobre las UVs FLAME (`FLAME_w_HIFI3D_UV.obj`); la densa exigiría su propio unwrap 1024 + parsing de cuello/cuero cabelludo (pelo) que hoy no existe.
+- GLB 4x más pesado dentro del mismo TTL 60 sin ganancia de evidencia (la evidencia es del albedo, no de la densidad).
+
+**Consecuencias:**
+- `reconstruct_dense` queda como herramienta de decisión/evaluación, nunca en el path productivo.
+- Si un futuro ciclo quiere la densa, este ADR se revoca con migración por seams (tests de contrato primero, versión mayor).
+- Renders comparativos del mismo job Bush en ambas topologías: evidencia efímera de la decisión (no se commitean: derivan de foto LFW).
+
 ## 7. Data Flow
 
 Imagen entra como `bytes` y nunca toca disco persistente más allá de `tmpfs`/`R2 60s`.

@@ -416,6 +416,9 @@ def load_hifi_basis() -> dict[str, NDArray[np.float64]] | None:
             "mean": mean,
             "id200": idb[:, :FIT_ID],
             "exp45": exb[:, :FIT_EXP],
+            "id_full": np.asarray(m["idBase"], dtype=np.float32),
+            "ex_full": np.asarray(m["exBase"], dtype=np.float32),
+            "head_tri": np.asarray(m["head_tri"], dtype=np.int64),
         }
     except Exception:  # noqa: BLE001 - sin scipy/mat: via legado geometrico
         return None
@@ -448,6 +451,36 @@ def load_transfer() -> dict[str, NDArray[np.float64]] | None:
         return None
     _transfer_cache[path] = out
     return out
+
+
+def reconstruct_dense(
+    id_coeffs: NDArray[np.float64], exp_coeffs: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+    """Reconstruye la malla densa HiFi3D++ (20481v) con la base del .mat.
+
+    `id_shape = mean + idBase@id`, `exp_shape = id + exBase@exp`
+    (espejo de `ParametricFaceModel.compute_shape`). Solo para la
+    decision de topologia (Fase 4): el contrato sirve FLAME 5023.
+    None sin base o ante cualquier fallo. Solo numpy.
+    """
+    try:
+        basis = load_hifi_basis()
+        if basis is None or "id_full" not in basis:
+            return None
+        idv = np.asarray(id_coeffs, dtype=np.float32).reshape(-1)
+        exv = np.asarray(exp_coeffs, dtype=np.float32).reshape(-1)
+        if idv.shape[0] != DEEP3D_ID or exv.shape[0] != DEEP3D_EXP:
+            return None
+        mean32 = np.asarray(basis["mean"], dtype=np.float32)
+        id_shape = (mean32 + (basis["id_full"] @ idv).reshape(-1, 3)).reshape(-1, 3)
+        exp_shape = (id_shape + (basis["ex_full"] @ exv).reshape(-1, 3)).reshape(-1, 3)
+        if id_shape.shape != (20481, 3) or exp_shape.shape != (20481, 3):
+            return None
+        if not bool(np.isfinite(id_shape).all() and np.isfinite(exp_shape).all()):
+            return None
+        return (np.asarray(id_shape, dtype=np.float64), np.asarray(exp_shape, dtype=np.float64))
+    except Exception:  # noqa: BLE001 - base invalida: sin malla densa
+        return None
 
 
 def real_displacement(coeffs253: tuple[float, ...]) -> NDArray[np.float64] | None:

@@ -147,6 +147,46 @@ def test_deep3d_forward_deterministic_and_personalizes(monkeypatch: pytest.Monke
     assert len(fa) == 253 and len(fb) == 253
 
 
+def test_deep3d_dense_reconstruction_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate Fase 4: la malla densa HiFi3D++ existe y es determinista.
+
+    20481 verts + head_tri 40832 del .mat, finita, x2 identica. Solo
+    para la decision de topologia (el contrato sirve FLAME 5023).
+    Gateado a torch/mat (local/Modal), CI lo salta.
+    """
+    epoch = _require_real(monkeypatch)
+    if epoch is None:
+        pytest.skip("sin epoch_latest.pth/mat local (CI)")
+    import torch
+
+    from backend.deep3d import (
+        load_hifi_basis,
+        load_recon,
+        reconstruct_dense,
+        split_coeff_vector,
+    )
+
+    mirror = "/Users/esau.martinez/code/weights"
+    monkeypatch.setenv("TOPO_DIR", f"{mirror}/ffhq-uv-hf/topo_assets")
+    recon = load_recon(epoch)
+    rng = np.random.RandomState(7)
+    face = (rng.rand(224, 224, 3) * 0.5 + 0.25).astype(np.float32)
+    x = torch.from_numpy(face).permute(2, 0, 1).unsqueeze(0)
+    vec = recon.forward_coeffs(x).numpy().reshape(-1)
+    parts = split_coeff_vector(vec)
+    first = reconstruct_dense(parts["id"], parts["exp"])
+    second = reconstruct_dense(parts["id"], parts["exp"])
+    assert first is not None and second is not None
+    id_shape, exp_shape = first
+    assert id_shape.shape == (20481, 3) and exp_shape.shape == (20481, 3)
+    assert bool(np.isfinite(id_shape).all() and np.isfinite(exp_shape).all())
+    np.testing.assert_array_equal(id_shape, second[0])
+    np.testing.assert_array_equal(exp_shape, second[1])
+    basis = load_hifi_basis()
+    assert basis is not None
+    assert basis["head_tri"].shape == (40832, 3)
+
+
 def _lfw_bridge(monkeypatch: pytest.MonkeyPatch) -> dict[str, str] | None:
     mirror = "/Users/esau.martinez/code/weights"
     repo_weights = "/Users/esau.martinez/Code/vultus/weights"

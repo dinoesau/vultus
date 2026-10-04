@@ -13,6 +13,7 @@ import re
 from backend.flame_fit import DECA_TAR_NAME, FLAME_PKL_NAMES
 from backend.flame_texture import (
     EYE_MAP_NAME,
+    MEAN_FACE_NAME,
     TEXGAN_NAME,
     UNWRAP_MAT_NAME,
     UV_OBJ_NAME,
@@ -32,6 +33,7 @@ EXPECTED_BRIDGE_FILES = frozenset(
         "checkpoints/texgan_model/texgan_ffhq_uv.pth",
         "checkpoints/deep3d_model/epoch_latest.pth",
         "topo_assets/unwrap_1024_info.mat",
+        "topo_assets/hifi3dpp_mean_face.obj",
     }
 )
 EXPECTED_FLAME_PKL_ALTS = frozenset(
@@ -63,4 +65,5 @@ def test_bridge_parity_with_python_consts() -> None:
     assert f"ffhq-uv/{EYE_MAP_NAME}" in bridge
     assert f"checkpoints/texgan_model/{TEXGAN_NAME}" in bridge
     assert f"topo_assets/{UNWRAP_MAT_NAME}" in bridge
+    assert f"topo_assets/{MEAN_FACE_NAME}" in bridge
     assert frozenset(alts) == frozenset(f"flame/{name}" for name in FLAME_PKL_NAMES)

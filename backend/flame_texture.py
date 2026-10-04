@@ -135,7 +135,7 @@ def _texgan_candidate_dirs() -> list[str]:
     for d in (texgan_dir(), ffhq_uv_dir()):
         if d and d not in cands:
             cands.append(d)
-    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR") or "/weights"
     if root:
         fallback = os.path.join(root, "checkpoints", "texgan_model")
         if fallback not in cands:
@@ -148,7 +148,7 @@ def _topo_candidate_dirs() -> list[str]:
     for d in (topo_dir(), ffhq_uv_dir()):
         if d and d not in cands:
             cands.append(d)
-    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR")
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR") or "/weights"
     if root:
         fallback = os.path.join(root, "topo_assets")
         if fallback not in cands:

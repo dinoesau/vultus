@@ -97,6 +97,23 @@ DEEP3D_DIR = _env("DEEP3D_DIR", os.path.join(WEIGHTS_ROOT, "checkpoints", "deep3
 TOPO_DIR = _env("TOPO_DIR", os.path.join(WEIGHTS_ROOT, "topo_assets")) or os.path.join(
     WEIGHTS_ROOT, "topo_assets"
 )
+PARSING_DIR = _env("PARSING_DIR", os.path.join(WEIGHTS_ROOT, "checkpoints", "parsing_model")) or os.path.join(
+    WEIGHTS_ROOT, "checkpoints", "parsing_model"
+)
+# Env del consumer CPU (ensambla GLB en _run_job_from_r2): puente completo
+# explicito mas VULTUS_REAL_ML=1. Sin esto el assemble cae al fixture
+# sintetico silencioso en prod (waiver local) en vez de fallar loud.
+CONSUMER_ENV = {
+    "GNM_ASSETS_DIR": GNM_ASSETS_DIR,
+    "VULTUS_REAL_ML": "1",
+    "FFHQ_UV_DIR": FFHQ_UV_DIR,
+    "DECA_DIR": DECA_DIR,
+    "FLAME_ASSETS_DIR": FLAME_ASSETS_DIR,
+    "TEXGAN_DIR": TEXGAN_DIR,
+    "DEEP3D_DIR": DEEP3D_DIR,
+    "TOPO_DIR": TOPO_DIR,
+    "PARSING_DIR": PARSING_DIR,
+}
 # Nombre del Volume (Factor III: config por env, ver .env.example).
 MODAL_VOLUME_NAME = _env("MODAL_VOLUME", "vultus-weights") or "vultus-weights"
 # VULTUS_REAL_ML: 1 fuerza real, 0 fuerza dobles, auto decide por pesos+deps.
@@ -684,7 +701,19 @@ def texture_infer(
     if isinstance(result, _ErrTI):
         logger.info("texture err job=%s duration_ms=%d", job_id, dt)
         return result
-    logger.info("texture ok job=%s out_len=%d duration_ms=%d", job_id, len(result.value), dt)
+    try:
+        from backend.flame_texture import _LAST_TEXTURE_STATS as _tex_stats
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from flame_texture import (
+            _LAST_TEXTURE_STATS as _tex_stats,  # type: ignore[no-redef]
+        )
+    logger.info(
+        "texture ok job=%s out_len=%d duration_ms=%d parsing=%.0f",
+        job_id,
+        len(result.value),
+        dt,
+        float(_tex_stats.get("parsing", 0.0)),
+    )
     return result
 
 
@@ -752,6 +781,7 @@ if HAVE_MODAL:
             "TEXGAN_DIR": TEXGAN_DIR,
             "DEEP3D_DIR": DEEP3D_DIR,
             "TOPO_DIR": TOPO_DIR,
+            "PARSING_DIR": PARSING_DIR,
         },
     )(fit_worker)
 
@@ -807,6 +837,7 @@ if HAVE_MODAL:
             "TEXGAN_DIR": TEXGAN_DIR,
             "DEEP3D_DIR": DEEP3D_DIR,
             "TOPO_DIR": TOPO_DIR,
+            "PARSING_DIR": PARSING_DIR,
         },
 
     )(texture_worker)
@@ -1090,6 +1121,17 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
 
     t_assemble = time.perf_counter()
     try:
+        try:
+            from backend.gnm_assemble import is_flame_synthetic as _is_synth
+        except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+            from gnm_assemble import (
+                is_flame_synthetic as _is_synth,  # type: ignore[no-redef]
+            )
+        _synthetic_tpl = bool(_is_synth())
+    except Exception:
+        _synthetic_tpl = True
+    logger.info("template synthetic=%s job=%s", _synthetic_tpl, job_id)
+    try:
         from backend.flame_texture import bake_eye_texture as _bake_eye_modal
 
         _eye_modal_res = _bake_eye_modal()
@@ -1234,10 +1276,10 @@ if HAVE_MODAL:
             modal.Secret.from_name("vultus-cloudflare"),
             modal.Secret.from_name("vultus-queues-token"),
         ],
-        # Cableado explicito: `gnm` resuelve assets en `GNM_ASSETS_DIR`.
-        # Sin esto cae al `assets/` del repo, que no existe en la imagen
-        # (solo viajan .py) y el bake muere con `gnm asset missing` en prod.
-        env={"GNM_ASSETS_DIR": GNM_ASSETS_DIR},
+        # Cableado explicito: puente completo (ver CONSUMER_ENV). Sin esto el
+        # assemble cae al fixture sintetico silencioso en prod (solo .py viaja
+        # en la imagen y el waiver local no falla loud sin VULTUS_REAL_ML=1).
+        env=dict(CONSUMER_ENV),
         schedule=modal.Period(seconds=5),
     )(queue_pull_consumer)
 

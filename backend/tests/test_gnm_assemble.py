@@ -594,3 +594,50 @@ def test_glb_embeds_real_eye_texture_not_fallback(monkeypatch) -> None:
     glb = built.value.as_bytes()
     assert glb[:4] == b"glTF"
     assert eye_png in glb
+
+
+def test_glb_has_smooth_vertex_normals() -> None:
+    """Slice normales RED: GLB con NORMAL suave promediada por vertice.
+
+    Ambas primitivas declaran NORMAL, bufferView/accessor propios con
+    padding a 4, normales finitas unitarias y deterministas x2.
+    Sin NORMAL el visor cae a sombreado plano facetado.
+    """
+    import math as _math
+
+    out = build_personalized_glb(_fit(0.1), _albedo(0xA1))
+    assert isinstance(out, Ok)
+    data = out.value.as_bytes()
+    json_len = struct.unpack("<I", data[12:16])[0]
+    doc = json.loads(data[20 : 20 + json_len].decode("utf-8"))
+    prims = doc["meshes"][0]["primitives"]
+    assert len(prims) == 2
+    for prim in prims:
+        assert "NORMAL" in prim["attributes"]
+        assert "POSITION" in prim["attributes"]
+        assert "TEXCOORD_0" in prim["attributes"]
+    views = doc["bufferViews"]
+    accessors = doc["accessors"]
+    normal_accessor_idx = prims[0]["attributes"]["NORMAL"]
+    normal_accessor = accessors[normal_accessor_idx]
+    assert normal_accessor["type"] == "VEC3"
+    assert normal_accessor["componentType"] == 5126
+    assert normal_accessor["count"] == VERT_COUNT
+    normal_view = views[normal_accessor["bufferView"]]
+    assert normal_view["byteOffset"] % 4 == 0
+    assert normal_view["byteLength"] == VERT_COUNT * 3 * 4
+    for view in views:
+        assert view["byteOffset"] % 4 == 0
+    bin_start = 20 + json_len + 8
+    bin_buf = data[bin_start:]
+    off = normal_view["byteOffset"]
+    count = normal_accessor["count"]
+    normals = struct.unpack(f"<{count * 3}f", bin_buf[off : off + count * 12])
+    for i in range(count):
+        x, y, z = normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]
+        assert _math.isfinite(x) and _math.isfinite(y) and _math.isfinite(z)
+        n = _math.sqrt(x * x + y * y + z * z)
+        assert abs(n - 1.0) < 1e-3, f"normal no unitaria idx={i} n={n}"
+    second = build_personalized_glb(_fit(0.1), _albedo(0xA1))
+    assert isinstance(second, Ok)
+    assert second.value.as_bytes() == data

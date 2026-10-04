@@ -31,6 +31,7 @@ from backend.domain import (
     MlFailed,
     Ok,
     RenderedImage,
+    ThreadLocalStats,
     parse_gnm_mesh,
 )
 
@@ -90,8 +91,20 @@ _embed_cache: tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.float64]] |
 
 
 def _candidate_embed_paths() -> list[str]:
+    cands: list[str] = []
+    direct = flame_assets_dir()
+    if direct:
+        cands.append(os.path.join(direct, FLAME68_NAME))
+    weights_dir = _env("WEIGHTS_DIR") or _env("WEIGHTS_ROOT") or "/weights"
+    if weights_dir:
+        cands.append(os.path.join(weights_dir, "flame", FLAME68_NAME))
     here = os.path.dirname(os.path.abspath(__file__))
-    return [os.path.join(here, "assets", FLAME68_NAME)]
+    cands.append(os.path.join(here, "assets", FLAME68_NAME))
+    seen: list[str] = []
+    for c in cands:
+        if c and c not in seen:
+            seen.append(c)
+    return seen
 
 
 def load_flame68_embed() -> (
@@ -388,9 +401,42 @@ def skin_vertex_indices() -> list[int]:
 # unidades del template. Fail-safe absoluto 3-4x sobre el maximo
 # observado (Bush 0.048, Eckhart 0.035): la base PCA es suave por
 # construccion, los picos locales los guarda el test de suavidad, no el
-# clamp. Sin base/transfer (CI/dobles) rige el legado geometrico 5mm.
+# clamp. Sin base/transfer (CI/dobles) rige el legado uniforme 5mm:
+# offset constante = media(coeffs)*0.01 acotada, peak 0 por construccion.
+# El hash por indice con clamp quedo prohibido como unico control: no
+# garantiza suavidad visual.
 _DISPLACE_MAX = 0.15
 _LEGACY_DISPLACE_MAX = 0.005
+
+_LAST_DISPLACE_STATS = ThreadLocalStats({"real": 0.0, "legacy": 0.0})
+
+# Boundary del cuello: abierto por diseno (ADR-009 vigente: sin hombros).
+# El template FLAME trae el cuello abierto; cerrarlo o poner falda cambia
+# la topologia y rompe VERT_COUNT 5023 + zip-6 + visor. Se deja abierto:
+# la costura se disimula con textura y NORMAL suave, no con geometria.
+NECK_BOUNDARY_MODE = "open"
+
+
+def neck_boundary_vertex_count(tris: list[tuple[int, int, int]]) -> int:
+    """Vertices en aristas de boundary (pertenecen a un solo tri).
+
+    Solo conteo para pinnar la decision open: >0 confirma borde abierto
+    sin cambiar topologia. Total sobre la lista dada.
+    """
+    from collections import Counter
+
+    edges: Counter[tuple[int, int]] = Counter()
+    for tri in tris:
+        a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
+        for u, v in ((a, b), (b, c), (c, a)):
+            key = (u, v) if u < v else (v, u)
+            edges[key] += 1
+    boundary: set[int] = set()
+    for (u, v), n in edges.items():
+        if n == 1:
+            boundary.add(u)
+            boundary.add(v)
+    return len(boundary)
 
 
 def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] | Err[DomainError]:
@@ -410,6 +456,8 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
         except Exception:  # noqa: BLE001 - desplazamiento invalido: via legado
             delta = None
     if delta is not None and len(delta) == len(positions):
+        _LAST_DISPLACE_STATS["real"] = 1.0
+        _LAST_DISPLACE_STATS["legacy"] = 0.0
         return Ok(
             [
                 (
@@ -420,13 +468,12 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
                 for (x, y, z), (dx, dy, dz) in zip(positions, [tuple(map(float, row)) for row in delta])
             ]
         )
-    width = len(coeffs)
-    return Ok(
-        [
-            (x + min(max(coeffs[idx % width] * 0.01, -_LEGACY_DISPLACE_MAX), _LEGACY_DISPLACE_MAX), y, z)
-            for idx, (x, y, z) in enumerate(positions)
-        ]
-    )
+    _LAST_DISPLACE_STATS["real"] = 0.0
+    _LAST_DISPLACE_STATS["legacy"] = 1.0
+    finite = [float(c) for c in coeffs if math.isfinite(float(c))]
+    mean_c = sum(finite) / len(finite) if finite else 0.0
+    uni = min(max(mean_c * 0.01, -_LEGACY_DISPLACE_MAX), _LEGACY_DISPLACE_MAX)
+    return Ok([(x + uni, y, z) for x, y, z in positions])
 
 
 def _eye_png() -> bytes:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 
+from backend.deep3d import TRANSFER_NAME
 from backend.flame_fit import DECA_TAR_NAME, FLAME_PKL_NAMES
 from backend.flame_texture import (
     EYE_MAP_NAME,
@@ -18,6 +19,7 @@ from backend.flame_texture import (
     UNWRAP_MAT_NAME,
     UV_OBJ_NAME,
 )
+from backend.gnm_assemble import FLAME68_NAME, FLAME_TEMPLATE_NAME
 
 _SYNC_SH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "scripts", "modal-weights-sync.sh"
@@ -34,6 +36,9 @@ EXPECTED_BRIDGE_FILES = frozenset(
         "checkpoints/deep3d_model/epoch_latest.pth",
         "topo_assets/unwrap_1024_info.mat",
         "topo_assets/hifi3dpp_mean_face.obj",
+        "flame/flame_template.bin",
+        "flame/flame_hifi_transfer.npz",
+        "flame/flame68_embed.npz",
     }
 )
 EXPECTED_FLAME_PKL_ALTS = frozenset(
@@ -66,4 +71,7 @@ def test_bridge_parity_with_python_consts() -> None:
     assert f"checkpoints/texgan_model/{TEXGAN_NAME}" in bridge
     assert f"topo_assets/{UNWRAP_MAT_NAME}" in bridge
     assert f"topo_assets/{MEAN_FACE_NAME}" in bridge
+    assert f"flame/{FLAME_TEMPLATE_NAME}" in bridge
+    assert f"flame/{TRANSFER_NAME}" in bridge
+    assert f"flame/{FLAME68_NAME}" in bridge
     assert frozenset(alts) == frozenset(f"flame/{name}" for name in FLAME_PKL_NAMES)

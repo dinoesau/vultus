@@ -546,6 +546,7 @@ def run_unwrap_texture(
             & (tex_px[..., 1] < float(height))
         )
         skin_valid = in_photo
+        _LAST_TEXTURE_STATS["parsing"] = 0.0
         try:
             from backend.face_parsing import face_skin_mask as _parse_mask
 
@@ -554,6 +555,7 @@ def run_unwrap_texture(
                 ix = np.clip(np.rint(tex_px[..., 0]).astype(np.int64), 0, width - 1)
                 iy = np.clip(np.rint(tex_px[..., 1]).astype(np.int64), 0, height - 1)
                 skin_valid = in_photo & photo_skin[iy, ix]
+                _LAST_TEXTURE_STATS["parsing"] = 1.0
         except Exception:  # noqa: BLE001 - sin torch/pesos: unwrap sin mascara (ver stats parsing)
             skin_valid = in_photo
         sampled = _bilinear_sample(photo, tex_px)

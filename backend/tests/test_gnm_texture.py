@@ -1278,3 +1278,51 @@ def test_unwrap_stats_parsing_marks_fallback(monkeypatch, tmp_path) -> None:  # 
     assert isinstance(out, Ok)
     assert _LAST_TEXTURE_STATS["parsing"] == 0.0
     _texmod._raster_cache = None
+
+
+def test_unwrap_stats_parsing_marks_applied(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Con parsing disponible el unwrap avisa via stats (parsing=1.0)."""
+    from pathlib import Path as _Path
+
+    from backend import flame_texture as _texmod
+    from backend.flame_fit import fit_flame
+    from backend.flame_texture import _LAST_TEXTURE_STATS, run_unwrap_texture
+
+    try:
+        import torch as _torch
+
+        del _torch
+    except ImportError:
+        import pytest as _pytest
+
+        _pytest.skip("sin torch no hay parsing")
+    repo = _Path(__file__).resolve().parent.parent.parent
+    if not (repo / "weights" / "ffhq-uv" / "FLAME_w_HIFI3D_UV.obj").is_file():
+        import pytest as _pytest
+
+        _pytest.skip("sin puente FFHQ-UV local no hay unwrap")
+    monkeypatch.setenv(
+        "PARSING_DIR", "/Users/esau.martinez/Code/weights/ffhq-uv-hf/checkpoints/parsing_model"
+    )
+    from backend.face_parsing import weights_present as _wp
+
+    if not _wp():
+        import pytest as _pytest
+
+        _pytest.skip("sin pth de parsing no hay mascara")
+    _tmp_topo_with(monkeypatch, tmp_path, False)
+    _texmod._raster_cache = None
+    from backend.flame_texture import _find_unwrap_mat as _find
+
+    if _find() is None:
+        import pytest as _pytest
+
+        _pytest.skip("sin mat no hay unwrap")
+    img = _image(0x77)
+    lms = _spread_landmarks()
+    fit = fit_flame(img, lms)
+    assert isinstance(fit, Ok)
+    out = run_unwrap_texture(img, fit.value, lms)
+    assert isinstance(out, Ok)
+    assert _LAST_TEXTURE_STATS["parsing"] == 1.0
+    _texmod._raster_cache = None

@@ -288,9 +288,11 @@ def test_consumer_env_carries_full_bridge_fail_loud() -> None:
 
     assert hasattr(_m, "PARSING_DIR")
     assert _m.PARSING_DIR.endswith("checkpoints/parsing_model")
+    assert hasattr(_m, "DPR_DIR")
+    assert _m.DPR_DIR.endswith("checkpoints/dpr_model")
     env = dict(_m.CONSUMER_ENV)
     assert env["VULTUS_REAL_ML"] == "1"
-    for key in ("GNM_ASSETS_DIR", "FFHQ_UV_DIR", "DECA_DIR", "FLAME_ASSETS_DIR", "TEXGAN_DIR", "DEEP3D_DIR", "TOPO_DIR", "PARSING_DIR"):
+    for key in ("GNM_ASSETS_DIR", "FFHQ_UV_DIR", "DECA_DIR", "FLAME_ASSETS_DIR", "TEXGAN_DIR", "DEEP3D_DIR", "TOPO_DIR", "PARSING_DIR", "DPR_DIR"):
         assert env[key], key
 
 
@@ -320,3 +322,15 @@ def test_candidate_dirs_fall_back_to_weights_root(monkeypatch) -> None:  # type:
     assert "/weights/flame/flame_template.bin" in _ga._candidate_flame_paths()
     assert "/weights/gnm/versions/v3_0/gnm_head.npz" in _gh._candidate_npz_paths()
     assert "/weights/gnm/landmarks/head_sparse_68.txt" in _gh._candidate_landmark_paths()
+
+
+def test_branch_log_helpers_expose_effective_branches() -> None:
+    """Slice logging RED: ramas efectivas en el log, mismo patron que parsing=.
+
+    Sin texgan=/dpr=/displacement= el fallback es silencioso (Error Hiding).
+    Prohibido otro fallback sin linea de log.
+    """
+    assert modal_app._fit_branch_str() in ("deep3d=1 pose=1", "deep3d=1 pose=0", "deep3d=0 pose=1", "deep3d=0 pose=0")
+    tex = modal_app._texture_branch_str()
+    assert "texgan=" in tex and "dpr=" in tex and "pose_tex=" in tex and "parsing=" in tex
+    assert modal_app._displace_branch_str() in ("displacement=real", "displacement=legacy")

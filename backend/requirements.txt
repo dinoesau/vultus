@@ -31,6 +31,5 @@ safetensors==0.8.0
 huggingface-hub==1.5.0
 fvcore==0.1.5.post20221221
 iopath==0.1.10
-# Sin rasterizadores CUDA: pytorch3d/nvdiffrast removidos (ningun modulo los
-# importa; el unwrap usa raster propio numpy). Reintroducirlos solo con el
-# fitting iterativo, desde git source (PyPI no trae wheels).
+# Rasterizadores CUDA: solo desde git source (PyPI no trae wheels para
+# py310_cu126_pyt213); el unwrap actual usa raster propio numpy.

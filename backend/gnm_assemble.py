@@ -106,7 +106,10 @@ def load_flame68_embed() -> (
     global _embed_cache
     if _embed_cache is not None:
         dlib_idx, tri, w = _embed_cache
-        return Ok(([int(i) for i in dlib_idx], [tuple(map(int, t)) for t in tri], [tuple(map(float, r)) for r in w]))
+        rows: list[int] = [int(i) for i in dlib_idx]
+        tris: list[tuple[int, int, int]] = [(int(t[0]), int(t[1]), int(t[2])) for t in tri]
+        weights: list[tuple[float, float, float]] = [(float(r[0]), float(r[1]), float(r[2])) for r in w]
+        return Ok((rows, tris, weights))
     for cand in _candidate_embed_paths():
         if os.path.isfile(cand):
             try:
@@ -123,7 +126,11 @@ def load_flame68_embed() -> (
             if not bool(np.isfinite(w).all()) or not bool(np.allclose(w.sum(axis=1), 1.0)):
                 continue
             _embed_cache = (dlib_idx, tri, w)
-            return Ok(([int(i) for i in dlib_idx], [tuple(map(int, t)) for t in tri], [tuple(map(float, r)) for r in w]))
+            rows = [int(i) for i in dlib_idx]
+            tris = [(int(t[0]), int(t[1]), int(t[2])) for t in tri]
+            weights = [(float(r[0]), float(r[1]), float(r[2])) for r in w]
+            typed: tuple[list[int], list[tuple[int, int, int]], list[tuple[float, float, float]]] = (rows, tris, weights)
+            return Ok(typed)
     return Err(MlFailed(detail=MlDecode(details="flame68 embed asset missing")))
 
 

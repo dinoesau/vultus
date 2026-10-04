@@ -23,6 +23,9 @@ existentes). Sin logging.
 
 from __future__ import annotations
 
+# mypy: allow-untyped-defs, allow-untyped-calls
+# HourglassNet vendored: interior torch sin stubs en CI (lazy/opcional,
+# idiom face_parsing.py). La API publica si va tipada.
 import os
 from collections.abc import Iterable
 from typing import Any
@@ -195,7 +198,7 @@ def _build_net():
         from torch import nn
     except ImportError as exc:
         raise RuntimeError(f"torch missing for dpr light net: {exc}") from exc
-    import torch.nn.functional as _F
+    import torch.nn.functional as _F  # type: ignore[import-not-found]
 
     class _Basic(nn.Module):  # type: ignore[misc]  # torch ausente en CI: nn.Module es Any
         def __init__(self, inp, outp, affine):
@@ -318,7 +321,7 @@ class LightNet:
         Determinista en eval (sin muestreo).
         """
         try:
-            import torch  # type: ignore[import-not-found]
+            import torch
 
             arr = np.clip(np.asarray(L01, dtype=np.float64), 0.0, 1.0)
             if arr.shape != (DPR_INPUT_SIZE, DPR_INPUT_SIZE):
@@ -353,7 +356,7 @@ def load_light_net(t7_path: str) -> LightNet:
     cached = _net_cache.get(t7_path)
     if cached is not None:
         return cached
-    import torch  # type: ignore[import-not-found]
+    import torch
 
     if not os.path.isfile(t7_path):
         raise RuntimeError(f"dpr checkpoint missing: {t7_path}")

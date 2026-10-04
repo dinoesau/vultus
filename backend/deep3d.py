@@ -28,6 +28,9 @@ Config solo por env (`DEEP3D_DIR`, `TOPO_DIR`; mas `WEIGHTS_ROOT` /
 
 from __future__ import annotations
 
+# mypy: allow-untyped-defs, allow-untyped-calls
+# ReconNet funcional vendored: interior torch/scipy sin stubs en CI
+# (lazy/opcional, idiom face_parsing.py). La API publica si va tipada.
 import io
 import os
 from collections.abc import Iterable
@@ -159,7 +162,7 @@ def torch_available() -> bool:
 def scipy_available() -> bool:
     """True si scipy.io importa (para el .mat). Total, nunca raise."""
     try:
-        import scipy.io  # type: ignore[import-not-found]  # noqa: F401
+        import scipy.io  # type: ignore[import-untyped]  # noqa: F401
     except ImportError:
         return False
     return True
@@ -245,7 +248,7 @@ def encode_fit253(
 def photo_array(image_bytes: Any) -> Ok[NDArray[np.float64]] | Err[DomainError]:
     """Foto a RGB float64 HWC desde ImageBytes. Total: Err si no decodifica."""
     try:
-        from PIL import Image  # type: ignore[import-not-found]
+        from PIL import Image
 
         with Image.open(io.BytesIO(image_bytes.as_bytes())) as handle:
             rgb = handle.convert("RGB")
@@ -256,7 +259,7 @@ def photo_array(image_bytes: Any) -> Ok[NDArray[np.float64]] | Err[DomainError]:
 
 def face_crop224(photo: NDArray[np.float64], xs: NDArray[np.float64], ys: NDArray[np.float64]) -> NDArray[np.float32]:
     """Crop de cara por bbox normalizado (+margen) a 224 /255 float32 HWC."""
-    from PIL import Image  # type: ignore[import-not-found]
+    from PIL import Image
 
     height, width = int(photo.shape[0]), int(photo.shape[1])
     if height <= 0 or width <= 0:
@@ -308,7 +311,7 @@ class ReconNet:
         return list(self._unexpected)
 
     def forward_coeffs(self, x01: Any) -> Any:
-        import torch  # type: ignore[import-not-found]
+        import torch
         import torch.nn.functional as _F  # type: ignore[import-not-found]
 
         sd = self._params_for(x01.device)
@@ -373,7 +376,7 @@ def load_recon(epoch_path: str) -> ReconNet:
     cached = _recon_cache.get(epoch_path)
     if cached is not None:
         return cached
-    import torch  # type: ignore[import-not-found]
+    import torch
 
     if not os.path.isfile(epoch_path):
         raise RuntimeError(f"deep3d checkpoint missing: {epoch_path}")
@@ -414,7 +417,7 @@ def load_hifi_basis() -> dict[str, NDArray[np.float64]] | None:
     try:
         if not scipy_available():
             return None
-        from scipy.io import loadmat  # type: ignore[import-not-found]
+        from scipy.io import loadmat
 
         m = loadmat(mat)
         mean = np.asarray(m["meanshape"], dtype=np.float64).reshape(-1, 3)

@@ -507,7 +507,7 @@ def _dpr_normalize(
         if not dpr_available() or texel_normals is None:
             _LAST_TEXTURE_STATS["dpr"] = 0.0
             return _gray_world(sampled, valid)
-        from PIL import Image  # type: ignore[import-not-found]
+        from PIL import Image
 
         small = Image.fromarray(np.clip(photo, 0.0, 255.0).astype(np.uint8)).resize(
             (512, 512), Image.Resampling.BILINEAR
@@ -707,7 +707,10 @@ def run_unwrap_texture(
         if isinstance(displaced, Err):
             return displaced
         dpa = np.asarray(displaced.value, dtype=np.float64)
-        aff = _texture_pose(landmarks, width, height, [tuple(map(float, p)) for p in displaced.value])
+        moved: list[tuple[float, float, float]] = [
+            (float(p[0]), float(p[1]), float(p[2])) for p in displaced.value
+        ]
+        aff = _texture_pose(landmarks, width, height, moved)
         vert_px: NDArray[np.float64] | None = None
         if aff is not None:
             vert_px = _project_pose(dpa, aff, width, height)

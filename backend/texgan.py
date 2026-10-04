@@ -30,6 +30,9 @@ existentes). Entradas bytes probados, salidas bytes. Sin logging.
 
 from __future__ import annotations
 
+# mypy: allow-untyped-defs, allow-untyped-calls
+# Decoder texgan vendored: interior torch sin stubs en CI (torch es
+# lazy/opcional, idiom face_parsing.py). La API publica si va tipada.
 import math
 import os
 from collections.abc import Iterable
@@ -194,7 +197,7 @@ def _build_net():
         from torch import nn
     except ImportError as exc:
         raise RuntimeError(f"torch missing for texgan decoder: {exc}") from exc
-    import torch.nn.functional as _F
+    import torch.nn.functional as _F  # type: ignore[import-not-found]
 
     _LRELU_ALPHA = 0.2
     _LRELU_GAIN = math.sqrt(2.0)
@@ -289,7 +292,9 @@ def _build_net():
                 y = _fused_upconv(x, self.weight, styles, self.resample_filter)
             else:
                 y = _fused_conv(x, self.weight, styles)
-            noise = self.noise_const * self.noise_strength
+            const: Any = self.noise_const
+            strength: Any = self.noise_strength
+            noise = const * strength
             y = y.add_(noise.to(y.dtype))
             return _bias_act_lrelu(y, self.bias, _LRELU_GAIN)
 
@@ -420,13 +425,13 @@ class TexGanDecoder:
         return list(self._unexpected)
 
     def w_avg_batch(self, batch: int = 1) -> Any:
-        import torch  # type: ignore[import-not-found]
+        import torch
 
         w_avg = self._net.mapping.w_avg.to(torch.float32)
         return w_avg.reshape(1, 1, TEXGAN_W_DIM).repeat(batch, TEXGAN_NUM_WS, 1)
 
     def synth_uv_map(self, w: Any) -> Any:
-        import torch  # type: ignore[import-not-found]
+        import torch
 
         self._ensure_device(w.device)
         self._net.eval()
@@ -441,7 +446,7 @@ class TexGanDecoder:
         con flags de `ensure_deterministic_texture` (init fijo, const
         noise, sin muestreo). Retorna w ajustada (detach).
         """
-        import torch  # type: ignore[import-not-found]
+        import torch
 
         net = self._net
         net.eval()
@@ -478,7 +483,7 @@ def load_decoder(pth_path: str) -> TexGanDecoder:
     cached = _decoder_cache.get(pth_path)
     if cached is not None:
         return cached
-    import torch  # type: ignore[import-not-found]
+    import torch
 
     if not os.path.isfile(pth_path):
         raise RuntimeError(f"texgan checkpoint missing: {pth_path}")
@@ -551,8 +556,8 @@ def neural_completion(
     try:
         if not texgan_available():
             return None
-        import torch  # type: ignore[import-not-found]
-        from PIL import Image  # type: ignore[import-not-found]
+        import torch
+        from PIL import Image
 
         pth = find_pth()
         if pth is None:

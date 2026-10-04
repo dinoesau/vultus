@@ -589,7 +589,7 @@ def _deep3d_fit(image: ImageBytes, landmarks: Landmarks) -> Ok[FitResult | None]
     except Exception:  # noqa: BLE001 - crop caido: via geometrica
         return Ok(None)
     try:
-        import torch  # type: ignore[import-not-found]
+        import torch
 
         epoch = find_epoch()
         if epoch is None:
@@ -651,7 +651,7 @@ def estimate_affine_camera(
 def _photo_dims(image: ImageBytes) -> Ok[tuple[int, int]] | Err[DomainError]:
     """Dimensiones de la foto sin decodificar el array. Total."""
     try:
-        from PIL import Image  # type: ignore[import-not-found]
+        from PIL import Image
 
         with Image.open(io.BytesIO(image.as_bytes())) as handle:
             width, height = int(handle.width), int(handle.height)
@@ -758,7 +758,8 @@ def _displaced_for_pose(coeffs: GnmCoeffs) -> list[tuple[float, float, float]] |
         placed = displaced_positions(_FitResult(coeffs=coeffs, camera=cam.value))
         if isinstance(placed, _ErrD):
             return None
-        return [tuple(map(float, p)) for p in placed.value]
+        out: list[tuple[float, float, float]] = [(float(p[0]), float(p[1]), float(p[2])) for p in placed.value]
+        return out
     except Exception:  # noqa: BLE001 - assemble caido: afin usa el template
         return None
 

@@ -52,7 +52,7 @@ SYNC_VERSION=4
 # - backend/flame_texture.py: FLAME_w_HIFI3D_UV.obj + eye_ball_tex.png en FFHQ_UV_DIR.
 # BRIDGE_FILES son los 4 exactos obligatorios; el pkl FLAME va por OR en
 # BRIDGE_FLAME_PKL_ALTS (uno basta, ambos valen).
-BRIDGE_FILES="mediapipe/face_landmarker.task deca/deca_model.tar ffhq-uv/FLAME_w_HIFI3D_UV.obj ffhq-uv/eye_ball_tex.png checkpoints/texgan_model/texgan_ffhq_uv.pth checkpoints/deep3d_model/epoch_latest.pth topo_assets/unwrap_1024_info.mat"
+BRIDGE_FILES="mediapipe/face_landmarker.task deca/deca_model.tar ffhq-uv/FLAME_w_HIFI3D_UV.obj ffhq-uv/eye_ball_tex.png checkpoints/texgan_model/texgan_ffhq_uv.pth checkpoints/deep3d_model/epoch_latest.pth topo_assets/unwrap_1024_info.mat topo_assets/hifi3dpp_mean_face.obj"
 BRIDGE_FLAME_PKL_ALTS="flame/flame2023_Open.pkl flame/generic_model.pkl"
 LEGACY_PREFIX="gnm"
 

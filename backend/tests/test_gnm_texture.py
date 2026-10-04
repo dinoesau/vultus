@@ -1162,3 +1162,82 @@ def test_completion_is_skin_not_photo_bg(monkeypatch, tmp_path) -> None:  # type
     skin_mean = uw[island].mean(axis=0)
     corner = uw[0, 0]
     assert float(_np.abs(corner - skin_mean).max()) < 40.0
+
+
+def test_parsing_consts_pinned() -> None:
+    """BiSeNet 19 clases CelebAMask-HQ; piel incluye cara, excluye pelo/fondo."""
+    from backend.face_parsing import (
+        N_CLASSES,
+        PARSE_SIZE,
+        PARSING_PTH_NAME,
+        SKIN_LABELS,
+    )
+
+    assert N_CLASSES == 19
+    assert PARSE_SIZE == 473
+    assert PARSING_PTH_NAME == "79999_iter.pth"
+    for keep in (1, 2, 3, 4, 5, 10, 11, 12, 17):
+        assert keep in SKIN_LABELS
+    for drop in (0, 13, 14, 15, 16, 18):
+        assert drop not in SKIN_LABELS
+
+
+def _require_parsing_env(monkeypatch, tmp_path):  # type: ignore[no-untyped-def]
+    """Env a parsing local (pth), o skip con motivo."""
+    try:
+        import torch as _torch  # noqa: F401
+    except ImportError:
+        import pytest as _pytest
+
+        _pytest.skip("sin torch no hay parsing")
+    from backend.face_parsing import weights_present as _wp
+
+    monkeypatch.setenv("PARSING_DIR", "/Users/esau.martinez/Code/weights/ffhq-uv-hf/checkpoints/parsing_model")
+    if not _wp():
+        import pytest as _pytest
+
+        _pytest.skip("sin pth de parsing no hay mascara")
+
+
+def test_parsing_mask_shape_deterministic(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Mascara bool HxW, determinista x2 sobre stub."""
+    import numpy as _np
+
+    from backend.face_parsing import face_skin_mask
+
+    _require_parsing_env(monkeypatch, tmp_path)
+    photo = _np.full((48, 64, 3), 120.0, dtype=_np.float64)
+    first = face_skin_mask(photo)
+    second = face_skin_mask(photo)
+    assert first.shape == (48, 64)
+    assert first.dtype == bool
+    assert bool((first == second).all())
+
+
+def test_parsing_excludes_mics_includes_face(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """En foto LFW con microfonos: centro cara True, esquinas microfono False."""
+    import io as _io
+    from pathlib import Path as _Path
+
+    import numpy as _np
+
+    from backend.face_parsing import face_skin_mask
+
+    _require_parsing_env(monkeypatch, tmp_path)
+    from PIL import Image as _Image
+
+    dataset = _Path("/Users/esau.martinez/Code/datasets/lfw")
+    path_a = dataset / "George_W_Bush" / "George_W_Bush_0001.jpg"
+    if not path_a.is_file():
+        import pytest as _pytest
+
+        _pytest.skip("sin LFW no hay foto con microfonos")
+    photo = _np.asarray(_Image.open(_io.BytesIO(path_a.read_bytes())).convert("RGB"), dtype=_np.float64)
+    height, width = photo.shape[0], photo.shape[1]
+    assert width == 250 and height == 250
+    mask = face_skin_mask(photo)
+    assert mask.shape == (250, 250)
+    assert bool(mask[125, 125])
+    assert not bool(mask[10, 10])
+    frac = float(mask.mean())
+    assert 0.05 < frac < 0.9

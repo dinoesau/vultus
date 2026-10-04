@@ -292,3 +292,31 @@ def test_consumer_env_carries_full_bridge_fail_loud() -> None:
     assert env["VULTUS_REAL_ML"] == "1"
     for key in ("GNM_ASSETS_DIR", "FFHQ_UV_DIR", "DECA_DIR", "FLAME_ASSETS_DIR", "TEXGAN_DIR", "DEEP3D_DIR", "TOPO_DIR", "PARSING_DIR"):
         assert env[key], key
+
+
+def test_candidate_dirs_fall_back_to_weights_root(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Sin WEIGHTS_* en env, los candidatos incluyen /weights (prod default).
+
+    Regresion real: containers Modal sin WEIGHTS_ROOT perdian el fallback
+    aunque el Volume esta montado en /weights (parsing=0, fixture).
+    """
+    import os as _os
+
+    for var in ("WEIGHTS_ROOT", "WEIGHTS_DIR", "PARSING_DIR", "TEXGAN_DIR", "DEEP3D_DIR", "TOPO_DIR", "FFHQ_UV_DIR",
+                "DECA_DIR", "FLAME_ASSETS_DIR", "GNM_ASSETS_DIR", "GNM_NPZ_PATH"):
+        monkeypatch.delenv(var, raising=False)
+    assert _os.environ.get("WEIGHTS_ROOT", "") == ""
+    from backend import face_parsing as _fp
+    from backend import flame_fit as _ff
+    from backend import flame_texture as _ft
+    from backend import gnm_assemble as _ga
+    from backend import gnm_head as _gh
+
+    assert "/weights/checkpoints/parsing_model" in _fp._candidate_dirs()
+    assert "/weights/checkpoints/deep3d_model" in _ff._deep3d_candidate_dirs()
+    assert "/weights/checkpoints/lm_model" in _ff._lm_candidate_dirs()
+    assert "/weights/checkpoints/texgan_model" in _ft._texgan_candidate_dirs()
+    assert "/weights/topo_assets" in _ft._topo_candidate_dirs()
+    assert "/weights/flame/flame_template.bin" in _ga._candidate_flame_paths()
+    assert "/weights/gnm/versions/v3_0/gnm_head.npz" in _gh._candidate_npz_paths()
+    assert "/weights/gnm/landmarks/head_sparse_68.txt" in _gh._candidate_landmark_paths()

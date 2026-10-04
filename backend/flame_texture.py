@@ -109,7 +109,9 @@ _BRIDGE_HEAD_BYTES = 65536
 # El doble da 1.0; el real debe superar el umbral o el eval falla.
 EVIDENCE_MIN = 0.99
 
-_LAST_TEXTURE_STATS = ThreadLocalStats({"evidence": 0.0, "sentinel_count": 0.0, "duration_ms": 0.0, "parsing": 0.0})
+_LAST_TEXTURE_STATS = ThreadLocalStats(
+    {"evidence": 0.0, "sentinel_count": 0.0, "duration_ms": 0.0, "parsing": 0.0, "texgan": 0.0}
+)
 
 
 def _env(name: str) -> str:
@@ -423,6 +425,31 @@ def _rasterize_skin_uv(
     return v_idx, bw
 
 
+def _texgan_completion(
+    sampled_255: NDArray[np.float64], valid: NDArray[np.bool_]
+) -> NDArray[np.float64] | None:
+    """Completion neuronal texgan (Fase 1): solo texeles no validos.
+
+    Via `backend.texgan.neural_completion` (latente desde w_avg + Adam
+    enmascarado, determinista). None si no hay backend/pesos o falla:
+    el caller cae a piel media (via documentada en stats `texgan`).
+    Total: nunca lanza.
+    """
+    try:
+        from backend.texgan import neural_completion as _neural
+    except ImportError:
+        return None
+    try:
+        result = _neural(sampled_255, valid)
+    except Exception:  # noqa: BLE001 - cualquier fallo cae a piel media (via documentada en stats)
+        return None
+    if result is None:
+        return None
+    if result.shape != (TEX_SIZE, TEX_SIZE, 3):
+        return None
+    return np.clip(np.asarray(result, dtype=np.float64), 0.0, 255.0)
+
+
 def _bilinear_sample(photo: NDArray[np.float64], px: NDArray[np.float64]) -> NDArray[np.float64]:
     """Muestreo bilineal vectorizado. photo HxWx3, px (..., 2) en pixeles x,y."""
     height, width = int(photo.shape[0]), int(photo.shape[1])
@@ -566,24 +593,30 @@ def run_unwrap_texture(
             gray = float(means.mean())
             if gray > 1e-9 and bool(np.all(means > 1e-9)):
                 sampled = sampled * (gray / np.maximum(means, 1e-9))[None, None, :]
-        fingerprint = _texture_fingerprint()
-        if isinstance(fingerprint, Err):
-            return fingerprint
-        ratios_result = identity_ratios(landmarks)
-        if isinstance(ratios_result, Err):
-            return ratios_result
-        quantized = struct.pack(f"<{len(ratios_result.value)}f", *(round(r, 2) for r in ratios_result.value))
-        fit_quant = struct.pack("<253f", *(round(c, 1) for c in fit.coeffs.as_tuple()))
-        seed = hashlib.sha256(REAL_TEXTURE_SALT + fingerprint.value + quantized + fit_quant).digest()
-        detail = _identity_detail(seed)
-        if skin_mean is not None:
-            completion = np.clip(skin_mean[None, None, :] + detail, 0.0, 255.0)
+        sampled_u8 = np.clip(sampled, 0.0, 255.0)
+        completion = _texgan_completion(sampled_u8, skin_valid)
+        if completion is not None:
+            _LAST_TEXTURE_STATS["texgan"] = 1.0
         else:
-            crop_result = _face_crop(photo, landmarks)
-            if isinstance(crop_result, Err):
-                return crop_result
-            completion = np.clip(_photo_base(crop_result.value) + detail, 0.0, 255.0)
-        out = np.where(skin_valid[..., None], np.clip(sampled, 0.0, 255.0), completion)
+            _LAST_TEXTURE_STATS["texgan"] = 0.0
+            fingerprint = _texture_fingerprint()
+            if isinstance(fingerprint, Err):
+                return fingerprint
+            ratios_result = identity_ratios(landmarks)
+            if isinstance(ratios_result, Err):
+                return ratios_result
+            quantized = struct.pack(f"<{len(ratios_result.value)}f", *(round(r, 2) for r in ratios_result.value))
+            fit_quant = struct.pack("<253f", *(round(c, 1) for c in fit.coeffs.as_tuple()))
+            seed = hashlib.sha256(REAL_TEXTURE_SALT + fingerprint.value + quantized + fit_quant).digest()
+            detail = _identity_detail(seed)
+            if skin_mean is not None:
+                completion = np.clip(skin_mean[None, None, :] + detail, 0.0, 255.0)
+            else:
+                crop_result = _face_crop(photo, landmarks)
+                if isinstance(crop_result, Err):
+                    return crop_result
+                completion = np.clip(_photo_base(crop_result.value) + detail, 0.0, 255.0)
+        out = np.where(skin_valid[..., None], sampled_u8, completion)
         raw = np.rint(out).astype(np.uint8).tobytes()
         scrubbed = _scrub_sentinel(raw)
         parsed = parse_rendered_image(scrubbed)

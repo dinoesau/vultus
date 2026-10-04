@@ -280,3 +280,15 @@ def test_real_weight_dirs_exposed_via_env() -> None:
     assert _m.TEXGAN_DIR.endswith("checkpoints/texgan_model")
     assert _m.DEEP3D_DIR.endswith("checkpoints/deep3d_model")
     assert _m.TOPO_DIR.endswith("topo_assets")
+
+
+def test_consumer_env_carries_full_bridge_fail_loud() -> None:
+    """El consumer CPU ensambla: sin VULTUS_REAL_ML=1 cae a fixture silencioso."""
+    from backend import modal_app as _m
+
+    assert hasattr(_m, "PARSING_DIR")
+    assert _m.PARSING_DIR.endswith("checkpoints/parsing_model")
+    env = dict(_m.CONSUMER_ENV)
+    assert env["VULTUS_REAL_ML"] == "1"
+    for key in ("GNM_ASSETS_DIR", "FFHQ_UV_DIR", "DECA_DIR", "FLAME_ASSETS_DIR", "TEXGAN_DIR", "DEEP3D_DIR", "TOPO_DIR", "PARSING_DIR"):
+        assert env[key], key

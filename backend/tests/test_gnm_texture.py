@@ -1123,8 +1123,7 @@ def test_foreign_20k_mask_ignored_by_unwrap(monkeypatch, tmp_path) -> None:  # t
     assert outs[0] == outs[1]
 
 
-def test_completion_is_skin_not_photo_bg(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """Texeles fuera de isla se rellenan con piel media, no fondo de foto."""
+def test_completion_is_skin_not_photo_bg(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]    """Texeles fuera de isla se rellenan con piel media, no fondo de foto."""
     from pathlib import Path as _Path
 
     import numpy as _np
@@ -1241,3 +1240,41 @@ def test_parsing_excludes_mics_includes_face(monkeypatch, tmp_path) -> None:  # 
     assert not bool(mask[10, 10])
     frac = float(mask.mean())
     assert 0.05 < frac < 0.9
+
+
+def test_unwrap_stats_parsing_marks_fallback(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Sin parsing disponible el unwrap avisa via stats (parsing=0.0)."""
+    from pathlib import Path as _Path
+
+    from backend import flame_texture as _texmod
+    from backend.flame_fit import fit_flame
+    from backend.flame_texture import _LAST_TEXTURE_STATS, run_unwrap_texture
+
+    repo = _Path(__file__).resolve().parent.parent.parent
+    if not (repo / "weights" / "ffhq-uv" / "FLAME_w_HIFI3D_UV.obj").is_file():
+        import pytest as _pytest
+
+        _pytest.skip("sin puente FFHQ-UV local no hay unwrap")
+
+    import backend.face_parsing as _fp
+
+    def _boom(photo):  # type: ignore[no-untyped-def]
+        raise RuntimeError("parsing caido")
+
+    monkeypatch.setattr(_fp, "face_skin_mask", _boom)
+    _tmp_topo_with(monkeypatch, tmp_path, False)
+    _texmod._raster_cache = None
+    from backend.flame_texture import _find_unwrap_mat as _find
+
+    if _find() is None:
+        import pytest as _pytest
+
+        _pytest.skip("sin mat no hay unwrap")
+    img = _image(0x77)
+    lms = _spread_landmarks()
+    fit = fit_flame(img, lms)
+    assert isinstance(fit, Ok)
+    out = run_unwrap_texture(img, fit.value, lms)
+    assert isinstance(out, Ok)
+    assert _LAST_TEXTURE_STATS["parsing"] == 0.0
+    _texmod._raster_cache = None

@@ -1326,3 +1326,24 @@ def test_unwrap_stats_parsing_marks_applied(monkeypatch, tmp_path) -> None:  # t
     assert isinstance(out, Ok)
     assert _LAST_TEXTURE_STATS["parsing"] == 1.0
     _texmod._raster_cache = None
+
+
+def test_uv_total_variation_smooth_vs_noise() -> None:
+    """Slice TV RED: atlas liso TV<=2.0, ruido sha TV alta.
+
+    El job real exige uv sin sopa ni facetas; el helper distingue solido
+    (TV 0) de ruido (TV >>2). Largo invalido es inf.
+    """
+    import numpy as _np
+
+    from backend.domain import UV_LEN
+    from backend.flame_texture import UV_LEN as _UVL
+    from backend.flame_texture import uv_total_variation
+
+    assert _UVL == UV_LEN
+    solid = bytes([180, 150, 130]) * (UV_LEN // 3)
+    assert uv_total_variation(solid) <= 2.0
+    rng = _np.random.RandomState(7)
+    noise = rng.randint(0, 256, size=UV_LEN, dtype=_np.uint8).tobytes()
+    assert uv_total_variation(noise) > 2.0
+    assert uv_total_variation(b"\x00" * 10) == float("inf")

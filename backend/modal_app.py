@@ -100,6 +100,9 @@ TOPO_DIR = _env("TOPO_DIR", os.path.join(WEIGHTS_ROOT, "topo_assets")) or os.pat
 PARSING_DIR = _env("PARSING_DIR", os.path.join(WEIGHTS_ROOT, "checkpoints", "parsing_model")) or os.path.join(
     WEIGHTS_ROOT, "checkpoints", "parsing_model"
 )
+DPR_DIR = _env("DPR_DIR", os.path.join(WEIGHTS_ROOT, "checkpoints", "dpr_model")) or os.path.join(
+    WEIGHTS_ROOT, "checkpoints", "dpr_model"
+)
 # Env del consumer CPU (ensambla GLB en _run_job_from_r2): puente completo
 # explicito mas VULTUS_REAL_ML=1. Sin esto el assemble cae al fixture
 # sintetico silencioso en prod (waiver local) en vez de fallar loud.
@@ -113,6 +116,7 @@ CONSUMER_ENV = {
     "DEEP3D_DIR": DEEP3D_DIR,
     "TOPO_DIR": TOPO_DIR,
     "PARSING_DIR": PARSING_DIR,
+    "DPR_DIR": DPR_DIR,
 }
 # Nombre del Volume (Factor III: config por env, ver .env.example).
 MODAL_VOLUME_NAME = _env("MODAL_VOLUME", "vultus-weights") or "vultus-weights"
@@ -646,6 +650,65 @@ def mediapipe_infer(job_id: str, image: "ImageBytes") -> bytes:
     return out
 
 
+def _fit_branch_str() -> str:
+    """Rama efectiva de forma para el log, mismo patron que parsing=.
+
+    deep3d=1 via Deep3D-HiFi3D++ real, 0 frente geometrico; pose=1 afin
+    ajustada, 0 similaridad por bbox. Prohibido fallback sin linea de log.
+    """
+    try:
+        from backend.flame_fit import _LAST_FIT_STATS as _fit_stats
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from flame_fit import _LAST_FIT_STATS as _fit_stats  # type: ignore[no-redef]
+    try:
+        deep = int(float(_fit_stats.get("deep3d", 0.0)))
+        pose = int(float(_fit_stats.get("pose", 0.0)))
+    except Exception:
+        return "deep3d=0 pose=0"
+    return f"deep3d={1 if deep else 0} pose={1 if pose else 0}"
+
+
+def _texture_branch_str() -> str:
+    """Rama efectiva de textura para el log, mismo patron que parsing=.
+
+    texgan=1 completion neuronal, 0 piel media; dpr=1 SH9, 0 gray-world;
+    pose_tex=1 afin ajustada, 0 bbox. Prohibido fallback sin linea de log.
+    """
+    try:
+        from backend.flame_texture import _LAST_TEXTURE_STATS as _tex_stats
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from flame_texture import (
+            _LAST_TEXTURE_STATS as _tex_stats,  # type: ignore[no-redef]
+        )
+    try:
+        parsing = float(_tex_stats.get("parsing", 0.0))
+        texgan = float(_tex_stats.get("texgan", 0.0))
+        dpr = float(_tex_stats.get("dpr", 0.0))
+        pose_tex = float(_tex_stats.get("pose_tex", 0.0))
+    except Exception:
+        return "parsing=0 texgan=0 dpr=0 pose_tex=0"
+    return f"parsing={parsing:.0f} texgan={texgan:.0f} dpr={dpr:.0f} pose_tex={pose_tex:.0f}"
+
+
+def _displace_branch_str() -> str:
+    """Fuente del displacement para el log, mismo patron que template synthetic=.
+
+    displacement=real via base HiFi3D++ + transfer IDW; legacy uniforme
+    5mm sin base. Prohibido fallback sin linea de log.
+    """
+    try:
+        from backend.gnm_assemble import _LAST_DISPLACE_STATS as _disp_stats
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from gnm_assemble import (
+            _LAST_DISPLACE_STATS as _disp_stats,  # type: ignore[no-redef]
+        )
+    try:
+        real = float(_disp_stats.get("real", 0.0))
+    except Exception:
+        return "displacement=legacy"
+    return "displacement=real" if real >= 0.5 else "displacement=legacy"
+
+
 def fit_infer(
     job_id: str, image: "ImageBytes", landmarks: "Landmarks"
 ) -> "Result[bytes, DomainError]":
@@ -668,16 +731,20 @@ def fit_infer(
         from flame_fit import _LAST_FIT_STATS as _fit_stats  # type: ignore[no-redef]
     iterations = int(_fit_stats.get("iterations", 0))
     loss = float(_fit_stats.get("loss", float("nan")))
+    branch = _fit_branch_str()
     if isinstance(result, _ErrFI):
-        logger.info("fit err job=%s duration_ms=%d iterations=%d loss=%.6g", job_id, dt, iterations, loss)
+        logger.info(
+            "fit err job=%s duration_ms=%d iterations=%d loss=%.6g %s", job_id, dt, iterations, loss, branch
+        )
         return result
     logger.info(
-        "fit ok job=%s out_len=%d duration_ms=%d iterations=%d loss=%.6g",
+        "fit ok job=%s out_len=%d duration_ms=%d iterations=%d loss=%.6g %s",
         job_id,
         len(result.value),
         dt,
         iterations,
         loss,
+        branch,
     )
     return result
 
@@ -701,18 +768,13 @@ def texture_infer(
     if isinstance(result, _ErrTI):
         logger.info("texture err job=%s duration_ms=%d", job_id, dt)
         return result
-    try:
-        from backend.flame_texture import _LAST_TEXTURE_STATS as _tex_stats
-    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
-        from flame_texture import (
-            _LAST_TEXTURE_STATS as _tex_stats,  # type: ignore[no-redef]
-        )
+    branch = _texture_branch_str()
     logger.info(
-        "texture ok job=%s out_len=%d duration_ms=%d parsing=%.0f",
+        "texture ok job=%s out_len=%d duration_ms=%d %s",
         job_id,
         len(result.value),
         dt,
-        float(_tex_stats.get("parsing", 0.0)),
+        branch,
     )
     return result
 
@@ -782,6 +844,7 @@ if HAVE_MODAL:
             "DEEP3D_DIR": DEEP3D_DIR,
             "TOPO_DIR": TOPO_DIR,
             "PARSING_DIR": PARSING_DIR,
+            "DPR_DIR": DPR_DIR,
             # Determinismo x2 exigible en T4 (ver ensure_deterministic_*):
             # cublas determinista para el ajuste texgan (Fase 5 GPU ok).
             "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
@@ -841,6 +904,7 @@ if HAVE_MODAL:
             "DEEP3D_DIR": DEEP3D_DIR,
             "TOPO_DIR": TOPO_DIR,
             "PARSING_DIR": PARSING_DIR,
+            "DPR_DIR": DPR_DIR,
             # Determinismo x2 exigible en T4 (ver ensure_deterministic_*):
             # cublas determinista para el ajuste texgan (Fase 5 GPU ok).
             "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
@@ -1136,7 +1200,7 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
         _synthetic_tpl = bool(_is_synth())
     except Exception:
         _synthetic_tpl = True
-    logger.info("template synthetic=%s job=%s", _synthetic_tpl, job_id)
+    logger.info("template synthetic=%s %s job=%s", _synthetic_tpl, _displace_branch_str(), job_id)
     try:
         from backend.flame_texture import bake_eye_texture as _bake_eye_modal
 

@@ -254,6 +254,24 @@ def max_abs_diff(a: bytes, b: bytes) -> int:
     return peak
 
 
+def uv_total_variation(raw: bytes) -> float:
+    """TV global media del atlas 512x512x3 (diferencias adyacentes).
+
+    Media de |dx|+|dy| por texel y canal. Atlas desplegado sin sopa ni
+    facetas da TV baja (<=2.0 en el job real); ruido sha o facetas dan
+    TV alta. Total: inf si largo invalido. Solo numpy.
+    """
+    if len(raw) != UV_LEN or len(raw) % 3 != 0:
+        return float("inf")
+    arr = np.asarray(bytearray(raw), dtype=np.float64).reshape(TEX_SIZE, TEX_SIZE, 3)
+    dx = np.abs(arr[:, 1:, :] - arr[:, :-1, :]).mean()
+    dy = np.abs(arr[1:, :, :] - arr[:-1, :, :]).mean()
+    tv = float((dx + dy) / 2.0)
+    if not math.isfinite(tv):
+        return float("inf")
+    return tv
+
+
 def ensure_deterministic_texture() -> None:
     """Aplica flags deterministicos de torch sin tumbar nunca.
 

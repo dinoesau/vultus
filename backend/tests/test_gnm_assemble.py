@@ -594,3 +594,137 @@ def test_glb_embeds_real_eye_texture_not_fallback(monkeypatch) -> None:
     glb = built.value.as_bytes()
     assert glb[:4] == b"glTF"
     assert eye_png in glb
+
+
+def test_glb_has_smooth_vertex_normals() -> None:
+    """Slice normales RED: GLB con NORMAL suave promediada por vertice.
+
+    Ambas primitivas declaran NORMAL, bufferView/accessor propios con
+    padding a 4, normales finitas unitarias y deterministas x2.
+    Sin NORMAL el visor cae a sombreado plano facetado.
+    """
+    import math as _math
+
+    out = build_personalized_glb(_fit(0.1), _albedo(0xA1))
+    assert isinstance(out, Ok)
+    data = out.value.as_bytes()
+    json_len = struct.unpack("<I", data[12:16])[0]
+    doc = json.loads(data[20 : 20 + json_len].decode("utf-8"))
+    prims = doc["meshes"][0]["primitives"]
+    assert len(prims) == 2
+    for prim in prims:
+        assert "NORMAL" in prim["attributes"]
+        assert "POSITION" in prim["attributes"]
+        assert "TEXCOORD_0" in prim["attributes"]
+    views = doc["bufferViews"]
+    accessors = doc["accessors"]
+    normal_accessor_idx = prims[0]["attributes"]["NORMAL"]
+    normal_accessor = accessors[normal_accessor_idx]
+    assert normal_accessor["type"] == "VEC3"
+    assert normal_accessor["componentType"] == 5126
+    assert normal_accessor["count"] == VERT_COUNT
+    normal_view = views[normal_accessor["bufferView"]]
+    assert normal_view["byteOffset"] % 4 == 0
+    assert normal_view["byteLength"] == VERT_COUNT * 3 * 4
+    for view in views:
+        assert view["byteOffset"] % 4 == 0
+    bin_start = 20 + json_len + 8
+    bin_buf = data[bin_start:]
+    off = normal_view["byteOffset"]
+    count = normal_accessor["count"]
+    normals = struct.unpack(f"<{count * 3}f", bin_buf[off : off + count * 12])
+    for i in range(count):
+        x, y, z = normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]
+        assert _math.isfinite(x) and _math.isfinite(y) and _math.isfinite(z)
+        n = _math.sqrt(x * x + y * y + z * z)
+        assert abs(n - 1.0) < 1e-3, f"normal no unitaria idx={i} n={n}"
+    second = build_personalized_glb(_fit(0.1), _albedo(0xA1))
+    assert isinstance(second, Ok)
+    assert second.value.as_bytes() == data
+
+
+def test_embed_candidate_paths_include_volume(monkeypatch, tmp_path) -> None:
+    """Slice bridge RED: embed busca en Volume, no solo backend/assets.
+
+    En prod la imagen solo lleva .py; sin fallback a FLAME_ASSETS_DIR /
+    weights/flame la pose afin cae a similaridad por bbox.
+    """
+    import backend.gnm_assemble as _asm
+
+    vol = tmp_path / "flame"
+    vol.mkdir()
+    (vol / "flame68_embed.npz").write_bytes(b"fake")
+    monkeypatch.setenv("FLAME_ASSETS_DIR", str(vol))
+    monkeypatch.setenv("WEIGHTS_DIR", "")
+    cands = _asm._candidate_embed_paths()
+    assert str(vol / "flame68_embed.npz") in cands
+
+
+def test_legacy_displacement_is_spatially_smooth() -> None:
+    """Slice ripple RED: el fallback sin base debe ser suave, nunca hash por indice.
+
+    El clamp +-0.005 no garantiza suavidad visual. Con coefs variados el
+    legado anterior daba saltos entre vecinos; el uniforme da peak 0.
+    """
+    import json as _json
+
+    from backend.domain import Err as _Err
+    from backend.domain import parse_camera_params as _parse_cam
+    from backend.domain import parse_gnm_coeffs as _parse_coeffs
+    from backend.domain import parse_landmarks as _parse_lm
+    from backend.gnm_assemble import (
+        _LEGACY_DISPLACE_MAX,
+        displaced_positions,
+        load_flame_template,
+    )
+
+    tpl = load_flame_template()
+    assert not isinstance(tpl, _Err)
+    _, _, tris = tpl.value
+    ramp = [float((i % 25) - 12) * 0.8 for i in range(253)]
+    coeffs = _parse_coeffs(ramp)
+    camera = _parse_cam([0.0] * 12)
+    lms = _parse_lm(_json.dumps([[0.0, 0.0, 0.0]] * 478).encode("utf-8"))
+    assert isinstance(coeffs, Ok) and isinstance(camera, Ok) and isinstance(lms, Ok)
+    from backend.domain import FitResult as _FitResult
+
+    out = displaced_positions(_FitResult(coeffs=coeffs.value, camera=camera.value))
+    assert isinstance(out, Ok)
+    base = [p[0] for p in tpl.value[0]]
+    deltas = [(x - x0) for (x, _y, _z), x0 in zip(out.value, base)]
+    assert max(abs(d) for d in deltas) <= _LEGACY_DISPLACE_MAX + 1e-9
+    peak = 0.0
+    for a, b, c in tris:
+        peak = max(peak, abs(deltas[a] - deltas[b]), abs(deltas[b] - deltas[c]))
+    assert peak <= 1e-9
+
+
+def test_displacement_source_tracked() -> None:
+    """Slice logging RED: la fuente del displacement queda registrada por job.
+
+    Sin base/transfer es legacy; con ambas es real. Prohibido fallback sin log.
+    """
+    import backend.gnm_assemble as _asm
+
+    _asm.displaced_positions(_fit(0.1))
+    assert _asm._LAST_DISPLACE_STATS.get("real", 0.0) in (0.0, 1.0)
+    assert _asm._LAST_DISPLACE_STATS.get("legacy", 0.0) in (0.0, 1.0)
+    assert float(_asm._LAST_DISPLACE_STATS.get("real", 0.0) + _asm._LAST_DISPLACE_STATS.get("legacy", 0.0)) == 1.0
+
+
+def test_neck_boundary_open_documented_and_pinned() -> None:
+    """Slice cuello RED: boundary abierto por diseno, topologia intacta.
+
+    ADR-009 vigente: sin hombros, VERT_COUNT 5023 intacto. No se cierra ni
+    falda en geometria; se deja abierto con justificacion y se pina.
+    """
+    import backend.gnm_assemble as _asm
+    from backend.domain import Err as _Err
+
+    assert _asm.VERT_COUNT == 5023
+    tpl = _asm.load_flame_template()
+    assert not isinstance(tpl, _Err)
+    _, _, tris = tpl.value
+    assert len(tris) == _asm.FLAME_TRI_COUNT
+    assert _asm.neck_boundary_vertex_count(tris) > 0
+    assert _asm.NECK_BOUNDARY_MODE == "open"

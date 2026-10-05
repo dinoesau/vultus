@@ -24,7 +24,9 @@ backend/local_runner.py:_env es helper generico string->string, no parsea TTL (i
 Log invalido throttled por instancia (mismo job mismo valor) via `lastLogged` por raw en `load()` revalidation only; `/init` and compare log every invalid unthrottled by design, health silent.
 
 - **image**: foto de entrada en `bytes` JPEG o PNG.
-Debe contener una sola cara frontal o semi-frontal.
+Debe contener una sola cara frontal.
+Semi-frontal o 3/4 degrada por diseño (afín frontal por bbox, facing cull frontal, PnP descartado).
+No se promete render limpio de lados ocultos.
 Tipo `ImageBytes` (`parse` en borde, max `MAX_IMAGE_BYTES = 8MB`, magic JPEG `FF D8 FF` / PNG `89 50 4E 47 0D 0A 1A 0A`, errores `ImageError::SizeOutOfRange | UnsupportedFormat`).
 Vista prestada zero-cost `ImageBytesRef::parse(&[u8])` con misma prueba y promoción única `to_owned_image`.
 
@@ -36,9 +38,10 @@ Producido solo por `MlSidecarClient::landmarks(&JobId, &ImageBytes) -> Landmarks
 
 - **mesh**: malla 3D de cabeza humana personalizada por fit DECA sobre template FLAME.
 Template FLAME `VERT_COUNT = 5023` verts; ojos `[EYE_VERT_START:EYE_VERT_END) = [3931:5023)` (1092 verts) con material propio.
+Cuello abierto por diseño (`NECK_BOUNDARY_MODE == "open"`, ADR-009/ADR-010, sin hombros).
 Cada cara deforma el template con identidad antropometrica + detalle del puente.
 Expresion es neutra fija.
-2 primitivas PBR real (`SkinPBR` + `EyePBR`, sin emisivo), offsets `byteOffset % 4 == 0`.
+2 primitivas PBR real (`SkinPBR` + `EyePBR`, sin emisivo) con atributo `NORMAL` suave promediado por vértice, offsets `byteOffset % 4 == 0`.
 Loader GNM `17821/35324` conservado solo hasta el cutover (ADR-008).
 
 - **uv**: textura canónica desplegada de 512x512.

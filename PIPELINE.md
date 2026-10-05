@@ -243,7 +243,10 @@ Cliente cierra pestaña: `Store` expira solo, sin leak.
 ## 8. Observabilidad
 
 Métricas por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms` (local `Store` / `Cloudflare Queues lag + Modal GPU util` prod).
-Fit real expone `iterations/loss/duration_ms` en logs (`_LAST_FIT_STATS`).
+Fit real expone `iterations/loss/duration_ms` más rama efectiva `deep3d=/pose=` en logs (`_LAST_FIT_STATS`).
+Textura expone `parsing=/texgan=/dpr=/pose_tex=` en `texture ok` (`_LAST_TEXTURE_STATS`).
+Assemble expone `template synthetic=` más `displacement=real|legacy` (`_LAST_DISPLACE_STATS`).
+Prohibido otro fallback sin línea de log.
 Logs estructurados con `job_id` sin datos biométricos (Workers Logs 3 días free, Modal logs).
 `app.py` con lifespan (reaper TTL/2) y logs con `job_id` + `duration_ms`, sin bytes.
 Health: `GET /health` verifica `queue ping` (local `Store` / Queues health prod) y `gpu available` (local `nvidia-smi` / Modal `torch.cuda.is_available`). En prod `Cloudflare Analytics` + `OpenTelemetry` + `Sentry` si se configura.

@@ -31,6 +31,7 @@ from backend.domain import (
     MlFailed,
     Ok,
     RenderedImage,
+    ThreadLocalStats,
     parse_gnm_mesh,
 )
 
@@ -90,8 +91,20 @@ _embed_cache: tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.float64]] |
 
 
 def _candidate_embed_paths() -> list[str]:
+    cands: list[str] = []
+    direct = flame_assets_dir()
+    if direct:
+        cands.append(os.path.join(direct, FLAME68_NAME))
+    weights_dir = _env("WEIGHTS_DIR") or _env("WEIGHTS_ROOT") or "/weights"
+    if weights_dir:
+        cands.append(os.path.join(weights_dir, "flame", FLAME68_NAME))
     here = os.path.dirname(os.path.abspath(__file__))
-    return [os.path.join(here, "assets", FLAME68_NAME)]
+    cands.append(os.path.join(here, "assets", FLAME68_NAME))
+    seen: list[str] = []
+    for c in cands:
+        if c and c not in seen:
+            seen.append(c)
+    return seen
 
 
 def load_flame68_embed() -> (
@@ -388,9 +401,42 @@ def skin_vertex_indices() -> list[int]:
 # unidades del template. Fail-safe absoluto 3-4x sobre el maximo
 # observado (Bush 0.048, Eckhart 0.035): la base PCA es suave por
 # construccion, los picos locales los guarda el test de suavidad, no el
-# clamp. Sin base/transfer (CI/dobles) rige el legado geometrico 5mm.
+# clamp. Sin base/transfer (CI/dobles) rige el legado uniforme 5mm:
+# offset constante = media(coeffs)*0.01 acotada, peak 0 por construccion.
+# El hash por indice con clamp quedo prohibido como unico control: no
+# garantiza suavidad visual.
 _DISPLACE_MAX = 0.15
 _LEGACY_DISPLACE_MAX = 0.005
+
+_LAST_DISPLACE_STATS = ThreadLocalStats({"real": 0.0, "legacy": 0.0})
+
+# Boundary del cuello: abierto por diseno (ADR-009 vigente: sin hombros).
+# El template FLAME trae el cuello abierto; cerrarlo o poner falda cambia
+# la topologia y rompe VERT_COUNT 5023 + zip-6 + visor. Se deja abierto:
+# la costura se disimula con textura y NORMAL suave, no con geometria.
+NECK_BOUNDARY_MODE = "open"
+
+
+def neck_boundary_vertex_count(tris: list[tuple[int, int, int]]) -> int:
+    """Vertices en aristas de boundary (pertenecen a un solo tri).
+
+    Solo conteo para pinnar la decision open: >0 confirma borde abierto
+    sin cambiar topologia. Total sobre la lista dada.
+    """
+    from collections import Counter
+
+    edges: Counter[tuple[int, int]] = Counter()
+    for tri in tris:
+        a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
+        for u, v in ((a, b), (b, c), (c, a)):
+            key = (u, v) if u < v else (v, u)
+            edges[key] += 1
+    boundary: set[int] = set()
+    for (u, v), n in edges.items():
+        if n == 1:
+            boundary.add(u)
+            boundary.add(v)
+    return len(boundary)
 
 
 def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] | Err[DomainError]:
@@ -410,6 +456,8 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
         except Exception:  # noqa: BLE001 - desplazamiento invalido: via legado
             delta = None
     if delta is not None and len(delta) == len(positions):
+        _LAST_DISPLACE_STATS["real"] = 1.0
+        _LAST_DISPLACE_STATS["legacy"] = 0.0
         return Ok(
             [
                 (
@@ -420,13 +468,12 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
                 for (x, y, z), (dx, dy, dz) in zip(positions, [tuple(map(float, row)) for row in delta])
             ]
         )
-    width = len(coeffs)
-    return Ok(
-        [
-            (x + min(max(coeffs[idx % width] * 0.01, -_LEGACY_DISPLACE_MAX), _LEGACY_DISPLACE_MAX), y, z)
-            for idx, (x, y, z) in enumerate(positions)
-        ]
-    )
+    _LAST_DISPLACE_STATS["real"] = 0.0
+    _LAST_DISPLACE_STATS["legacy"] = 1.0
+    finite = [float(c) for c in coeffs if math.isfinite(float(c))]
+    mean_c = sum(finite) / len(finite) if finite else 0.0
+    uni = min(max(mean_c * 0.01, -_LEGACY_DISPLACE_MAX), _LEGACY_DISPLACE_MAX)
+    return Ok([(x + uni, y, z) for x, y, z in positions])
 
 
 def _eye_png() -> bytes:
@@ -434,6 +481,42 @@ def _eye_png() -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _smooth_vertex_normals(
+    positions: list[tuple[float, float, float]],
+    tris: list[tuple[int, int, int]],
+) -> list[tuple[float, float, float]]:
+    """Normales suaves promediadas por vertice, unitarias y deterministas.
+
+    Promedia las normales de caras adyacentes y normaliza. Vertices
+    degenerados (norma ~0 o no finita) caen a (0,0,1) determinista para
+    mantener el accessor finito y unitario. Sin NORMAL el visor usa
+    sombreado plano facetado; con esta se renderiza cabeza suave.
+    """
+    pos = np.asarray(positions, dtype=np.float64)
+    acc = np.zeros_like(pos)
+    for tri in tris:
+        a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
+        if a < 0 or b < 0 or c < 0 or a >= len(positions) or b >= len(positions) or c >= len(positions):
+            continue
+        edge1 = pos[b] - pos[a]
+        edge2 = pos[c] - pos[a]
+        n = np.cross(edge1, edge2)
+        if not bool(np.isfinite(n).all()):
+            continue
+        acc[a] += n
+        acc[b] += n
+        acc[c] += n
+    out: list[tuple[float, float, float]] = []
+    for i in range(len(positions)):
+        nx, ny, nz = float(acc[i][0]), float(acc[i][1]), float(acc[i][2])
+        length = math.sqrt(nx * nx + ny * ny + nz * nz)
+        if not (math.isfinite(length)) or length < 1e-12:
+            out.append((0.0, 0.0, 1.0))
+        else:
+            out.append((nx / length, ny / length, nz / length))
+    return out
 
 
 def build_personalized_glb(
@@ -451,7 +534,10 @@ def build_personalized_glb(
     determinista como fallback local. Las UVs van en convencion glTF
     (`v = 1 - v_uv`). Tris a caballo son Err explicito, nunca drop
     silencioso: dropped==len(all)-len(skin)-len(eye) debe ser 0.
-    Cada seccion del BIN va padded a 4 antes de offsets (pos/uv/skin/eye/pngs).
+    Normales suaves promediadas por vertice en ambas primitivas
+    (atributo NORMAL, unitarias y finitas): sin ellas el visor sombrea
+    facetado plano. Cada seccion del BIN va padded a 4 antes de offsets
+    (pos/uv/normal/skin/eye/pngs).
     """
     try:
         displaced = displaced_positions(fit)
@@ -490,6 +576,8 @@ def build_personalized_glb(
             eye_png = _eye_png()
         pos_buf = struct.pack(f"<{VERT_COUNT * 3}f", *[c for p in positions for c in p])
         uv_buf = struct.pack(f"<{VERT_COUNT * 2}f", *[c for t in split_uvs for c in t])
+        normals = _smooth_vertex_normals(positions, template_tris)
+        nrm_buf = struct.pack(f"<{VERT_COUNT * 3}f", *[c for n in normals for c in n])
         skin_flat = [v for tri in skin_tris for v in tri]
         eye_flat = [v for tri in eye_tris for v in tri]
         if not skin_flat or not eye_flat:
@@ -505,21 +593,23 @@ def build_personalized_glb(
         skin_buf = struct.pack(skin_fmt, *skin_flat)
         eye_buf = struct.pack(eye_fmt, *eye_flat)
         # Pad a 4 tras cada seccion antes de offsets (glTF byteOffset%4==0).
-        pos_len, uv_len = len(pos_buf), len(uv_buf)
+        pos_len, uv_len, nrm_len = len(pos_buf), len(uv_buf), len(nrm_buf)
         skin_len, eye_len = len(skin_buf), len(eye_buf)
         skin_png_len, eye_png_len = len(skin_png), len(eye_png)
         pos_pad = _pad_bytes(pos_buf)
         uv_pad = _pad_bytes(uv_buf)
+        nrm_pad = _pad_bytes(nrm_buf)
         skin_pad = _pad_bytes(skin_buf)
         eye_pad = _pad_bytes(eye_buf)
         skin_png_pad = _pad_bytes(skin_png)
         eye_png_pad = _pad_bytes(eye_png)
         uv_off = len(pos_pad)
-        skin_off = uv_off + len(uv_pad)
+        nrm_off = uv_off + len(uv_pad)
+        skin_off = nrm_off + len(nrm_pad)
         eye_off = skin_off + len(skin_pad)
         skin_png_off = eye_off + len(eye_pad)
         eye_png_off = skin_png_off + len(skin_png_pad)
-        bin_buf = pos_pad + uv_pad + skin_pad + eye_pad + skin_png_pad + eye_png_pad
+        bin_buf = pos_pad + uv_pad + nrm_pad + skin_pad + eye_pad + skin_png_pad + eye_png_pad
         while len(bin_buf) % 4 != 0:
             bin_buf += b"\x00"
         xs = [p[0] for p in positions]
@@ -531,23 +621,24 @@ def build_personalized_glb(
             '{"asset":{"version":"2.0","generator":"vultus-flame-fit"},"scene":0,'
             '"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0,"name":"VultusFaceFlame"}],'
             '"meshes":[{"name":"FaceFlame","primitives":['
-            '{"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":2,"material":0},'
-            '{"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":3,"material":1}'
+            '{"attributes":{"POSITION":0,"NORMAL":2,"TEXCOORD_0":1},"indices":3,"material":0},'
+            '{"attributes":{"POSITION":0,"NORMAL":2,"TEXCOORD_0":1},"indices":4,"material":1}'
             "]}],"
             '"materials":['
             '{"name":"SkinPBR","pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.7,"baseColorTexture":{"index":0}}},'
             '{"name":"EyePBR","pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":0.3,"baseColorTexture":{"index":1}}}'
             "],"
             '"textures":[{"source":0,"sampler":0},{"source":1,"sampler":0}],"samplers":[{"magFilter":9729,"minFilter":9729}],'
-            '"images":[{"bufferView":4,"mimeType":"image/png"},{"bufferView":5,"mimeType":"image/png"}],'
+            '"images":[{"bufferView":5,"mimeType":"image/png"},{"bufferView":6,"mimeType":"image/png"}],'
             f'"buffers":[{{"byteLength":{len(bin_buf)}}}],'
             '"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":%d,"target":34962},'
+            '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34962},'
             '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34962},'
             '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34963},'
             '{"buffer":0,"byteOffset":%d,"byteLength":%d,"target":34963},'
             '{"buffer":0,"byteOffset":%d,"byteLength":%d},'
             '{"buffer":0,"byteOffset":%d,"byteLength":%d}]'
-            % (pos_len, uv_off, uv_len, skin_off, skin_len, eye_off, eye_len, skin_png_off, skin_png_len, eye_png_off, eye_png_len)
+            % (pos_len, uv_off, uv_len, nrm_off, nrm_len, skin_off, skin_len, eye_off, eye_len, skin_png_off, skin_png_len, eye_png_off, eye_png_len)
             + ',"accessors":[{"bufferView":0,"componentType":5126,"count":'
             + f"{VERT_COUNT}"
             + ',"type":"VEC3",'
@@ -556,12 +647,15 @@ def build_personalized_glb(
             + '{"bufferView":1,"componentType":5126,"count":'
             + f"{VERT_COUNT}"
             + ',"type":"VEC2"},'
-            + '{"bufferView":2,"componentType":'
+            + '{"bufferView":2,"componentType":5126,"count":'
+            + f"{VERT_COUNT}"
+            + ',"type":"VEC3"},'
+            + '{"bufferView":3,"componentType":'
             + f"{idx_comp}"
             + ',"count":'
             + f"{skin_count}"
             + ',"type":"SCALAR"},'
-            + '{"bufferView":3,"componentType":'
+            + '{"bufferView":4,"componentType":'
             + f"{idx_comp}"
             + ',"count":'
             + f"{eye_count}"

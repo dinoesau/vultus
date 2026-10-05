@@ -282,6 +282,19 @@ Eso permitía `..` en R2, `UV` de largo wrong y `stage` typo en compilación.
 - Si un futuro ciclo quiere la densa, este ADR se revoca con migración por seams (tests de contrato primero, versión mayor).
 - Renders comparativos del mismo job Bush en ambas topologías: evidencia efímera de la decisión (no se commitean: derivan de foto LFW).
 
+### ADR-010 Boundary del cuello abierto + entrada frontal (job c96f1b7c)
+
+**Decisión:** el cuello queda abierto por diseño.
+No se cierra ni se agrega falda en geometría.
+La topología `VERT_COUNT = 5023` queda intacta y ADR-009 sigue vigente (sin hombros).
+La costura se disimula con textura y `NORMAL` suave, no con geometría.
+Pinnado con `neck_boundary_vertex_count > 0` y `NECK_BOUNDARY_MODE == "open"`.
+
+**Contexto:** el template FLAME trae el cuello abierto.
+Cerrar o falda cambia tris y rompe zip-6, visor, extractor, Volume y `BRIDGE_FILES`.
+La foto (b) en 3/4 rompe el supuesto frontal: afín por bbox, facing cull frontal, PnP descartado.
+Poses no frontales degradan el resultado por diseño; no se promete render limpio de lados ocultos.
+
 ## 7. Data Flow
 
 Imagen entra como `bytes` y nunca toca disco persistente más allá de `tmpfs`/`R2 60s`.

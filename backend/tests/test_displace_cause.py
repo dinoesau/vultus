@@ -43,6 +43,7 @@ def test_basis_missing_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path) -> No
 
 
 def test_basis_invalid_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    pytest.importorskip("scipy.io")
     from backend import deep3d as _d3
 
     empty = _no_mat_env(monkeypatch, tmp_path)
@@ -55,17 +56,37 @@ def test_basis_invalid_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path) -> No
 
 
 def test_basis_oom_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    scipy_io = pytest.importorskip("scipy.io")
     from backend import deep3d as _d3
 
     _no_mat_env(monkeypatch, tmp_path)
     (tmp_path / "empty" / "hifi3dpp_model_info.mat").write_bytes(b"x" * 64)
     _clear_caches()
-    import scipy.io
-
-    monkeypatch.setattr(scipy.io, "loadmat", lambda *a, **k: (_ for _ in ()).throw(MemoryError()))
+    monkeypatch.setattr(scipy_io, "loadmat", lambda *a, **k: (_ for _ in ()).throw(MemoryError()))
     seen: list[str] = []
     assert _d3.load_hifi_basis(note=seen.append) is None
     assert seen == ["basis_oom"]
+
+
+def test_basis_missing_without_scipy(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Sin scipy el motivo es basis_missing (no invalid ni oom): decide el motivo."""
+    import sys
+
+    from backend import deep3d as _d3
+
+    topo = tmp_path / "topo"
+    topo.mkdir()
+    (topo / "hifi3dpp_model_info.mat").write_bytes(b"x" * 64)
+    monkeypatch.setenv("TOPO_DIR", str(topo))
+    monkeypatch.setenv("FFHQ_UV_DIR", str(tmp_path / "nowhere"))
+    monkeypatch.setenv("WEIGHTS_ROOT", str(tmp_path / "nowhere"))
+    monkeypatch.setenv("WEIGHTS_DIR", str(tmp_path / "nowhere"))
+    _clear_caches()
+    monkeypatch.setitem(sys.modules, "scipy", None)
+    monkeypatch.setitem(sys.modules, "scipy.io", None)
+    seen: list[str] = []
+    assert _d3.load_hifi_basis(note=seen.append) is None
+    assert seen == ["basis_missing"]
 
 
 def test_transfer_missing_and_invalid_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

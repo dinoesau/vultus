@@ -59,6 +59,7 @@ class HifiBasis:
     id_base: NDArray[np.float64]
     ex_base: NDArray[np.float64]
     head_tri: NDArray[np.int64]
+    keypoints: NDArray[np.int64]
 
 
 def _sha256_file(path: str) -> Ok[str] | Err[DomainError]:
@@ -74,8 +75,8 @@ def load_hifi_basis_from(mat_path: object) -> Ok[HifiBasis] | Err[DomainError]:
 
     Total: `Err` ruidoso si el path no es el byte congelado, si falta
     scipy, o si las formas no son las upstream exactas
-    (mean 20481x3, idBase 61443x532, exBase 61443x45, head_tri 40832x3).
-    Nunca sustituto silencioso, nunca lanza por inputs esperados.
+    (mean 20481x3, idBase 61443x532, exBase 61443x45, head_tri 40832x3,
+    keypoints 68). Nunca sustituto silencioso, nunca lanza por inputs esperados.
     """
     if not isinstance(mat_path, str) or not mat_path:
         return Err(MlFailed(detail=MlDecode(details="v3 dense mat path invalid")))
@@ -96,6 +97,7 @@ def load_hifi_basis_from(mat_path: object) -> Ok[HifiBasis] | Err[DomainError]:
         # Convencion MATLAB 1-based -> 0-based una vez en el borde (espejo
         # del upstream `head_tri - 1` en `parametric_face_model.py`).
         head_tri = np.asarray(m["head_tri"], dtype=np.int64) - 1
+        keypoints = np.asarray(m["keypoints"], dtype=np.int64).reshape(-1) - 1
     except (KeyError, ValueError, TypeError) as exc:
         return Err(MlFailed(detail=MlDecode(details=f"v3 dense mat unreadable: {exc}")))
     if id_base.shape != (DENSE_VERTS * 3, DENSE_ID_DIMS):
@@ -106,9 +108,13 @@ def load_hifi_basis_from(mat_path: object) -> Ok[HifiBasis] | Err[DomainError]:
         return Err(MlFailed(detail=MlDecode(details=f"v3 dense head_tri shape {head_tri.shape} != upstream")))
     if int(head_tri.min()) < 0 or int(head_tri.max()) >= DENSE_VERTS:
         return Err(MlFailed(detail=MlDecode(details="v3 dense head_tri index out of range")))
+    if keypoints.shape != (68,):
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dense keypoints shape {keypoints.shape} != upstream")))
+    if int(keypoints.min()) < 0 or int(keypoints.max()) >= DENSE_VERTS:
+        return Err(MlFailed(detail=MlDecode(details="v3 dense keypoints index out of range")))
     if not (_is_finite_array(mean) and _is_finite_array(id_base) and _is_finite_array(ex_base)):
         return Err(MlFailed(detail=MlDecode(details="v3 dense basis non-finite")))
-    return Ok(HifiBasis(mean=mean, id_base=id_base, ex_base=ex_base, head_tri=head_tri))
+    return Ok(HifiBasis(mean=mean, id_base=id_base, ex_base=ex_base, head_tri=head_tri, keypoints=keypoints))
 
 
 def compute_shape_numpy(

@@ -92,15 +92,14 @@ def reprojection_error(
     return float(np.sqrt(((pred - p) ** 2).mean()))
 
 
-def iterative_pose_errors(
+def refine_pose(
     obj: NDArray[np.float64], img: NDArray[np.float64], focal: float, steps: int = 5
-) -> list[float]:
-    """Refina pose 6-DOF y retorna el error inicial + uno por iteracion.
+) -> tuple[NDArray[np.float64], list[float]]:
+    """Refina pose 6-DOF y retorna `(pose, errores)` (inicial + uno por iter).
 
     Descenso por diferencias finitas con paso amortiguado: cada paso
     prueba los 6 ejes y acepta solo mejoras (monotono decreciente por
-    construccion). El error baja entre iteraciones en foto fixture.
-    Puro numpy, determinista.
+    construccion). Puro numpy, determinista.
     """
     o = np.asarray(obj, dtype=np.float64)
     p = np.asarray(img, dtype=np.float64)
@@ -130,4 +129,12 @@ def iterative_pose_errors(
         errors.pop(1)
     while len(errors) < n_steps + 1:
         errors.append(errors[-1])
-    return [float(e) for e in errors]
+    return (np.asarray(pose, dtype=np.float64), [float(e) for e in errors])
+
+
+def iterative_pose_errors(
+    obj: NDArray[np.float64], img: NDArray[np.float64], focal: float, steps: int = 5
+) -> list[float]:
+    """Errores del refinamiento (inicial + uno por iteracion). Delega en `refine_pose`."""
+    _, errors = refine_pose(obj, img, focal, steps)
+    return errors

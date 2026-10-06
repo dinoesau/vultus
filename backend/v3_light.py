@@ -19,6 +19,8 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from backend.domain import DomainError, Err, MlDecode, MlFailed, Ok
+
 # Checkpoint DPR real (espejo de `backend.dpr.DPR_T7_NAME`).
 DPR_T7_NAME = "trained_model_03.t7"
 
@@ -90,3 +92,56 @@ def relight(
     gain = shading / ref
     out = alb * gain[..., None] if alb.ndim == 3 else alb * gain
     return np.clip(np.asarray(out, dtype=np.float64), 0.0, 255.0)
+
+
+def _luminance_512(photo_path: str) -> NDArray[np.float64] | None:
+    """Canal L 0-1 a 512 de la foto (misma convencion que `_dpr_normalize`)."""
+    try:
+        from PIL import Image
+
+        with Image.open(photo_path) as handle:
+            small = handle.convert("RGB").resize((512, 512), Image.Resampling.BILINEAR)
+        lab = small.convert("LAB")
+        lum = np.asarray(lab, dtype=np.float64)[:, :, 0] / 255.0
+        if lum.shape != (512, 512) or not bool(np.isfinite(lum).all()):
+            return None
+        return np.asarray(lum, dtype=np.float64)
+    except Exception:  # noqa: BLE001 - foto ilegible: None loud via caller
+        return None
+
+
+def estimate_sh_from_photo(photo_path: object) -> Ok[NDArray[np.float64]] | Err[DomainError]:
+    """Borde DPR: 9 SH grises de la foto via Hourglass real (`trained_model_03.t7`).
+
+    Config por env (`DPR_DIR` + `WEIGHTS_ROOT`/`WEIGHTS_DIR`, espejo de
+    `backend.dpr`). Total: `Err` loud sin `.t7`/torch/foto (nunca
+    gray-world silencioso en v3). Sin torch top-level (lazy).
+    """
+    if not isinstance(photo_path, str) or not photo_path:
+        return Err(MlFailed(detail=MlDecode(details="v3 dpr photo path invalid")))
+    try:
+        from backend.dpr import dpr_available, estimate_sh, find_t7, load_light_net
+    except ImportError as exc:
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dpr backend missing: {exc}")))
+    if not dpr_available():
+        return Err(MlFailed(detail=MlDecode(details="v3 dpr requires torch + trained_model_03.t7")))
+    t7 = find_t7()
+    if t7 is None:
+        return Err(MlFailed(detail=MlDecode(details="v3 dpr checkpoint missing")))
+    lum = _luminance_512(photo_path)
+    if lum is None:
+        return Err(MlFailed(detail=MlDecode(details="v3 dpr photo unreadable")))
+    try:
+        net = load_light_net(t7)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dpr checkpoint mismatch: {exc}")))
+    try:
+        sh = estimate_sh(net, lum)
+    except Exception as exc:  # noqa: BLE001 - estimacion caida: Err loud
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dpr estimate failed: {exc}")))
+    if sh is None:
+        return Err(MlFailed(detail=MlDecode(details="v3 dpr estimate returned none")))
+    out = np.asarray(sh, dtype=np.float64).reshape(-1)
+    if out.shape != (9,) or not bool(np.isfinite(out).all()):
+        return Err(MlFailed(detail=MlDecode(details="v3 dpr sh invalid")))
+    return Ok(np.asarray(out, dtype=np.float64))

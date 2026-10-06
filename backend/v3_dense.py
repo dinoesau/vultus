@@ -15,7 +15,9 @@ lanza por inputs esperados; retorna `Result`, fail-loud sin Error Hiding.
 
 from __future__ import annotations
 
+import hashlib
 import math
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,6 +27,14 @@ from backend.domain import DomainError, Err, MlDecode, MlFailed, Ok
 # Topologia densa canonica (espejo del .mat HiFi3D++).
 DENSE_VERTS = 20481
 DENSE_TRIS = 40832
+DENSE_ID_DIMS = 532
+DENSE_EXP_DIMS = 45
+
+# Byte congelado upstream de `hifi3dpp_model_info.mat` (mirror solo lectura).
+# `load_hifi_basis_from` falla ruidoso si el archivo difiere: nunca un
+# sustituto silencioso (p.ej. `data/HIFI3D.obj` v1, ya descartado).
+MAT_SHA_FROZEN = "9b501bb8a1c38d65a1706add89a9418c7fe7b729bcc5e5ff38e675a61b57963b"
+MAT_NAME = "hifi3dpp_model_info.mat"
 
 # Ojos v3: 2 esferas lat-long 26x21 (546 verts/bola, 1040 tris/bola),
 # mismos defaults geometricos que el fixture forense documentado.
@@ -39,6 +49,125 @@ def _is_finite_array(arr: NDArray[np.float64]) -> bool:
         return bool(np.isfinite(np.asarray(arr)).all())
     except (ValueError, TypeError):
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class HifiBasis:
+    """Base HiFi3D++ real del `.mat`. Solo via `load_hifi_basis_from`."""
+
+    mean: NDArray[np.float64]
+    id_base: NDArray[np.float64]
+    ex_base: NDArray[np.float64]
+    head_tri: NDArray[np.int64]
+    keypoints: NDArray[np.int64]
+
+
+def _read_mat(mat_path: str) -> dict[object, object]:
+    from scipy.io import loadmat  # type: ignore[import-untyped]
+
+    return dict(loadmat(mat_path))
+
+
+def _sha256_file(path: str) -> Ok[str] | Err[DomainError]:
+    try:
+        with open(path, "rb") as fh:
+            return Ok(hashlib.sha256(fh.read()).hexdigest())
+    except OSError as exc:
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dense mat unreadable: {exc}")))
+
+
+def _env(name: str) -> str:
+    import os
+
+    return os.environ.get(name, "").strip()
+
+
+def find_dense_mat() -> str | None:
+    """Ruta del `.mat` congelado en candidatos (`TOPO_DIR` + `WEIGHTS_*`)."""
+    import os
+
+    cands: list[str] = []
+    topo = _env("TOPO_DIR")
+    if topo:
+        cands.append(os.path.join(topo, MAT_NAME))
+    root = _env("WEIGHTS_ROOT") or _env("WEIGHTS_DIR") or "/weights"
+    if root:
+        cands.append(os.path.join(root, "topo_assets", MAT_NAME))
+    for cand in cands:
+        try:
+            if os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def load_hifi_basis_from(mat_path: object) -> Ok[HifiBasis] | Err[DomainError]:
+    """Borde `.mat`: verifica el byte congelado y parsea una vez a `HifiBasis`.
+
+    Total: `Err` ruidoso si el path no es el byte congelado, si falta
+    scipy, o si las formas no son las upstream exactas
+    (mean 20481x3, idBase 61443x532, exBase 61443x45, head_tri 40832x3,
+    keypoints 68). Nunca sustituto silencioso, nunca lanza por inputs esperados.
+    """
+    if not isinstance(mat_path, str) or not mat_path:
+        return Err(MlFailed(detail=MlDecode(details="v3 dense mat path invalid")))
+    digest = _sha256_file(mat_path)
+    if isinstance(digest, Err):
+        return digest
+    if digest.value != MAT_SHA_FROZEN:
+        return Err(MlFailed(detail=MlDecode(details="v3 dense mat sha mismatch (no es el byte congelado)")))
+    try:
+        m = _read_mat(mat_path)
+        mean = np.asarray(m["meanshape"], dtype=np.float64).reshape(DENSE_VERTS, 3)
+        id_base = np.asarray(m["idBase"], dtype=np.float64)
+        ex_base = np.asarray(m["exBase"], dtype=np.float64)
+        # Convencion MATLAB 1-based -> 0-based una vez en el borde (espejo
+        # del upstream `head_tri - 1` en `parametric_face_model.py`).
+        head_tri = np.asarray(m["head_tri"], dtype=np.int64) - 1
+        keypoints = np.asarray(m["keypoints"], dtype=np.int64).reshape(-1) - 1
+    except (ImportError, KeyError, ValueError, TypeError) as exc:
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dense mat unreadable: {exc}")))
+    if id_base.shape != (DENSE_VERTS * 3, DENSE_ID_DIMS):
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dense idBase shape {id_base.shape} != upstream")))
+    if ex_base.shape != (DENSE_VERTS * 3, DENSE_EXP_DIMS):
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dense exBase shape {ex_base.shape} != upstream")))
+    if head_tri.shape != (DENSE_TRIS, 3):
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dense head_tri shape {head_tri.shape} != upstream")))
+    if int(head_tri.min()) < 0 or int(head_tri.max()) >= DENSE_VERTS:
+        return Err(MlFailed(detail=MlDecode(details="v3 dense head_tri index out of range")))
+    if keypoints.shape != (68,):
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dense keypoints shape {keypoints.shape} != upstream")))
+    if int(keypoints.min()) < 0 or int(keypoints.max()) >= DENSE_VERTS:
+        return Err(MlFailed(detail=MlDecode(details="v3 dense keypoints index out of range")))
+    if not (_is_finite_array(mean) and _is_finite_array(id_base) and _is_finite_array(ex_base)):
+        return Err(MlFailed(detail=MlDecode(details="v3 dense basis non-finite")))
+    return Ok(HifiBasis(mean=mean, id_base=id_base, ex_base=ex_base, head_tri=head_tri, keypoints=keypoints))
+
+
+def dense_uv01_from_mat(mat_path: object) -> Ok[NDArray[np.float64]] | Err[DomainError]:
+    """Borde UV: `vtx_vt` 0..512 del `.mat` a 0..1 para la cabeza (20481,2).
+
+    Reusa el byte congelado (`MAT_SHA_FROZEN` verificado aqui tambien: mismo
+    archivo, misma garantia). Total: `Err` ruidoso si forma/rango difieren.
+    """
+    if not isinstance(mat_path, str) or not mat_path:
+        return Err(MlFailed(detail=MlDecode(details="v3 dense uv path invalid")))
+    digest = _sha256_file(mat_path)
+    if isinstance(digest, Err):
+        return digest
+    if digest.value != MAT_SHA_FROZEN:
+        return Err(MlFailed(detail=MlDecode(details="v3 dense uv sha mismatch (no es el byte congelado)")))
+    try:
+        m = _read_mat(mat_path)
+        vt = np.asarray(m["vtx_vt"], dtype=np.float64)
+    except (ImportError, KeyError, ValueError, TypeError) as exc:
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dense uv unreadable: {exc}")))
+    if vt.shape != (DENSE_VERTS, 2):
+        return Err(MlFailed(detail=MlDecode(details=f"v3 dense vtx_vt shape {vt.shape} != upstream")))
+    if not bool(np.isfinite(vt).all()) or float(vt.min()) < 0.0 or float(vt.max()) > 512.0:
+        return Err(MlFailed(detail=MlDecode(details="v3 dense vtx_vt range != 0..512")))
+    return Ok(np.asarray(vt / 512.0, dtype=np.float64))
 
 
 def compute_shape_numpy(

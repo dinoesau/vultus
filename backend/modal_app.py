@@ -913,6 +913,96 @@ if HAVE_MODAL:
     )(texture_worker)
 
 
+def v3_figure_worker(job_id: str, r2_key: "R2Key") -> bytes:
+    """Worker v3 figura - cadena densa completa en GPU de minutos (sin TTL 60).
+
+    Borde: r2_key ya probado (R2Key); imagen via _fetch_r2_bytes ->
+    Result[ImageBytes] a tmpfs; cadena via run_v3_subject con reporte de
+    ramas obligatorio (deep3d=/pose=/texgan=/dpr=/displacement= siempre en
+    log, pase o rechace). Retorna zip v3 (6 piezas) como bytes.
+    Solo definicion: el deploy requiere sign-off del dueno (env Modal
+    unico) y nunca ocurre desde ramas dev.
+    """
+    import tempfile
+    import zipfile
+
+    try:
+        from backend.domain import Err as _ErrVW
+        from backend.domain import Ok as _OkVW
+        from backend.domain import domain_to_message as _msgVW
+        from backend.domain import domain_to_status as _statusVW
+        from backend.v3_bundle import V3Bundle as _V3BundleVW
+        from backend.v3_contract import V3_ZIP_NAMES as _V3NAMES
+        from backend.v3_worker import format_v3_branches as _branchesVW
+        from backend.v3_worker import run_v3_subject as _run_v3
+    except ImportError as exc:  # v3 solo vive como paquete backend.*
+        raise RuntimeError(f"v3 backend missing: {exc}") from exc
+    t0 = time.perf_counter()
+
+    def _report(_jid: str, stats: dict[str, float]) -> None:
+        logger.info("v3 branches job=%s %s", _jid, _branchesVW(stats))
+
+    bucket = _r2_bucket()
+    fetched = _fetch_r2_bytes(bucket, r2_key, job_id)
+    if isinstance(fetched, _ErrVW):
+        _report(job_id, {})
+        msg = _msgVW(fetched.error)
+        if _statusVW(fetched.error) == 400:
+            raise ValueError(msg)
+        raise RuntimeError(msg)
+    if not isinstance(fetched, _OkVW):
+        raise RuntimeError("v3 fetch failed")
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp.write(fetched.value.as_bytes())
+        photo_path = tmp.name
+    try:
+        result = _run_v3(job_id, photo_path, _report)
+    finally:
+        try:
+            os.unlink(photo_path)
+        except OSError:
+            pass
+    if isinstance(result, _ErrVW):
+        raise RuntimeError(_msgVW(result.error))
+    if not isinstance(result, _OkVW) or not isinstance(result.value, _V3BundleVW):
+        raise RuntimeError("v3 figure failed")
+    bundle = result.value
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        for name, part in zip(_V3NAMES, bundle.parts()):
+            zf.writestr(name, part)
+    dt = int((time.perf_counter() - t0) * 1000)
+    logger.info("v3_figure_worker ok job=%s out_len=%d duration_ms=%d", job_id, len(buf.getvalue()), dt)
+    return buf.getvalue()
+
+
+if HAVE_MODAL:
+    v3_figure_worker = app.function(
+        image=image,
+        gpu="T4",
+        cpu=4,
+        memory=32768,
+        volumes={WEIGHTS_ROOT: weights},
+        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        max_containers=1,  # 1 sujeto por GPU (anti-OOM, cadena de minutos)
+        timeout=3600,  # Minutos sin TTL 60: densa + pose + TexGAN largo + DPR + bundle
+        min_containers=0,
+        env={
+            "GNM_ASSETS_DIR": GNM_ASSETS_DIR,
+            "VULTUS_REAL_ML": "1",
+            "FFHQ_UV_DIR": FFHQ_UV_DIR,
+            "DECA_DIR": DECA_DIR,
+            "FLAME_ASSETS_DIR": FLAME_ASSETS_DIR,
+            "TEXGAN_DIR": TEXGAN_DIR,
+            "DEEP3D_DIR": DEEP3D_DIR,
+            "TOPO_DIR": TOPO_DIR,
+            "PARSING_DIR": PARSING_DIR,
+            "DPR_DIR": DPR_DIR,
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        },
+    )(v3_figure_worker)
+
+
 def mediapipe_worker(job_id: str, r2_key: "R2Key"):
     """Worker 1 - MediaPipe 478 landmarks CPU. Lee imagen de R2, retorna JSON 478 finitos.
 

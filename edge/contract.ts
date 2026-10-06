@@ -99,6 +99,15 @@ export const V3_ZIP_NAMES = [
 ] as const;
 export type V3ZipName = (typeof V3_ZIP_NAMES)[number];
 
+// Zip servido por GET /v3/jobs/{id}/figure (R2 jobs/{id}/figure-v3.zip,
+// retencion de dias, sin TTL 60). Nombre propio: nunca result.zip.
+export const V3_FIGURE_ZIP = "figure-v3.zip";
+
+/** Path tipado del seam figura v3. Solo via JobId ya probado, sin `as`. */
+export function v3FigurePath(id: JobId): string {
+  return `/v3/jobs/${jobIdToString(id)}/figure`;
+}
+
 // Version de contrato: v1 legacy era 7 piezas con heatmap sin versionar;
 // v2 es zip-6 sin heatmap. El transporte (sobre) no cambia, el payload si.
 declare const ContractVersionBrand: unique symbol;

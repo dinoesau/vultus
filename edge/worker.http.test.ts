@@ -75,6 +75,14 @@ describe("gateway http en worker runtime", () => {
     expect((await SELF.fetch(`https://gateway/v1/jobs/${job_id}/result`)).status).toBe(409);
   });
 
+  it("v3 figure: 400 uuid roto, 404 desconocido, 409 pre-done", async () => {
+    expect((await SELF.fetch("https://gateway/v3/jobs/not-a-uuid/figure")).status).toBe(400);
+    const unknown = "22222222-2222-4222-8222-222222222222";
+    expect((await SELF.fetch(`https://gateway/v3/jobs/${unknown}/figure`)).status).toBe(404);
+    const job_id = await newJobId();
+    expect((await SELF.fetch(`https://gateway/v3/jobs/${job_id}/figure`)).status).toBe(409);
+  });
+
   it("health reporta gateway worker y ttl", async () => {
     const res = await SELF.fetch("https://gateway/health");
     expect(res.status).toBe(200);

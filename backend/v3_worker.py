@@ -60,7 +60,10 @@ def format_v3_branches(stats: dict[str, float]) -> str:
 
 
 # Tres luces fijas de figura (perturbaciones SH deterministas sobre la estimada).
-_RELIGHT_DELTAS: tuple[tuple[int, float], ...] = ((0, 0.0), (0, 2.0), (1, 1.0), (2, 1.0))
+# Criterio (impuesto por scripts/e2e-v3-figure.py): cada relight difiere de
+# neutral en el trio real; con SH tenues un +1.0 en banda 1 no sale del
+# suelo del clamp y clava identico a neutral.
+_RELIGHT_DELTAS: tuple[tuple[int, float], ...] = ((0, 0.0), (0, 2.0), (1, 2.0), (2, 1.0))
 
 
 def _radial_normals_512() -> NDArray[np.float64]:

@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from backend.domain import (
+    DISPLACE_CAUSE_KEYS,
     UV_HEIGHT,
     UV_WIDTH,
     CompleteUv,
@@ -297,9 +298,9 @@ def _upright_uv(u: float, v: float) -> tuple[float, float]:
 
     El bin trae v=0 en chin (convención OBJ): sin flip la cara sale
     invertida en el PNG. Solo rama archivo; el fixture sintético ya trae
-    v=0 arriba. Ojos (2-3, textura aparte) intactos. GLB y raster usan las
-    mismas UVs, asi que malla y atlas siguen consistentes; el flipY del
-    visor cancela igual que antes.
+    v=0 arriba. Ojos (2-3, textura aparte) intactos. Convencion V unica:
+    loader, raster y GLB comparten las mismas UVs (chin v≈1, brow v≈0);
+    ningun flip repartido entre modulos ni cancelacion en el visor.
     """
     if v <= 1.0:
         return (u, 1.0 - v)
@@ -408,7 +409,19 @@ def skin_vertex_indices() -> list[int]:
 _DISPLACE_MAX = 0.15
 _LEGACY_DISPLACE_MAX = 0.005
 
-_LAST_DISPLACE_STATS = ThreadLocalStats({"real": 0.0, "legacy": 0.0})
+_LAST_DISPLACE_STATS = ThreadLocalStats(
+    {
+        "real": 0.0,
+        "legacy": 0.0,
+        "basis_missing": 0.0,
+        "basis_invalid": 0.0,
+        "basis_oom": 0.0,
+        "transfer_missing": 0.0,
+        "transfer_invalid": 0.0,
+        "delta_nonfinite": 0.0,
+        "delta_error": 0.0,
+    }
+)
 
 # Boundary del cuello: abierto por diseno (ADR-009 vigente: sin hombros).
 # El template FLAME trae el cuello abierto; cerrarlo o poner falda cambia
@@ -445,6 +458,10 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
         return loaded
     positions, _, _ = loaded.value
     coeffs = fit.coeffs.as_tuple()
+    # Causas: reset por job (el store es por hilo y los hilos se reusan
+    # entre jobs en Modal) y copia de la primera activa tras el intento.
+    for _cause_key in DISPLACE_CAUSE_KEYS:
+        _LAST_DISPLACE_STATS[_cause_key] = 0.0
     try:
         from backend.deep3d import real_displacement as _real_delta
     except ImportError:
@@ -452,7 +469,7 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
     delta = None
     if _real_delta is not None:
         try:
-            delta = _real_delta(coeffs)
+            delta = _real_delta(coeffs, note=lambda cause: _LAST_DISPLACE_STATS.__setitem__(cause, 1.0))
         except Exception:  # noqa: BLE001 - desplazamiento invalido: via legado
             delta = None
     if delta is not None and len(delta) == len(positions):
@@ -531,8 +548,9 @@ def build_personalized_glb(
     el albedo (CompleteUv legacy o RenderedImage completion; ambos UV_LEN por
     as_bytes) o `atlas_png` si se da; el ojo usa `eye_texture` real cuando
     se provee (bake_eye_texture desde eye_ball_tex.png) o blanca
-    determinista como fallback local. Las UVs van en convencion glTF
-    (`v = 1 - v_uv`). Tris a caballo son Err explicito, nunca drop
+    determinista como fallback local. Las UVs van spec-correctas tal cual
+    del loader (convencion unica V: chin v≈1, brow v≈0, ojos en 2-3; sin
+    segundo flip: GLTFLoader ya usa `flipY=false`). Tris a caballo son Err
     silencioso: dropped==len(all)-len(skin)-len(eye) debe ser 0.
     Normales suaves promediadas por vertice en ambas primitivas
     (atributo NORMAL, unitarias y finitas): sin ellas el visor sombrea
@@ -550,7 +568,11 @@ def build_personalized_glb(
         if isinstance(loaded, Err):
             return loaded
         _, template_uvs, template_tris = loaded.value
-        split_uvs = [(float(u), 1.0 - float(v)) for u, v in template_uvs]
+        # UVs spec-correctas tal cual del loader (chin v≈1 abajo, brow v≈0
+        # arriba, ojos en 2-3): el segundo flip historico (`1-v` sobre el
+        # flip del loader) invertia la textura en visores spec-compliant
+        # (`flipY=false`); el flipY=true de three.js plano lo ocultaba.
+        split_uvs = list(template_uvs)
         skin_tris = [t for t in template_tris if t[0] < EYE_VERT_START and t[1] < EYE_VERT_START and t[2] < EYE_VERT_START]
         eye_tris = [t for t in template_tris if t[0] >= EYE_VERT_START and t[1] >= EYE_VERT_START and t[2] >= EYE_VERT_START]
         # Tris a caballo -> Err explicito, nunca drop silencioso.

@@ -33,13 +33,13 @@ from __future__ import annotations
 # (lazy/opcional, idiom face_parsing.py). La API publica si va tipada.
 import io
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
-from backend.domain import DomainError, Err, MlDecode, MlFailed, Ok
+from backend.domain import DisplaceCause, DomainError, Err, MlDecode, MlFailed, Ok
 
 # --- Layout Deep3D-HiFi3D++ (espejo de hifi3dpp.py + recon_deep3d.py) ---
 DEEP3D_ID = 532
@@ -402,20 +402,30 @@ def load_recon(epoch_path: str) -> ReconNet:
 _basis_cache: dict[str, dict[str, NDArray[np.float64]]] = {}
 
 
-def load_hifi_basis() -> dict[str, NDArray[np.float64]] | None:
+def load_hifi_basis(
+    note: Callable[[DisplaceCause], None] | None = None,
+) -> dict[str, NDArray[np.float64]] | None:
     """Base HiFi3D++ del .mat (idBase200, exBase45, mean20481). Cacheada.
 
-    None sin scipy/mat o ante cualquier fallo (el caller cae al legado).
+    None sin scipy/mat o ante cualquier fallo (el caller cae al legado);
+    la causa va por `note` (basis_missing/invalid/oom), nunca a ciegas.
     float32 del .mat promovido a float64 solo en salida.
     """
+
+    def _fail(cause: DisplaceCause) -> None:
+        if note is not None:
+            note(cause)
+
     mat = find_mat()
     if mat is None:
+        _fail("basis_missing")
         return None
     cached = _basis_cache.get(mat)
     if cached is not None:
         return cached
     try:
         if not scipy_available():
+            _fail("basis_missing")
             return None
         from scipy.io import loadmat
 
@@ -424,6 +434,7 @@ def load_hifi_basis() -> dict[str, NDArray[np.float64]] | None:
         idb = np.asarray(m["idBase"], dtype=np.float64)
         exb = np.asarray(m["exBase"], dtype=np.float64)
         if mean.shape[0] != 20481 or idb.shape[0] != 61443 or exb.shape[0] != 61443:
+            _fail("basis_invalid")
             return None
         out = {
             "mean": mean,
@@ -433,7 +444,11 @@ def load_hifi_basis() -> dict[str, NDArray[np.float64]] | None:
             "ex_full": np.asarray(m["exBase"], dtype=np.float32),
             "head_tri": np.asarray(m["head_tri"], dtype=np.int64),
         }
-    except Exception:  # noqa: BLE001 - sin scipy/mat: via legado geometrico
+    except MemoryError:  # .mat 72MB -> bases ~400MB: OOM con causa
+        _fail("basis_oom")
+        return None
+    except Exception:  # noqa: BLE001 - forma/contenido ilegible: causa, no silencio
+        _fail("basis_invalid")
         return None
     _basis_cache[mat] = out
     return out
@@ -442,10 +457,18 @@ def load_hifi_basis() -> dict[str, NDArray[np.float64]] | None:
 _transfer_cache: dict[str, dict[str, NDArray[np.float64]]] = {}
 
 
-def load_transfer() -> dict[str, NDArray[np.float64]] | None:
-    """Asset IDW 20481->5023 (solo numpy). None si ausente/invalido."""
+def load_transfer(
+    note: Callable[[DisplaceCause], None] | None = None,
+) -> dict[str, NDArray[np.float64]] | None:
+    """Asset IDW 20481->5023 (solo numpy). None si ausente/invalido, con causa."""
+
+    def _fail(cause: DisplaceCause) -> None:
+        if note is not None:
+            note(cause)
+
     path = find_transfer()
     if path is None:
+        _fail("transfer_missing")
         return None
     cached = _transfer_cache.get(path)
     if cached is not None:
@@ -456,11 +479,17 @@ def load_transfer() -> dict[str, NDArray[np.float64]] | None:
         w = np.asarray(z["w"], dtype=np.float64)
         scale = np.asarray(z["scale"], dtype=np.float64)
         if idx.shape != (5023, 3) or w.shape != (5023, 3) or scale.shape != (3,):
+            _fail("transfer_invalid")
             return None
         if idx.min() < 0 or idx.max() >= 20481:
+            _fail("transfer_invalid")
             return None
         out = {"idx": idx, "w": w, "scale": scale}
-    except Exception:  # noqa: BLE001 - asset invalido: via legado geometrico
+    except MemoryError:  # OOM leyendo asset: causa, no silencio
+        _fail("transfer_invalid")
+        return None
+    except Exception:  # noqa: BLE001 - asset invalido: causa, no silencio
+        _fail("transfer_invalid")
         return None
     _transfer_cache[path] = out
     return out
@@ -496,17 +525,26 @@ def reconstruct_dense(
         return None
 
 
-def real_displacement(coeffs253: tuple[float, ...]) -> NDArray[np.float64] | None:
+def real_displacement(
+    coeffs253: tuple[float, ...], note: Callable[[DisplaceCause], None] | None = None
+) -> NDArray[np.float64] | None:
     """Delta 5023 real: base HiFi3D++ reconstruida + transfer IDW.
 
     Interpreta la moneda fit 253 (id200/exp45). None sin base/transfer
-    o ante cualquier fallo: el caller cae al legado. Solo numpy.
+    o ante cualquier fallo: el caller cae al legado; la causa va por
+    `note` (ya anotada por los loaders, o delta_nonfinite/error aqui).
+    Solo numpy.
     """
+
+    def _fail(cause: DisplaceCause) -> None:
+        if note is not None:
+            note(cause)
+
     try:
         if len(coeffs253) != 253:
             return None
-        basis = load_hifi_basis()
-        transfer = load_transfer()
+        basis = load_hifi_basis(note=note)
+        transfer = load_transfer(note=note)
         if basis is None or transfer is None:
             return None
         idv = np.asarray(coeffs253[:FIT_ID], dtype=np.float64)
@@ -518,7 +556,12 @@ def real_displacement(coeffs253: tuple[float, ...]) -> NDArray[np.float64] | Non
         moved = w[:, :, None] * field[idx]
         delta = moved.sum(axis=1) * transfer["scale"][None, :]
         if not bool(np.isfinite(delta).all()):
+            _fail("delta_nonfinite")
             return None
         return np.asarray(delta, dtype=np.float64)
-    except Exception:  # noqa: BLE001 - desplazamiento invalido: via legado geometrico
+    except MemoryError:  # OOM en etapa delta (.mat 72MB -> ~400MB)
+        _fail("delta_error")
+        return None
+    except Exception:  # noqa: BLE001 - delta inesperado: causa, no silencio
+        _fail("delta_error")
         return None

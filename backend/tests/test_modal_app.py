@@ -333,4 +333,7 @@ def test_branch_log_helpers_expose_effective_branches() -> None:
     assert modal_app._fit_branch_str() in ("deep3d=1 pose=1", "deep3d=1 pose=0", "deep3d=0 pose=1", "deep3d=0 pose=0")
     tex = modal_app._texture_branch_str()
     assert "texgan=" in tex and "dpr=" in tex and "pose_tex=" in tex and "parsing=" in tex
-    assert modal_app._displace_branch_str() in ("displacement=real", "displacement=legacy")
+    line = modal_app._displace_branch_str()
+    assert line == "displacement=real" or line.startswith("displacement=legacy")
+    if line != "displacement=legacy":
+        assert line.startswith("displacement=legacy(cause=") and line.endswith(")")

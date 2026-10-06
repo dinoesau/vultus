@@ -295,6 +295,44 @@ Cerrar o falda cambia tris y rompe zip-6, visor, extractor, Volume y `BRIDGE_FIL
 La foto (b) en 3/4 rompe el supuesto frontal: afín por bbox, facing cull frontal, PnP descartado.
 Poses no frontales degradan el resultado por diseño; no se promete render limpio de lados ocultos.
 
+### ADR-011 Track v3 FFHQ-UV figure en paralelo (revoca solo para v3)
+
+**Decisión:** congelar la vía forense (zip-6, 5023, TTL 60, `CONTRACT_VERSION = 2`)
+y crear el track v3 en paralelo sin tocarla. Solo para v3 se revocan
+explícitamente ADR-009 (FLAME 5023), TTL 60 y zip-6, con migración versionada
+(`CONTRACT_VERSION = 3`, `V3_ZIP_NAMES` disjuntos, `V3_VERT_COUNT = 20481`,
+`V3_TRI_COUNT = 40832`, atlas 1024, retención de días, worker GPU de minutos
+con cola separada sin TTL 60 y renderer diferenciable `pytorch3d` pineado).
+
+**Contexto:** la vía forense no puede llegar al paper por construcción, medido en
+el job `bf9e8b45` (`dx_max` exactamente 0.005, 1740/1780 verts saturados, salto
+0.01 entre vecinos, GLB sin `NORMAL`, TV 3.46/3.72, ramas `dpr=0`/gray-world y
+`texgan` corto, cámara afín por bbox frontal-only, atlas 512, TTL 60 `5+10+30`,
+FLAME 5023 e inputs JPEG 250px). El PR #98 quitó picos y facetas pero su techo es
+"cabeza suave con textura completa", no la figura (malla densa texturizada neutral
++ 3 re-iluminaciones con esferas en 3 sujetos FFHQ, lado a lado, reproyección,
+TV 1024, margen de identidad, determinismo x2).
+
+**Port v3 (solo numpy/pure-python en runtime caliente, sin torch top-level fuera
+de los módulos designados):** `ParametricFaceModel.compute_shape` (mean +
+`idBase@id` + `exBase@exp` → 20481v/40832f) + `Mesh_Add_EyeBall` en
+`backend/v3_dense.py`; loop RGB fitting iterativo (forma, expresión, pose
+perspectiva, textura, luz SH) en worker Modal GPU de minutos con cola separada;
+pose perspectiva (focal + PnP sobre 68 vía `MP_68_MAP`, MTCNN `.pb` TF1 descartado)
+con gate FFHQ 1024 + yaw 15° ruidoso; textura 1024 (`unwrap_1024_info.mat` +
+máscaras, TexGAN enmascarado largo cientos de pasos init `w_avg` solo en texeles
+no válidos, blend Poisson/Laplaciano y `match_color`, TV ≤ 2.0 cero sentinel);
+luz DPR Hourglass real (`trained_model_03.t7`, albedo = foto/shading SH9 con cota
+`[0.5, 2.0]`, relighting neutral + 3 con esferas); bundle v3 nuevo
+(`backend/v3_contract.py`, `backend/v3_bundle.py`) y visor denso; ramas por job
+(`deep3d=`, `pose=`, `texgan=`, `dpr=`, `displacement=`, prohibido fallback sin log).
+
+**Consecuencias:**
+- `backend/v3_*.py` + `edge/contract.ts` (`V3_*`) son el track v3; la vía forense
+  no se toca (tests de freeze).
+- Si v3 quiere cutover, este ADR se promueve con migración por seams (tests de
+  contrato primero, versión mayor), nunca mezclando refactors.
+
 ## 7. Data Flow
 
 Imagen entra como `bytes` y nunca toca disco persistente más allá de `tmpfs`/`R2 60s`.

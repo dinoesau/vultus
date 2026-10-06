@@ -68,6 +68,46 @@ export const ZIP_NAMES = [
 ] as const;
 export type ZipName = (typeof ZIP_NAMES)[number];
 
+// Track v3 FFHQ-UV figure (paralelo, sin tocar la via forense v2).
+// Revoca solo para v3: ADR-009 (FLAME 5023), TTL 60 y zip-6.
+// Migracion versionada: V3_CONTRACT_VERSION = 3 (forense sigue en 2).
+// Bundle v3 de 6 piezas (malla densa + albedo 1024 + neutral + 3 relights
+// con esferas como la figura). Nombres disjuntos del zip-6: prohibido mezclar.
+export const V3_CONTRACT_VERSION_NUMBER = 3;
+export const V3_VERT_COUNT = 20481;
+export const V3_TRI_COUNT = 40832;
+export const V3_UV_SIZE = 1024;
+export const V3_TV_MAX = 2.0;
+export const V3_RETENTION_DAYS = 7;
+
+export const V3_ZIP_MANIFEST = {
+  meshDense: "mesh_dense.glb",
+  albedo: "albedo_1024.png",
+  neutral: "relight_neutral.png",
+  key: "relight_key.png",
+  fill: "relight_fill.png",
+  rim: "relight_rim.png",
+} as const;
+
+export const V3_ZIP_NAMES = [
+  V3_ZIP_MANIFEST.meshDense,
+  V3_ZIP_MANIFEST.albedo,
+  V3_ZIP_MANIFEST.neutral,
+  V3_ZIP_MANIFEST.key,
+  V3_ZIP_MANIFEST.fill,
+  V3_ZIP_MANIFEST.rim,
+] as const;
+export type V3ZipName = (typeof V3_ZIP_NAMES)[number];
+
+// Zip servido por GET /v3/jobs/{id}/figure (R2 jobs/{id}/figure-v3.zip,
+// retencion de dias, sin TTL 60). Nombre propio: nunca result.zip.
+export const V3_FIGURE_ZIP = "figure-v3.zip";
+
+/** Path tipado del seam figura v3. Solo via JobId ya probado, sin `as`. */
+export function v3FigurePath(id: JobId): string {
+  return `/v3/jobs/${jobIdToString(id)}/figure`;
+}
+
 // Version de contrato: v1 legacy era 7 piezas con heatmap sin versionar;
 // v2 es zip-6 sin heatmap. El transporte (sobre) no cambia, el payload si.
 declare const ContractVersionBrand: unique symbol;

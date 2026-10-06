@@ -17,6 +17,7 @@
 import {
   CONTRACT_VERSION,
   MAX_IMAGE_BYTES,
+  V3_FIGURE_ZIP,
   contractVersionToNumber,
   hasSupportedMagic,
   jobIdToString,
@@ -349,6 +350,39 @@ async function handleResult(id: JobId, env: Env): Promise<Response> {
   return domainResponse({ kind: "NotFound" });
 }
 
+async function handleV3Figure(id: JobId, env: Env): Promise<Response> {
+  if (!env.VULTUS_BUCKET || !env.VULTUS_PROGRESS) {
+    return reportAppError({
+      kind: "MissingBindings",
+      cause: "v3 figure requires VULTUS_BUCKET and VULTUS_PROGRESS",
+    });
+  }
+  const key = jobIdToString(id);
+  // Misma fuente de verdad que /result (DO /status): 404 si nunca existio
+  // o purgo; 409 si no esta done; R2 jobs/{id}/figure-v3.zip si done.
+  const stub = env.VULTUS_PROGRESS.get(env.VULTUS_PROGRESS.idFromName(key));
+  const res = await stub.fetch("https://do/status");
+  if (res.status === 404) {
+    return domainResponse({ kind: "NotFound" });
+  }
+  const status = await readDoStatus(res);
+  if (!status.ok) return reportAppError(status.error);
+  if (status.value.status !== "done") {
+    return domainResponse({ kind: "NotDone" });
+  }
+  const obj = await env.VULTUS_BUCKET.get(`jobs/${key}/${V3_FIGURE_ZIP}`);
+  if (obj && obj.body) {
+    return new Response(obj.body, {
+      headers: {
+        ...CORS_HEADERS,
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="figure-v3-${key}.zip"`,
+      },
+    });
+  }
+  return domainResponse({ kind: "NotFound" });
+}
+
 async function handleJob(id: JobId, env: Env): Promise<Response> {
   if (!env.VULTUS_PROGRESS) {
     return reportAppError({ kind: "MissingBindings", cause: "job requires VULTUS_PROGRESS" });
@@ -443,6 +477,14 @@ export default {
       const id = routeJobId(rawId);
       if (!id.ok) return domainResponse(id.error);
       return handleResult(id.value, env);
+    }
+
+    const figureMatch = pathname.match(/^\/v3\/jobs\/([^/]+)\/figure$/);
+    if (figureMatch && req.method === "GET") {
+      const rawId: unknown = figureMatch[1];
+      const id = routeJobId(rawId);
+      if (!id.ok) return domainResponse(id.error);
+      return handleV3Figure(id.value, env);
     }
 
     const jobMatch = pathname.match(/^\/v1\/jobs\/([^/]+)$/);

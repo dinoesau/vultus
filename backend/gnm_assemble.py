@@ -297,9 +297,9 @@ def _upright_uv(u: float, v: float) -> tuple[float, float]:
 
     El bin trae v=0 en chin (convención OBJ): sin flip la cara sale
     invertida en el PNG. Solo rama archivo; el fixture sintético ya trae
-    v=0 arriba. Ojos (2-3, textura aparte) intactos. GLB y raster usan las
-    mismas UVs, asi que malla y atlas siguen consistentes; el flipY del
-    visor cancela igual que antes.
+    v=0 arriba. Ojos (2-3, textura aparte) intactos. Convencion V unica:
+    loader, raster y GLB comparten las mismas UVs (chin v≈1, brow v≈0);
+    ningun flip repartido entre modulos ni cancelacion en el visor.
     """
     if v <= 1.0:
         return (u, 1.0 - v)
@@ -531,8 +531,9 @@ def build_personalized_glb(
     el albedo (CompleteUv legacy o RenderedImage completion; ambos UV_LEN por
     as_bytes) o `atlas_png` si se da; el ojo usa `eye_texture` real cuando
     se provee (bake_eye_texture desde eye_ball_tex.png) o blanca
-    determinista como fallback local. Las UVs van en convencion glTF
-    (`v = 1 - v_uv`). Tris a caballo son Err explicito, nunca drop
+    determinista como fallback local. Las UVs van spec-correctas tal cual
+    del loader (convencion unica V: chin v≈1, brow v≈0, ojos en 2-3; sin
+    segundo flip: GLTFLoader ya usa `flipY=false`). Tris a caballo son Err
     silencioso: dropped==len(all)-len(skin)-len(eye) debe ser 0.
     Normales suaves promediadas por vertice en ambas primitivas
     (atributo NORMAL, unitarias y finitas): sin ellas el visor sombrea
@@ -550,7 +551,11 @@ def build_personalized_glb(
         if isinstance(loaded, Err):
             return loaded
         _, template_uvs, template_tris = loaded.value
-        split_uvs = [(float(u), 1.0 - float(v)) for u, v in template_uvs]
+        # UVs spec-correctas tal cual del loader (chin v≈1 abajo, brow v≈0
+        # arriba, ojos en 2-3): el segundo flip historico (`1-v` sobre el
+        # flip del loader) invertia la textura en visores spec-compliant
+        # (`flipY=false`); el flipY=true de three.js plano lo ocultaba.
+        split_uvs = list(template_uvs)
         skin_tris = [t for t in template_tris if t[0] < EYE_VERT_START and t[1] < EYE_VERT_START and t[2] < EYE_VERT_START]
         eye_tris = [t for t in template_tris if t[0] >= EYE_VERT_START and t[1] >= EYE_VERT_START and t[2] >= EYE_VERT_START]
         # Tris a caballo -> Err explicito, nunca drop silencioso.

@@ -308,6 +308,9 @@
         const texLoader = new THREE.TextureLoader();
         const tex = await texLoader.loadAsync(pbrUrl);
         tex.colorSpace = THREE.SRGBColorSpace;
+        // Convencion V unica con el GLB (spec-correcto, chin v≈1):
+        // el overlay PBR usa las mismas UVs, asi que flipY=false como GLTFLoader.
+        tex.flipY = false;
         map = tex;
       } catch {
         map = null;

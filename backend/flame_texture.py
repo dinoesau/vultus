@@ -383,9 +383,9 @@ def _rasterize_skin_uv(
 ) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
     """Mapeo texel 512 -> (tri verts piel, baricentricos) en UV 0-1.
 
-    Convencion del contrato: pixel (col,row) <-> UV (u=col/511, v=row/511)
-    (el flip `v=1-v_uv` del GLB se cancela con flipY del visor; ver
-    `build_personalized_glb`). Solo tris de piel (verts <3931, UVs en 0-1);
+    Convencion V unica del contrato: pixel (col,row) <-> UV (u=col/511,
+    v=row/511), la misma que sirven loader y GLB (chin v≈1, brow v≈0;
+    GLTFLoader usa `flipY=false`). Solo tris de piel (verts <3931, UVs en 0-1);
     ojos viven en textura aparte. Last-wins en seams. Cacheado en proceso
     (la clave incluye facing: geometria distinta por fit no reusa raster).
     `facing` alinea con `tris`: tris de espaldas (normal z<=0) no muestrean
@@ -682,8 +682,8 @@ def run_unwrap_texture(
 ) -> Ok[RenderedImage] | Err[DomainError]:
     """Unwrap real por proyeccion: foto a UV con coordenadas verificadas.
 
-    El atlas 512 cubre UV piel 0-1 (pixel <-> UV directo; el flip del GLB se
-    cancela con flipY del visor). Cada texel cubierto por un tri de piel del
+    El atlas 512 cubre UV piel 0-1 (pixel <-> UV directo, misma convencion
+    que el GLB spec-correcto). Cada texel cubierto por un tri de piel del
     template real se muestrea de la foto por proyeccion afine alineada a
     bbox; ocluidas (sin tri, fuera de foto o fuera de piel parsing) se
     rellenan con piel media foto-derivada + detalle condicionado a checkpoint

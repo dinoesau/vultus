@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 from PIL import Image
 
 from backend.domain import (
+    DISPLACE_CAUSE_KEYS,
     UV_HEIGHT,
     UV_WIDTH,
     CompleteUv,
@@ -408,7 +409,19 @@ def skin_vertex_indices() -> list[int]:
 _DISPLACE_MAX = 0.15
 _LEGACY_DISPLACE_MAX = 0.005
 
-_LAST_DISPLACE_STATS = ThreadLocalStats({"real": 0.0, "legacy": 0.0})
+_LAST_DISPLACE_STATS = ThreadLocalStats(
+    {
+        "real": 0.0,
+        "legacy": 0.0,
+        "basis_missing": 0.0,
+        "basis_invalid": 0.0,
+        "basis_oom": 0.0,
+        "transfer_missing": 0.0,
+        "transfer_invalid": 0.0,
+        "delta_nonfinite": 0.0,
+        "delta_error": 0.0,
+    }
+)
 
 # Boundary del cuello: abierto por diseno (ADR-009 vigente: sin hombros).
 # El template FLAME trae el cuello abierto; cerrarlo o poner falda cambia
@@ -445,6 +458,10 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
         return loaded
     positions, _, _ = loaded.value
     coeffs = fit.coeffs.as_tuple()
+    # Causas: reset por job (el store es por hilo y los hilos se reusan
+    # entre jobs en Modal) y copia de la primera activa tras el intento.
+    for _cause_key in DISPLACE_CAUSE_KEYS:
+        _LAST_DISPLACE_STATS[_cause_key] = 0.0
     try:
         from backend.deep3d import real_displacement as _real_delta
     except ImportError:
@@ -452,7 +469,7 @@ def displaced_positions(fit: FitResult) -> Ok[list[tuple[float, float, float]]] 
     delta = None
     if _real_delta is not None:
         try:
-            delta = _real_delta(coeffs)
+            delta = _real_delta(coeffs, note=lambda cause: _LAST_DISPLACE_STATS.__setitem__(cause, 1.0))
         except Exception:  # noqa: BLE001 - desplazamiento invalido: via legado
             delta = None
     if delta is not None and len(delta) == len(positions):

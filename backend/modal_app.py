@@ -694,19 +694,27 @@ def _displace_branch_str() -> str:
     """Fuente del displacement para el log, mismo patron que template synthetic=.
 
     displacement=real via base HiFi3D++ + transfer IDW; legacy uniforme
-    5mm sin base. Prohibido fallback sin linea de log.
+    5mm con causa (basis ausente/invalida/OOM, transfer ausente/invalido,
+    delta no finita/error). Prohibido fallback sin linea de log.
     """
     try:
+        from backend.domain import DISPLACE_CAUSE_KEYS as _cause_keys
         from backend.gnm_assemble import _LAST_DISPLACE_STATS as _disp_stats
     except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import DISPLACE_CAUSE_KEYS as _cause_keys  # type: ignore[no-redef]
         from gnm_assemble import (
             _LAST_DISPLACE_STATS as _disp_stats,  # type: ignore[no-redef]
         )
     try:
         real = float(_disp_stats.get("real", 0.0))
+        if real >= 0.5:
+            return "displacement=real"
+        for _key in _cause_keys:
+            if float(_disp_stats.get(_key, 0.0)) >= 0.5:
+                return f"displacement=legacy(cause={_key})"
     except Exception:
         return "displacement=legacy"
-    return "displacement=real" if real >= 0.5 else "displacement=legacy"
+    return "displacement=legacy"
 
 
 def fit_infer(

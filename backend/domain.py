@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Generic, TypeAlias, TypeVar
+from typing import Generic, Literal, TypeAlias, TypeVar
 from urllib.parse import unquote
 
 # La imagen Modal pina Python 3.10: nada de sintaxis 3.11+ aqui
@@ -107,6 +107,29 @@ class ThreadLocalStats:
 
     def get(self, key: str, default: float = 0.0) -> float:
         return self._store().get(key, default)
+
+
+# Causa del fallback de displacement (basis/transfer/delta): taxonomia unica
+# para el canal de ramas (deep3d anota, gnm_assemble copia, modal_app loguea).
+DisplaceCause: TypeAlias = Literal[
+    "basis_missing",
+    "basis_invalid",
+    "basis_oom",
+    "transfer_missing",
+    "transfer_invalid",
+    "delta_nonfinite",
+    "delta_error",
+]
+
+DISPLACE_CAUSE_KEYS: tuple[str, ...] = (
+    "basis_missing",
+    "basis_invalid",
+    "basis_oom",
+    "transfer_missing",
+    "transfer_invalid",
+    "delta_nonfinite",
+    "delta_error",
+)
 
 
 @dataclass(frozen=True, slots=True)

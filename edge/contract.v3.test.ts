@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONTRACT_VERSION,
   V3_CONTRACT_VERSION_NUMBER,
+  V3_FIGURE_ZIP,
   V3_RETENTION_DAYS,
   V3_TRI_COUNT,
   V3_UV_SIZE,
@@ -10,6 +11,8 @@ import {
   V3_ZIP_NAMES,
   ZIP_NAMES,
   contractVersionToNumber,
+  parseJobId,
+  v3FigurePath,
 } from "./contract";
 
 describe("track v3 FFHQ-UV figure (paralelo, forense congelado)", () => {
@@ -31,5 +34,17 @@ describe("track v3 FFHQ-UV figure (paralelo, forense congelado)", () => {
       expect((ZIP_NAMES as readonly string[])).not.toContain(n);
     }
     expect(V3_RETENTION_DAYS).toBeGreaterThanOrEqual(1);
+  });
+
+  it("figura v3: zip propio y path tipado disjunto de /v1", () => {
+    expect(V3_FIGURE_ZIP).toBe("figure-v3.zip");
+    expect(V3_FIGURE_ZIP).not.toBe("result.zip");
+    const parsed = parseJobId("11111111-1111-4111-8111-111111111111");
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(v3FigurePath(parsed.value)).toBe(
+        "/v3/jobs/11111111-1111-4111-8111-111111111111/figure",
+      );
+    }
   });
 });

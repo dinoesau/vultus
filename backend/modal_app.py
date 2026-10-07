@@ -459,6 +459,9 @@ else:
 # S7: el fit real itera 3 outer fijos (<10s, ver test_fit_p95_inside_fit_timeout);
 # una optimizacion lenta no estira timeouts: fit_gnm devuelve Err(FitFailed) y
 # _impl_fit lo propaga como 500 ruidoso antes del TTL 60 de fit_worker.
+# Textura: TEXGAN_FIT_STEPS=25 cabe en 30s con margen (T4 ~0.6s/paso,
+# pico VRAM ~6GB con 1 input por GPU; ver backend/texgan.py). V3 largo
+# (300 pasos) usa V3_TEXTURE_TIMEOUT_SECS=900, sin TTL 60.
 LANDMARKS_TIMEOUT_SECS = 5
 FIT_TIMEOUT_SECS = 10
 TEXTURE_TIMEOUT_SECS = 30
@@ -672,7 +675,8 @@ def _texture_branch_str() -> str:
     """Rama efectiva de textura para el log, mismo patron que parsing=.
 
     texgan=1 completion neuronal, 0 piel media; dpr=1 SH9, 0 gray-world;
-    pose_tex=1 afin ajustada, 0 bbox. Prohibido fallback sin linea de log.
+    pose_tex=1 afin ajustada, 0 bbox. Mas conf media, TV y tiempo del
+    latente por job: conf= tv= latent_ms=. Prohibido fallback sin linea.
     """
     try:
         from backend.flame_texture import _LAST_TEXTURE_STATS as _tex_stats
@@ -685,9 +689,15 @@ def _texture_branch_str() -> str:
         texgan = float(_tex_stats.get("texgan", 0.0))
         dpr = float(_tex_stats.get("dpr", 0.0))
         pose_tex = float(_tex_stats.get("pose_tex", 0.0))
+        conf = float(_tex_stats.get("conf_mean", 0.0))
+        tv = float(_tex_stats.get("tv", 0.0))
+        latent = float(_tex_stats.get("latent_ms", 0.0))
     except Exception:
-        return "parsing=0 texgan=0 dpr=0 pose_tex=0"
-    return f"parsing={parsing:.0f} texgan={texgan:.0f} dpr={dpr:.0f} pose_tex={pose_tex:.0f}"
+        return "parsing=0 texgan=0 dpr=0 pose_tex=0 conf=0.000 tv=0.000 latent_ms=0"
+    return (
+        f"parsing={parsing:.0f} texgan={texgan:.0f} dpr={dpr:.0f} pose_tex={pose_tex:.0f} "
+        f"conf={conf:.3f} tv={tv:.3f} latent_ms={latent:.0f}"
+    )
 
 
 def _displace_branch_str() -> str:
@@ -773,10 +783,10 @@ def texture_infer(
     t0 = time.perf_counter()
     result = _impl_texture(image, fit, landmarks)
     dt = int((time.perf_counter() - t0) * 1000)
-    if isinstance(result, _ErrTI):
-        logger.info("texture err job=%s duration_ms=%d", job_id, dt)
-        return result
     branch = _texture_branch_str()
+    if isinstance(result, _ErrTI):
+        logger.info("texture err job=%s duration_ms=%d %s", job_id, dt, branch)
+        return result
     logger.info(
         "texture ok job=%s out_len=%d duration_ms=%d %s",
         job_id,

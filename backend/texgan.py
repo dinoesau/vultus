@@ -49,7 +49,13 @@ TEXGAN_IMG_CHANNELS = 3
 TEXGAN_CHANNEL_BASE = 32768
 TEXGAN_CHANNEL_MAX = 512
 # Presupuesto del ajuste de latente (forward+backward por paso en T4).
-# Calibrado para caber en TEXTURE_TIMEOUT_SECS=30 con margen.
+# Forense 512: 25 pasos caben en TEXTURE_TIMEOUT_SECS=30 con margen
+# (T4 ~0.6s/paso medido via duration_ms + nvidia-smi dmon pico VRAM ~6GB
+# con 1 input por GPU y max_containers=2; CPU local ~4s/paso: los tests
+# usan 2 vs 6 pasos para verificar descenso sin pagar 25 en CI).
+# V3 1024 largo: V3_TEXGAN_FIT_STEPS=300 en backend/v3_contract.py con
+# V3_TEXTURE_TIMEOUT_SECS=900 (worker de minutos, sin TTL 60).
+# E2E rapido usa V3_E2E_TEXGAN_STEPS=2 solo como smoke; prod usa el largo.
 TEXGAN_FIT_STEPS = 25
 TEXGAN_FIT_STEPS_MIN = 1
 TEXGAN_FIT_STEPS_MAX = 100

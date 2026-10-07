@@ -110,6 +110,17 @@ _BRIDGE_HEAD_BYTES = 65536
 # El doble da 1.0; el real debe superar el umbral o el eval falla.
 EVIDENCE_MIN = 0.99
 
+# Confianza por texel + feather (fix parche gris / bordes dentados / dientes).
+# Todo por env con defaults: FEATHER_PX, umbrales de angulo/profundidad,
+# umbral de validez dura para la mascara del latente.
+FEATHER_PX_DEFAULT = 4
+FEATHER_PX_MIN = 1
+FEATHER_PX_MAX = 32
+CONF_GRAZE_MIN_DEFAULT = 0.15
+CONF_GRAZE_MAX_DEFAULT = 0.40
+CONF_DEPTH_GAP_DEFAULT = 0.02
+CONF_VALID_MIN_DEFAULT = 0.5
+
 _LAST_TEXTURE_STATS = ThreadLocalStats(
     {
         "evidence": 0.0,
@@ -120,6 +131,9 @@ _LAST_TEXTURE_STATS = ThreadLocalStats(
         "dpr": 0.0,
         "dpr_sh0": 0.0,
         "pose_tex": 0.0,
+        "conf_mean": 0.0,
+        "tv": 0.0,
+        "latent_ms": 0.0,
     }
 )
 
@@ -141,6 +155,252 @@ def texgan_dir() -> str:
 def topo_dir() -> str:
     """Assets topologia unwrap desde env. Vacio = ausente."""
     return _env("TOPO_DIR")
+
+
+def feather_px() -> int:
+    """Ancho de banda feather en px (env FEATHER_PX, default 4)."""
+    try:
+        raw = int(_env("FEATHER_PX") or str(FEATHER_PX_DEFAULT))
+    except ValueError:
+        return FEATHER_PX_DEFAULT
+    return max(FEATHER_PX_MIN, min(FEATHER_PX_MAX, raw))
+
+
+def conf_graze_min() -> float:
+    """Coseno bajo el cual la vista rasante vale 0 (env CONF_GRAZE_MIN)."""
+    try:
+        raw = float(_env("CONF_GRAZE_MIN") or str(CONF_GRAZE_MIN_DEFAULT))
+    except ValueError:
+        return CONF_GRAZE_MIN_DEFAULT
+    if not math.isfinite(raw):
+        return CONF_GRAZE_MIN_DEFAULT
+    return max(0.0, min(0.9, raw))
+
+
+def conf_graze_max() -> float:
+    """Coseno sobre el cual la vista vale 1 (env CONF_GRAZE_MAX)."""
+    try:
+        raw = float(_env("CONF_GRAZE_MAX") or str(CONF_GRAZE_MAX_DEFAULT))
+    except ValueError:
+        return CONF_GRAZE_MAX_DEFAULT
+    if not math.isfinite(raw):
+        return CONF_GRAZE_MAX_DEFAULT
+    lo = conf_graze_min()
+    return max(lo + 0.05, min(1.0, raw))
+
+
+def conf_depth_gap() -> float:
+    """Gradiente de profundidad que empieza a penalizar (env CONF_DEPTH_GAP)."""
+    try:
+        raw = float(_env("CONF_DEPTH_GAP") or str(CONF_DEPTH_GAP_DEFAULT))
+    except ValueError:
+        return CONF_DEPTH_GAP_DEFAULT
+    if not math.isfinite(raw) or raw <= 0.0:
+        return CONF_DEPTH_GAP_DEFAULT
+    return max(1e-4, min(1.0, raw))
+
+
+def conf_valid_min() -> float:
+    """Umbral duro conf>=t para la mascara del latente (env CONF_VALID_MIN)."""
+    try:
+        raw = float(_env("CONF_VALID_MIN") or str(CONF_VALID_MIN_DEFAULT))
+    except ValueError:
+        return CONF_VALID_MIN_DEFAULT
+    if not math.isfinite(raw):
+        return CONF_VALID_MIN_DEFAULT
+    return max(0.0, min(1.0, raw))
+
+
+def mouth_interior_mask(
+    height: int, width: int, pts01: NDArray[np.float64]
+) -> NDArray[np.bool_]:
+    """Interior de boca como elipse L/R/U/D (FaceMesh 61/291/13/14).
+
+    True = dentro de boca (a excluir de confianza: dientes/lengua no van
+    sobre labios). Total: todo False si geometria degenerada. Puro numpy.
+    """
+    out = np.zeros((max(0, height), max(0, width)), dtype=bool)
+    try:
+        if height <= 0 or width <= 0:
+            return out
+        pts = np.asarray(pts01, dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[0] < 292 or pts.shape[1] < 2:
+            return out
+        mouth_l = pts[61, :2] * np.array([float(width), float(height)])
+        mouth_r = pts[291, :2] * np.array([float(width), float(height)])
+        mouth_u = pts[13, :2] * np.array([float(width), float(height)])
+        mouth_d = pts[14, :2] * np.array([float(width), float(height)])
+        if not bool(np.isfinite(np.stack([mouth_l, mouth_r, mouth_u, mouth_d])).all()):
+            return out
+        cx = float((mouth_l[0] + mouth_r[0]) / 2.0)
+        cy = float((mouth_u[1] + mouth_d[1]) / 2.0)
+        ax = float(abs(mouth_r[0] - mouth_l[0]) / 2.0 * 1.1)
+        ay = float(abs(mouth_d[1] - mouth_u[1]) / 2.0 * 1.1 + 1.0)
+        if ax < 1.0 or ay < 1.0:
+            return out
+        ys, xs = np.mgrid[0:height, 0:width].astype(np.float64)
+        ell = ((xs - cx) / ax) ** 2 + ((ys - cy) / ay) ** 2
+        return np.asarray(ell <= 1.0, dtype=bool)
+    except (IndexError, ValueError, TypeError):
+        return out
+
+
+def compute_texel_confidence(
+    texel_normals: NDArray[np.float64],
+    texel_depth: NDArray[np.float64],
+    tex_px: NDArray[np.float64],
+    covered: NDArray[np.bool_],
+    width: int,
+    height: int,
+    skin_photo_mask: NDArray[np.bool_] | None,
+    mouth_photo_mask: NDArray[np.bool_] | None,
+) -> NDArray[np.float64]:
+    """Confianza por texel en [0,1]: angulo * profundidad * piel * no-boca.
+
+    - Angulo: nz clip 0-1 con rampa suave entre CONF_GRAZE_MIN/MAX
+      (rechazo de rasantes: perfil junto a oreja cae a 0).
+    - Profundidad: gradiente |dx|+|dy| del depth interpolado; sobre
+      CONF_DEPTH_GAP decae lineal a 0 en 2*gap (discontinuidad).
+    - Piel: 0/1 muestreado a nearest en tex_px (None = sin parsing = 1).
+    - Boca: 0 si tex_px cae en interior de boca (None = sin exclusion = 1).
+    - No cubierto o fuera de foto = 0. Total: nunca lanza, siempre finito.
+    """
+    try:
+        n = np.asarray(texel_normals, dtype=np.float64)
+        d = np.asarray(texel_depth, dtype=np.float64)
+        px = np.asarray(tex_px, dtype=np.float64)
+        cov = np.asarray(covered, dtype=bool)
+        if n.shape[:2] != cov.shape or d.shape != cov.shape or px.shape[:2] != cov.shape:
+            return np.zeros_like(cov, dtype=np.float64)
+        h, w = cov.shape
+        if h == 0 or w == 0:
+            return np.zeros_like(cov, dtype=np.float64)
+        nz = np.clip(n[..., 2] if n.ndim == 3 and n.shape[2] >= 3 else 0.0, 0.0, 1.0)
+        gmin, gmax = conf_graze_min(), conf_graze_max()
+        span = max(1e-9, gmax - gmin)
+        angle = np.clip((np.asarray(nz, dtype=np.float64) - gmin) / span, 0.0, 1.0)
+        try:
+            gx = np.abs(np.diff(d, axis=1, prepend=d[:, :1]))
+            gy = np.abs(np.diff(d, axis=0, prepend=d[:1, :]))
+            grad = np.asarray(gx + gy, dtype=np.float64)
+        except (ValueError, TypeError):
+            grad = np.zeros_like(cov, dtype=np.float64)
+        gap = conf_depth_gap()
+        depth = np.clip(1.0 - (np.asarray(grad, dtype=np.float64) - gap) / max(gap, 1e-9), 0.0, 1.0)
+        depth = np.where(np.isfinite(grad), depth, 0.0)
+        ix = np.clip(np.rint(px[..., 0]).astype(np.int64), 0, max(0, width - 1))
+        iy = np.clip(np.rint(px[..., 1]).astype(np.int64), 0, max(0, height - 1))
+        if skin_photo_mask is not None:
+            try:
+                skin = np.asarray(skin_photo_mask, dtype=bool)
+                if skin.shape == (height, width):
+                    skin_f = np.asarray(skin[iy, ix], dtype=np.float64)
+                else:
+                    skin_f = np.ones_like(cov, dtype=np.float64)
+            except (IndexError, TypeError, ValueError):
+                skin_f = np.ones_like(cov, dtype=np.float64)
+        else:
+            skin_f = np.ones_like(cov, dtype=np.float64)
+        if mouth_photo_mask is not None:
+            try:
+                mouth = np.asarray(mouth_photo_mask, dtype=bool)
+                if mouth.shape == (height, width):
+                    mouth_f = np.asarray((~mouth[iy, ix]), dtype=np.float64)
+                else:
+                    mouth_f = np.ones_like(cov, dtype=np.float64)
+            except (IndexError, TypeError, ValueError):
+                mouth_f = np.ones_like(cov, dtype=np.float64)
+        else:
+            mouth_f = np.ones_like(cov, dtype=np.float64)
+        cov_f = np.asarray(cov, dtype=np.float64)
+        conf = np.asarray(angle, dtype=np.float64) * depth * skin_f * mouth_f * cov_f
+        conf = np.where(np.isfinite(conf), conf, 0.0)
+        return np.asarray(np.clip(conf, 0.0, 1.0), dtype=np.float64)
+    except (ValueError, TypeError, IndexError):
+        try:
+            return np.zeros_like(np.asarray(covered, dtype=bool), dtype=np.float64)
+        except (ValueError, TypeError):
+            return np.zeros((0, 0), dtype=np.float64)
+
+
+def soften_confidence(conf: NDArray[np.float64], radius_px: int) -> NDArray[np.float64]:
+    """Decaimiento suave de la confianza (box blur separable, float64).
+
+    Radio FEATHER_PX: interior profundo (>=r de la frontera) queda en 1,
+    exterior profundo en 0, banda con rampa. Determinista. Total.
+    """
+    try:
+        c = np.asarray(conf, dtype=np.float64)
+        if c.ndim != 2:
+            return np.asarray(conf, dtype=np.float64)
+        r = max(0, int(radius_px))
+        if r <= 0:
+            return np.asarray(np.clip(c, 0.0, 1.0), dtype=np.float64)
+        k = 2 * r + 1
+        padded = np.pad(c, ((r, r), (r, r)), mode="edge")
+        cumsum_h = np.cumsum(padded, axis=1, dtype=np.float64)
+        horiz = (cumsum_h[:, k:] - cumsum_h[:, :-k]) / float(k)
+        horiz = horiz[:, r : r + c.shape[1]]
+        padded_v = np.pad(horiz, ((r, r), (0, 0)), mode="edge")
+        cumsum_v = np.cumsum(padded_v, axis=0, dtype=np.float64)
+        vert = (cumsum_v[k:, :] - cumsum_v[:-k, :]) / float(k)
+        out = vert[r : r + c.shape[0], :]
+        out = np.where(np.isfinite(out), out, c)
+        return np.asarray(np.clip(out, 0.0, 1.0), dtype=np.float64)
+    except (ValueError, TypeError):
+        return np.asarray(conf, dtype=np.float64)
+
+
+def blend_with_feather(
+    sampled: NDArray[np.float64],
+    completion: NDArray[np.float64],
+    weights: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Composicion suave: w*foto + (1-w)*relleno (nunca np.where binario).
+
+    w=1 profundo-visible queda intacto pixel a pixel; w=0 es relleno.
+    Total: ValueError si formas no cuadran.
+    """
+    a = np.asarray(sampled, dtype=np.float64)
+    b = np.asarray(completion, dtype=np.float64)
+    m = np.asarray(weights, dtype=np.float64)
+    if a.shape != b.shape or a.ndim != 3 or a.shape[2] != 3:
+        raise ValueError("feather blend shapes mismatch")
+    if m.shape != a.shape[:2]:
+        raise ValueError("feather weights mismatch")
+    w = np.clip(m, 0.0, 1.0)[..., None]
+    out = w * a + (1.0 - w) * b
+    if not bool(np.isfinite(out).all()):
+        return np.asarray(np.clip(a, 0.0, 255.0), dtype=np.float64)
+    return np.asarray(np.clip(out, 0.0, 255.0), dtype=np.float64)
+
+
+def seam_band_512(valid: NDArray[np.bool_]) -> NDArray[np.bool_]:
+    """Banda de costura 512: dilatacion 1px del borde valido/invalido."""
+    m = np.asarray(valid, dtype=bool)
+    dilated = m.copy()
+    eroded = m.copy()
+    for axis in (0, 1):
+        for shift in (1, -1):
+            dilated |= np.roll(m, shift, axis=axis)
+            eroded &= np.roll(m, shift, axis=axis)
+    return np.asarray(dilated & ~eroded, dtype=bool)
+
+
+def band_tv_512(atlas: NDArray[np.float64], valid: NDArray[np.bool_]) -> float:
+    """TV media solo sobre pares con un extremo en la costura (512)."""
+    a = np.asarray(atlas, dtype=np.float64)
+    band = seam_band_512(np.asarray(valid, dtype=bool))
+    if not bool(band.any()):
+        return float("inf")
+    dx = np.abs(a[:, 1:, :] - a[:, :-1, :]).mean(axis=-1)
+    dy = np.abs(a[1:, :, :] - a[:-1, :, :]).mean(axis=-1)
+    wx = band[:, :-1] | band[:, 1:]
+    wy = band[:-1, :] | band[1:, :]
+    if not bool(wx.any() and wy.any()):
+        return float("inf")
+    tv = (float(dx[wx].mean()) + float(dy[wy].mean())) / 2.0
+    return tv if math.isfinite(tv) else float("inf")
 
 
 def _texgan_candidate_dirs() -> list[str]:
@@ -680,20 +940,24 @@ def _project_verts_to_pixels(
 def run_unwrap_texture(
     image: ImageBytes, fit: FitResult, landmarks: Landmarks
 ) -> Ok[RenderedImage] | Err[DomainError]:
-    """Unwrap real por proyeccion: foto a UV con coordenadas verificadas.
+    """Unwrap real por proyeccion: foto a UV con confianza y feather.
 
     El atlas 512 cubre UV piel 0-1 (pixel <-> UV directo, misma convencion
     que el GLB spec-correcto). Cada texel cubierto por un tri de piel del
     template real se muestrea de la foto por proyeccion afine alineada a
-    bbox; ocluidas (sin tri, fuera de foto o fuera de piel parsing) se
-    rellenan con piel media foto-derivada + detalle condicionado a checkpoint
-    (fingerprint con texgan). Sin parsing (sin torch o sin pth) el unwrap
-    procede sin mascara, documentado y determinista por env. Sin mascara
-    foranea del layout denso 20k: no corresponde al atlas propio 5023.
-    `bake_eye_texture`, nunca en este atlas. Balance gris-world sobre
-    muestras validas (DPR SH completo en worker GPU Modal). Cero sentinel
-    por construccion. Total: Err loud si falta el mat, el template o la
-    foto; nunca blur silencioso disfrazado.
+    bbox; la validez es confianza en [0,1] por texel (angulo con rechazo
+    de rasantes, discontinuidad de profundidad, mascara de piel parsing,
+    interior de boca excluido por landmarks). La composicion usa banda
+    de feather con decaimiento suave (nunca `np.where` binario): lo
+    visible profundo queda intacto pixel a pixel, el relleno solo toca
+    texeles no validos o de baja confianza con tono vecino (match_color
+    del latente TexGAN o media de piel foto-derivada). Sin parsing (sin
+    torch o sin pth) el unwrap procede sin mascara, documentado y
+    determinista por env. Sin mascara foranea del layout denso 20k: no
+    corresponde al atlas propio 5023. `bake_eye_texture`, nunca en este
+    atlas. Balance gris-world sobre muestras validas (DPR SH completo en
+    worker GPU Modal). Cero sentinel por construccion. Total: Err loud
+    si falta el mat, el template o la foto; nunca blur silencioso.
     """
     from backend.flame_fit import identity_ratios, landmark_points
 
@@ -761,26 +1025,51 @@ def run_unwrap_texture(
         )
         skin_valid = in_photo
         _LAST_TEXTURE_STATS["parsing"] = 0.0
+        photo_skin_opt: NDArray[np.bool_] | None = None
         try:
             from backend.face_parsing import face_skin_mask as _parse_mask
 
             photo_skin = _parse_mask(photo)
             if photo_skin.shape == (height, width):
+                photo_skin_opt = np.asarray(photo_skin, dtype=bool)
                 ix = np.clip(np.rint(tex_px[..., 0]).astype(np.int64), 0, width - 1)
                 iy = np.clip(np.rint(tex_px[..., 1]).astype(np.int64), 0, height - 1)
                 skin_valid = in_photo & photo_skin[iy, ix]
                 _LAST_TEXTURE_STATS["parsing"] = 1.0
         except Exception:  # noqa: BLE001 - sin torch/pesos: unwrap sin mascara (ver stats parsing)
             skin_valid = in_photo
+        del skin_valid
+        mouth_photo = mouth_interior_mask(height, width, pts)
         sampled = _bilinear_sample(photo, tex_px)
         tex_normals = _texel_normals(vert_normals, v_idx, bw)
-        sampled = _dpr_normalize(photo, sampled, skin_valid, tex_normals)
+        try:
+            z_vals = np.asarray(dpa[:, 2], dtype=np.float64)
+            tex_depth = (
+                bw[..., 0] * z_vals[np.clip(safe_idx[..., 0], 0, z_vals.shape[0] - 1)]
+                + bw[..., 1] * z_vals[np.clip(safe_idx[..., 1], 0, z_vals.shape[0] - 1)]
+                + bw[..., 2] * z_vals[np.clip(safe_idx[..., 2], 0, z_vals.shape[0] - 1)]
+            )
+            tex_depth = np.where(covered, np.asarray(tex_depth, dtype=np.float64), 0.0)
+        except (IndexError, ValueError, TypeError):
+            tex_depth = np.zeros_like(covered, dtype=np.float64)
+        conf = compute_texel_confidence(
+            tex_normals, tex_depth, tex_px, covered, width, height, photo_skin_opt, mouth_photo
+        )
+        conf_mean = float(np.mean(conf)) if conf.size else 0.0
+        if not math.isfinite(conf_mean):
+            conf_mean = 0.0
+        _LAST_TEXTURE_STATS["conf_mean"] = conf_mean
+        hard_valid = np.asarray(conf >= conf_valid_min(), dtype=bool) & in_photo
+        sampled = _dpr_normalize(photo, sampled, hard_valid, tex_normals)
         skin_mean: NDArray[np.float64] | None = None
-        if bool(skin_valid.any()):
-            means = sampled[skin_valid].mean(axis=0)
+        if bool(hard_valid.any()):
+            means = sampled[hard_valid].mean(axis=0)
             skin_mean = np.array(means, dtype=np.float64)
         sampled_u8 = np.clip(sampled, 0.0, 255.0)
-        completion = _texgan_completion(sampled_u8, skin_valid)
+        latent_t0 = time.perf_counter()
+        completion = _texgan_completion(sampled_u8, hard_valid)
+        latent_ms = (time.perf_counter() - latent_t0) * 1000.0
+        _LAST_TEXTURE_STATS["latent_ms"] = float(latent_ms)
         if completion is not None:
             _LAST_TEXTURE_STATS["texgan"] = 1.0
         else:
@@ -802,7 +1091,8 @@ def run_unwrap_texture(
                 if isinstance(crop_result, Err):
                     return crop_result
                 completion = np.clip(_photo_base(crop_result.value) + detail, 0.0, 255.0)
-        out = np.where(skin_valid[..., None], sampled_u8, completion)
+        soft = soften_confidence(conf, feather_px())
+        out = blend_with_feather(sampled_u8, completion, soft)
         raw = np.rint(out).astype(np.uint8).tobytes()
         scrubbed = _scrub_sentinel(raw)
         parsed = parse_rendered_image(scrubbed)
@@ -810,6 +1100,7 @@ def run_unwrap_texture(
             return Err(MlFailed(detail=MlDecode(details="real unwrap produced invalid length")))
         _LAST_TEXTURE_STATS["evidence"] = texture_evidence(scrubbed)
         _LAST_TEXTURE_STATS["sentinel_count"] = float(count_sentinel(scrubbed))
+        _LAST_TEXTURE_STATS["tv"] = uv_total_variation(scrubbed)
         _LAST_TEXTURE_STATS["duration_ms"] = (time.perf_counter() - start) * 1000.0
         return Ok(parsed.value)
     except Exception as exc:  # noqa: BLE001 - unwrap caido es MlFailed, no crash

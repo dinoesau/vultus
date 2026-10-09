@@ -1,6 +1,6 @@
 """Contrato v3 FFHQ-UV figure (track paralelo, sin tocar la via forense).
 
-La via forense queda congelada: `backend.domain.ZIP_NAMES` (zip-6),
+La via forense queda congelada: `backend.domain.ZIP_NAMES` (zip-8),
 `backend.gnm_assemble.VERT_COUNT = 5023`, TTL 60 (`TOTAL_TIMEOUT_SECS`).
 Este modulo es dueno de las constantes v3, en paralelo y sin mezclar:
 
@@ -8,7 +8,7 @@ Este modulo es dueno de las constantes v3, en paralelo y sin mezclar:
 - Malla densa HiFi3D++ `20481v/40832f` (port `ParametricFaceModel`).
 - Atlas `1024` (`V3_UV_LEN = 1024*1024*3`), TV maxima 2.0, cero sentinel.
 - Bundle v3 nuevo de 6 piezas (malla densa + albedo 1024 + neutral + 3
-  relights con esferas como la figura). Nombres disjuntos del zip-6:
+  relights con esferas como la figura). Nombres disjuntos del zip-8:
   prohibido mezclar.
 - Retencion de dias (R2 con retencion de dias) y worker GPU de minutos
   con cola separada sin TTL 60.
@@ -17,7 +17,7 @@ Este modulo es dueno de las constantes v3, en paralelo y sin mezclar:
   vive en `modal_app.py`, aqui solo las claves).
 
 Solo constantes y helpers puros. Sin torch, sin I/O, sin logging.
-Revoca explicitamente solo para v3: ADR-009 (FLAME 5023), TTL 60 y zip-6.
+Revoca explicitamente solo para v3: ADR-009 (FLAME 5023), TTL 60 y zip-8.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ V3_TV_MAX = 2.0
 
 # Bundle v3 nuevo: malla densa + albedo 1024 + neutral + 3 relights.
 # 6 piezas como la figura (neutral texturizada + 3 re-iluminaciones con
-# esferas + albedo + malla). Nombres disjuntos del zip-6 forense.
+# esferas + albedo + malla). Nombres disjuntos del zip-8 forense.
 V3_ZIP_MESH = "mesh_dense.glb"
 V3_ZIP_ALBEDO = "albedo_1024.png"
 V3_ZIP_NEUTRAL = "relight_neutral.png"
@@ -78,12 +78,12 @@ def v3_zip_names() -> tuple[str, ...]:
 
 
 def is_v3_zip_name(name: object) -> bool:
-    """True si el nombre pertenece al bundle v3 (nunca al zip-6)."""
+    """True si el nombre pertenece al bundle v3 (nunca al zip-8)."""
     return isinstance(name, str) and name in V3_ZIP_NAMES
 
 
 def is_forensic_zip_name(name: object) -> bool:
-    """True si el nombre pertenece al zip-6 forense (nunca a v3)."""
+    """True si el nombre pertenece al zip-8 forense (nunca a v3)."""
     try:
         from backend.domain import ZIP_NAMES as _FORENSIC
     except ImportError:

@@ -169,7 +169,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         errorEl.hidden = true;
         errorEl.textContent = "";
         for (const img of document.querySelectorAll<HTMLImageElement>(
-          'img[data-testid="panel-uv-a"], img[data-testid="panel-uv-b"], img[data-testid="panel-pbr-a"], img[data-testid="panel-pbr-b"]',
+          'img[data-testid="panel-uv-a"], img[data-testid="panel-uv-b"], img[data-testid="panel-pbr-a"], img[data-testid="panel-pbr-b"], img[data-testid="panel-render-a"], img[data-testid="panel-render-b"]',
         )) {
           img.hidden = true;
           img.removeAttribute("src");
@@ -218,11 +218,13 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           showError(`job ${jobId}: zip sin piezas (falta ${parsed.error.name}).`);
           return;
         }
-        const { uvA, uvB, pbrA, pbrB, meshA, meshB } = parsed.value;
+        const { uvA, uvB, pbrA, pbrB, meshA, meshB, renderA, renderB } = parsed.value;
         setImage('[data-testid="panel-uv-a"]', uvA);
         setImage('[data-testid="panel-uv-b"]', uvB);
         setImage('[data-testid="panel-pbr-a"]', pbrA);
         setImage('[data-testid="panel-pbr-b"]', pbrB);
+        setImage('[data-testid="panel-render-a"]', renderA);
+        setImage('[data-testid="panel-render-b"]', renderB);
         window.dispatchEvent(
           new CustomEvent("vultus:meshes", { detail: { meshA, meshB, pbrA, pbrB } }),
         );

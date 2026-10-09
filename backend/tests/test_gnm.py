@@ -1,6 +1,6 @@
 """CPU compartido: goldens literales a mano, nunca recomputados.
 
-Wave 4 Step 5 (FLAME): sin heatmap, sin compute_heatmap, zip-6 unico.
+Wave 4 Step 5 (FLAME): sin heatmap, sin compute_heatmap, zip-8 unico.
 El template GNM legacy vive para geometria hasta el cutover (Wave 6);
 el template FLAME sucesor vive en `gnm_assemble` (5023 verts).
 """
@@ -68,15 +68,23 @@ def _proven_fit(marker: float) -> FitResult:
     return FitResult(coeffs=coeffs.value, camera=camera.value)
 
 
-def test_zip_con_6_nombres_exactos() -> None:
+def test_zip_con_8_nombres_exactos() -> None:
+    from backend.render_preview import build_preview_png
+
     a = _golden(bytes([10, 200]), 0)
     b = _golden(bytes([4, 210]), 0)
     a_png = uv_to_png(a)
     b_png = uv_to_png(b)
-    ma = build_personalized_glb(_proven_fit(0.1), a)
-    mb = build_personalized_glb(_proven_fit(0.2), b)
+    fit_a = _proven_fit(0.1)
+    fit_b = _proven_fit(0.2)
+    ma = build_personalized_glb(fit_a, a)
+    mb = build_personalized_glb(fit_b, b)
     assert isinstance(ma, Ok)
     assert isinstance(mb, Ok)
+    prev_a = build_preview_png(fit_a, a)
+    prev_b = build_preview_png(fit_b, b)
+    assert isinstance(prev_a, Ok)
+    assert isinstance(prev_b, Ok)
     bundle = ZipBundle(
         uv_a_png=a_png,
         uv_b_png=b_png,
@@ -84,12 +92,14 @@ def test_zip_con_6_nombres_exactos() -> None:
         mesh_b_glb=mb.value.as_bytes(),
         pbr_a=a_png,
         pbr_b=b_png,
+        preview_a_png=prev_a.value,
+        preview_b_png=prev_b.value,
     )
     blob = build_result_zip(bundle)
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
         names = z.namelist()
     assert names == list(ZIP_NAMES)
-    assert len(names) == 6
+    assert len(names) == 8
     assert "heatmap.png" not in names
 
 

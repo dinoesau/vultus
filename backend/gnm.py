@@ -1,7 +1,7 @@
-"""Modulo CPU compartido: template GNM legacy, PNG y zip-6 puros sin I/O.
+"""Modulo CPU compartido: template GNM legacy, PNG y zip-8 puros sin I/O.
 
 Wave 4 Step 5 (FLAME): sin mapa termico, sin ZIP_FULL legacy.
-El zip canonico es 6 piezas (`ZIP_NAMES`) via la unica seam `build_result_zip`.
+El zip canonico es 8 piezas (`ZIP_NAMES`) via la unica seam `build_result_zip`.
 La geometria FLAME sucesora (5023 verts, ojos [3931:5023)) vive en
 `backend/gnm_assemble.py`; este modulo conserva el template GNM (17821)
 hasta el cutover de pesos (Wave 6) mas los helpers PNG/zip sin I/O.
@@ -116,10 +116,11 @@ def uv_to_png(uv: CompleteUv | RenderedImage | EyeTexture) -> bytes:
 
 
 def build_result_zip(bundle: ZipBundle) -> bytes:
-    """Zip 6 archivos en orden canonico ZIP_NAMES. Unica seam de zip.
+    """Zip 8 archivos en orden canonico ZIP_NAMES. Unica seam de zip.
 
-    Entradas probadas (ZipBundle 6 campos); salidas sin I/O. Sin heatmap
-    (ADR-008). Compresion STORED para bytes deterministas.
+    Entradas probadas (ZipBundle 8 campos); salidas sin I/O. Sin heatmap
+    (ADR-008). Renders frontales al final (ADR-012).
+    Compresion STORED para bytes deterministas.
     """
     payloads = (
         bundle.uv_a_png,
@@ -128,6 +129,8 @@ def build_result_zip(bundle: ZipBundle) -> bytes:
         bundle.mesh_b_glb,
         bundle.pbr_a,
         bundle.pbr_b,
+        bundle.preview_a_png,
+        bundle.preview_b_png,
     )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as z:

@@ -39,7 +39,7 @@ test("compare upload 2 PNG returns queued job", async ({ page }) => {
   });
 });
 
-test("golden pair reaches done, 4 panels plus 2 viewers, zero heatmap, download starts", async ({
+test("golden pair reaches done, 6 panels plus 2 viewers, zero heatmap, download starts", async ({
   page,
 }) => {
   test.slow();
@@ -52,8 +52,8 @@ test("golden pair reaches done, 4 panels plus 2 viewers, zero heatmap, download 
   await expect(page.locator("#status")).toContainText(/done/, {
     timeout: doneTimeout,
   });
-  // Zip-6 sin heatmap (ADR-008): 4 paneles uv-a/uv-b/pbr-a/pbr-b con blob src.
-  for (const id of ["panel-uv-a", "panel-uv-b", "panel-pbr-a", "panel-pbr-b"] as const) {
+  // Zip-8 sin heatmap (ADR-008 + ADR-012): 6 paneles uv/pbr/render con blob src.
+  for (const id of ["panel-uv-a", "panel-uv-b", "panel-pbr-a", "panel-pbr-b", "panel-render-a", "panel-render-b"] as const) {
     const img = page.getByTestId(id);
     await expect(img).toBeVisible();
     await expect(img).toHaveAttribute("src", /^blob:/);

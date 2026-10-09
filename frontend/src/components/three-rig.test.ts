@@ -106,11 +106,11 @@ describe("three-rig: estudio blanco 3 luces (seam publica ThreeViewer)", () => {
     if (idle.ok) expect(viewerStatusMessage(idle.value)).toMatch(/neutro/);
   });
 
-  it("snapshot: cero panel de fusion en visores UV (4 paneles zip-6)", () => {
+  it("snapshot: cero panel de fusion en visores UV (6 paneles zip-8)", () => {
     const src = readViewer("UvViewers.astro");
     expect(src.toLowerCase().includes(HEAT_NEEDLE)).toBe(false);
     expect(src.toLowerCase().includes(FUSION_NEEDLE)).toBe(false);
-    for (const id of ["panel-uv-a", "panel-uv-b", "panel-pbr-a", "panel-pbr-b"] as const) {
+    for (const id of ["panel-uv-a", "panel-uv-b", "panel-pbr-a", "panel-pbr-b", "panel-render-a", "panel-render-b"] as const) {
       expect(src.includes(id)).toBe(true);
     }
   });
@@ -136,7 +136,7 @@ describe("three-rig: estudio blanco 3 luces (seam publica ThreeViewer)", () => {
     expect(resolveSkinColorHex(false)).toBe(SKIN_MATERIAL.colorHex);
   });
 
-  it("salud v1 => mensaje actualiza visible, no generico de zip", () => {
+  it("salud v1/v2 => mensaje actualiza visible, no generico de zip", () => {
     const stale = parseHealthContractVersion({ contract_version: 1 });
     expect(stale.ok).toBe(false);
     if (!stale.ok) {
@@ -146,7 +146,8 @@ describe("three-rig: estudio blanco 3 luces (seam publica ThreeViewer)", () => {
       expect(msg.includes("zip inv")).toBe(false);
     }
     expect(healthNeedsUpdate({ contract_version: 1 })).toBe(true);
-    expect(healthNeedsUpdate({ contract_version: 2 })).toBe(false);
+    expect(healthNeedsUpdate({ contract_version: 2 })).toBe(true);
+    expect(healthNeedsUpdate({ contract_version: 3 })).toBe(false);
     const broken = parseHealthContractVersion({ contract_version: "x" });
     expect(broken.ok).toBe(false);
     if (!broken.ok) {
@@ -211,10 +212,10 @@ describe("three-rig: estudio blanco 3 luces (seam publica ThreeViewer)", () => {
   });
 
   it("contract brand espejo de edge sin importar edge (mint + accessor)", () => {
-    expect(contractVersionToNumber(CONTRACT_VERSION)).toBe(2);
-    const ok = parseContractVersion(2);
+    expect(contractVersionToNumber(CONTRACT_VERSION)).toBe(3);
+    const ok = parseContractVersion(3);
     expect(ok.ok).toBe(true);
-    if (ok.ok) expect(contractVersionToNumber(ok.value)).toBe(2);
+    if (ok.ok) expect(contractVersionToNumber(ok.value)).toBe(3);
     expect(parseContractVersion(1).ok).toBe(true);
     expect(parseContractVersion(0).ok).toBe(false);
     expect(parseContractVersion("2").ok).toBe(false);

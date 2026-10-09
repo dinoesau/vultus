@@ -247,6 +247,8 @@ class HttpProgressSink:
             mesh_b_glb=result.mesh_b.as_bytes(),
             pbr_a=pbr_a,
             pbr_b=pbr_b,
+            preview_a_png=result.preview_a.as_bytes(),
+            preview_b_png=result.preview_b.as_bytes(),
         )
         blob = build_result_zip(bundle)
         base = _gateway_base()

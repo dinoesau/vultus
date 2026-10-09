@@ -34,7 +34,7 @@ test("compare upload 2 PNG returns queued job", async ({ page }) => {
   await page.getByRole("button", { name: /Comparar/ }).click();
   // El job avanza queued->processing->done en ms con sidecar local; aceptar
   // cualquier estado con job_id evita flake sin perder el intent tracer.
-  await expect(page.locator("#status")).toContainText(/job .*(queued|processing|done)/, {
+  await expect(page.locator("#stage-text")).toContainText(/job .*(queued|processing|done|cola|procesando|listo)/, {
     timeout: 15_000,
   });
 });
@@ -49,7 +49,7 @@ test("golden pair reaches done, 6 panels plus 2 viewers, zero heatmap, download 
   await page.locator('input[name="image_a"]').setInputFiles(GOLDEN_A);
   await page.locator('input[name="image_b"]').setInputFiles(GOLDEN_B);
   await page.getByRole("button", { name: /Comparar/ }).click();
-  await expect(page.locator("#status")).toContainText(/done/, {
+  await expect(page.locator("#stage-text")).toContainText(/done|listo/, {
     timeout: doneTimeout,
   });
   // Zip-8 sin heatmap (ADR-008 + ADR-012): 6 paneles uv/pbr/render con blob src.

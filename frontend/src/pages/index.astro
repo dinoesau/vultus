@@ -10,7 +10,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width" />
-    <title>Vultus - Comparador forense (Fase 2)</title>
+    <title>Vultus - Comparador facial forense</title>
     <style>
       :root {
         color-scheme: light;
@@ -21,22 +21,50 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         margin: 2rem auto;
         padding: 0 1rem 3rem;
         background: #eef1f4;
-        color: #14202e;
-      }
-      header p {
-        color: #46536a;
+        color: #1c1917;
       }
       form {
         display: grid;
+        grid-template-columns: repeat(2, 1fr);
         gap: 0.75rem;
         background: #fff;
         border: 1px solid #d7dde5;
         border-radius: 10px;
         padding: 1rem 1.25rem;
       }
+      @media (max-width: 560px) {
+        form {
+          grid-template-columns: 1fr;
+        }
+      }
+      .input-panel {
+        display: grid;
+        gap: 0.5rem;
+        align-content: start;
+        border: 1px solid #d7dde5;
+        border-radius: 8px;
+        padding: 0.75rem;
+      }
+      .input-panel img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 1;
+        object-fit: contain;
+        background: #ffffff;
+        border-radius: 6px;
+      }
+      .input-panel img[hidden] {
+        display: none;
+      }
+      .input-panel .placeholder {
+        font-size: 0.85rem;
+        color: #6b7684;
+        margin: 0;
+      }
       form button {
+        grid-column: 1 / -1;
         justify-self: start;
-        background: #14202e;
+        background: #1c1917;
         color: #fff;
         font-weight: 700;
         border: 0;
@@ -44,27 +72,25 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         padding: 0.6rem 1.4rem;
         cursor: pointer;
       }
-      #status {
-        white-space: pre-wrap;
-        background: #f5f5f5;
-        padding: 1rem;
-        border: 1px solid #d7dde5;
-        border-radius: 10px;
-      }
     </style>
   </head>
   <body data-api-url={apiUrl}>
     <header>
-      <h1>Vultus - Comparador forense (Fase 2)</h1>
-      <p>Sube 2 imágenes JPEG/PNG y sigue el job stateless (TTL 60s).</p>
+      <h1>Vultus - Comparador facial forense</h1>
     </header>
     <form id="compare">
-      <label>Imagen A <input type="file" name="image_a" accept="image/jpeg,image/png" required /></label>
-      <label>Imagen B <input type="file" name="image_b" accept="image/jpeg,image/png" required /></label>
+      <div class="input-panel">
+        <label>Imagen A <input type="file" name="image_a" accept="image/jpeg,image/png" required /></label>
+        <img data-testid="preview-a" alt="Vista previa de la imagen A" hidden />
+        <p class="placeholder">sin vista previa A</p>
+      </div>
+      <div class="input-panel">
+        <label>Imagen B <input type="file" name="image_b" accept="image/jpeg,image/png" required /></label>
+        <img data-testid="preview-b" alt="Vista previa de la imagen B" hidden />
+        <p class="placeholder">sin vista previa B</p>
+      </div>
       <button type="submit">Comparar</button>
     </form>
-    <h2>Estado</h2>
-    <div id="status">sin job</div>
     <UvViewers />
     <ThreeViewer />
     <FigureV3 />
@@ -87,12 +113,92 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       import type { HealthVersionError, Result } from "../components/compare-client.ts";
 
       const api = document.body.dataset.apiUrl ?? "http://localhost:8000";
-      const form = document.getElementById("compare") as HTMLFormElement;
-      const statusEl = document.getElementById("status") as HTMLElement;
-      const progressEl = document.getElementById("job-progress") as HTMLProgressElement;
-      const stageEl = document.getElementById("stage-text") as HTMLElement;
-      const downloadEl = document.getElementById("download-zip") as HTMLAnchorElement;
-      const errorEl = document.getElementById("result-error") as HTMLElement;
+      const foundForm = document.getElementById("compare");
+      const form = foundForm instanceof HTMLFormElement ? foundForm : null;
+      const foundProgress = document.getElementById("job-progress");
+      const progressEl = foundProgress instanceof HTMLProgressElement ? foundProgress : null;
+      const foundStage = document.getElementById("stage-text");
+      const stageEl = foundStage instanceof HTMLElement ? foundStage : null;
+      const foundDownload = document.getElementById("download-zip");
+      const downloadEl = foundDownload instanceof HTMLAnchorElement ? foundDownload : null;
+      const foundError = document.getElementById("result-error");
+      const errorEl = foundError instanceof HTMLElement ? foundError : null;
+
+      type PreviewError =
+        | { readonly kind: "MissingInput" }
+        | { readonly kind: "MissingImage" }
+        | { readonly kind: "EmptySelection" };
+
+      const previewUrls = new Map<HTMLImageElement, string>();
+
+      function setStageText(msg: string): void {
+        if (stageEl) stageEl.textContent = msg;
+      }
+
+      // Total: parse-once del input file a blob: URL. Nunca lanza por input
+      // esperado; seleccion vacia o nodos ausentes van por Err.
+      function updatePreview(inputEl: unknown, imgEl: unknown): Result<void, PreviewError> {
+        if (!(inputEl instanceof HTMLInputElement)) {
+          return { ok: false, error: { kind: "MissingInput" } };
+        }
+        if (!(imgEl instanceof HTMLImageElement)) {
+          return { ok: false, error: { kind: "MissingImage" } };
+        }
+        const files = inputEl.files;
+        if (!files || files.length === 0) {
+          return { ok: false, error: { kind: "EmptySelection" } };
+        }
+        const file = files[0];
+        if (!(file instanceof File)) {
+          return { ok: false, error: { kind: "EmptySelection" } };
+        }
+        const prev = previewUrls.get(imgEl);
+        if (typeof prev === "string") URL.revokeObjectURL(prev);
+        const url = URL.createObjectURL(file);
+        previewUrls.set(imgEl, url);
+        imgEl.src = url;
+        imgEl.hidden = false;
+        imgEl.closest("div")?.querySelector(".placeholder")?.setAttribute("hidden", "");
+        return { ok: true, value: undefined };
+      }
+
+      function clearSinglePreview(imgEl: unknown): void {
+        if (!(imgEl instanceof HTMLImageElement)) return;
+        const prev = previewUrls.get(imgEl);
+        if (typeof prev === "string") URL.revokeObjectURL(prev);
+        previewUrls.delete(imgEl);
+        imgEl.hidden = true;
+        imgEl.removeAttribute("src");
+        imgEl.closest("div")?.querySelector(".placeholder")?.removeAttribute("hidden");
+      }
+
+      function clearPreviews(): void {
+        for (const url of previewUrls.values()) URL.revokeObjectURL(url);
+        previewUrls.clear();
+        for (const selector of ['[data-testid="preview-a"]', '[data-testid="preview-b"]']) {
+          const found = document.querySelector(selector);
+          if (!(found instanceof HTMLImageElement)) continue;
+          found.hidden = true;
+          found.removeAttribute("src");
+          found.closest("div")?.querySelector(".placeholder")?.removeAttribute("hidden");
+        }
+      }
+
+      function bindPreview(inputName: string, previewTestId: string): void {
+        const foundInput = document.querySelector(inputName);
+        const foundImg = document.querySelector(previewTestId);
+        if (!(foundInput instanceof HTMLInputElement)) return;
+        if (!(foundImg instanceof HTMLImageElement)) return;
+        const inputRef = foundInput;
+        const imgRef = foundImg;
+        inputRef.addEventListener("change", () => {
+          const parsed = updatePreview(inputRef, imgRef);
+          if (!parsed.ok) clearSinglePreview(imgRef);
+        });
+      }
+
+      bindPreview('input[name="image_a"]', '[data-testid="preview-a"]');
+      bindPreview('input[name="image_b"]', '[data-testid="preview-b"]');
 
       // Blob URL del zip en memoria: permite re-descarga local sin volver
       // al servidor (cumple stateless + TTL: tras 60s el servidor olvida).
@@ -110,18 +216,19 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       let gen = 0;
 
       function setProgress(pct: number): void {
+        if (!progressEl) return;
         progressEl.value = pct;
         progressEl.textContent = `${pct}%`;
       }
 
       function showStage(jobId: string, status: string, stage: string, progress: number): void {
         const pct = Math.round(progress * 100);
-        stageEl.textContent = `job ${jobId}: ${statusMessage(status, stage, progress, jobId)}`;
-        statusEl.textContent = `job ${jobId}: ${status} ${stage} ${pct}%`;
+        setStageText(`job ${jobId}: ${statusMessage(status, stage, progress, jobId)}`);
         setProgress(pct);
       }
 
       function showError(msg: string): void {
+        if (!errorEl) return;
         errorEl.hidden = false;
         errorEl.textContent = msg;
       }
@@ -142,19 +249,17 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         try {
           raw = await res.json();
         } catch {
-          const error = { kind: "InvalidHealthVersion" } as const;
+          const error: HealthVersionError = { kind: "InvalidHealthVersion" };
           const msg = contractVersionMessage(error);
           showError(msg);
-          statusEl.textContent = msg;
-          stageEl.textContent = msg;
+          setStageText(msg);
           return { ok: false, error };
         }
         const parsed = parseHealthContractVersion(raw);
         if (parsed.ok) return { ok: true, value: true };
         const msg = contractVersionMessage(parsed.error);
         showError(msg);
-        statusEl.textContent = msg;
-        stageEl.textContent = msg;
+        setStageText(msg);
         return { ok: false, error: parsed.error };
       }
 
@@ -163,11 +268,16 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         for (const u of imgUrls) URL.revokeObjectURL(u);
         zipUrl = null;
         imgUrls = [];
+        clearPreviews();
         window.dispatchEvent(new Event("vultus:clear"));
-        downloadEl.hidden = true;
-        downloadEl.removeAttribute("href");
-        errorEl.hidden = true;
-        errorEl.textContent = "";
+        if (downloadEl) {
+          downloadEl.hidden = true;
+          downloadEl.removeAttribute("href");
+        }
+        if (errorEl) {
+          errorEl.hidden = true;
+          errorEl.textContent = "";
+        }
         for (const img of document.querySelectorAll<HTMLImageElement>(
           'img[data-testid="panel-uv-a"], img[data-testid="panel-uv-b"], img[data-testid="panel-pbr-a"], img[data-testid="panel-pbr-b"], img[data-testid="panel-render-a"], img[data-testid="panel-render-b"]',
         )) {
@@ -208,10 +318,12 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       async function renderResult(zipBlob: Blob, jobId: string, myGen: number): Promise<void> {
         if (myGen !== gen) return;
         zipUrl = URL.createObjectURL(zipBlob);
-        downloadEl.href = zipUrl;
-        downloadEl.download = `result-${jobId}.zip`;
-        downloadEl.textContent = `Descargar zip (result-${jobId}.zip)`;
-        downloadEl.hidden = false;
+        if (downloadEl) {
+          downloadEl.href = zipUrl;
+          downloadEl.download = `result-${jobId}.zip`;
+          downloadEl.textContent = `Descargar zip (result-${jobId}.zip)`;
+          downloadEl.hidden = false;
+        }
         const parsed = await tryExtractViewerBlobs(zipBlob);
         if (myGen !== gen) return;
         if (!parsed.ok) {
@@ -228,8 +340,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         window.dispatchEvent(
           new CustomEvent("vultus:meshes", { detail: { meshA, meshB, pbrA, pbrB } }),
         );
-        stageEl.textContent = `job ${jobId}: listo. Zip guardado en memoria para re-descarga local.`;
-        statusEl.textContent = `job ${jobId}: done (zip en memoria)`;
+        setStageText(`job ${jobId}: listo. Zip guardado en memoria para re-descarga local.`);
         setProgress(100);
         void fetchFigureV3(jobId, myGen);
       }
@@ -239,7 +350,8 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       async function fetchFigureV3(jobId: string, myGen: number): Promise<void> {
         if (myGen !== gen) return;
         const noteEl = document.getElementById("figure-v3-note");
-        const meshEl = document.getElementById("download-figure-v3") as HTMLAnchorElement | null;
+        const foundMesh = document.getElementById("download-figure-v3");
+        const meshEl = foundMesh instanceof HTMLAnchorElement ? foundMesh : null;
         let res: Response;
         try {
           res = await fetch(`${api}${API_PATHS.figureV3(jobId)}`);
@@ -265,14 +377,14 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           return;
         }
         const { albedo, neutral, key, fill, rim, meshDense } = parsed.value;
-        const paint = (selector: string, b: Blob) => {
+        const paint = (selector: string, b: Blob): void => {
           const url = URL.createObjectURL(b);
           imgUrls.push(url);
-          const img = document.querySelector(selector) as HTMLImageElement | null;
-          if (!img) return;
-          img.src = url;
-          img.hidden = false;
-          img.closest("figure")?.querySelector(".placeholder")?.setAttribute("hidden", "");
+          const found = document.querySelector(selector);
+          if (!(found instanceof HTMLImageElement)) return;
+          found.src = url;
+          found.hidden = false;
+          found.closest("figure")?.querySelector(".placeholder")?.setAttribute("hidden", "");
         };
         paint('[data-testid="panel-v3-albedo"]', albedo);
         paint('[data-testid="panel-v3-neutral"]', neutral);
@@ -309,7 +421,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         }
         if (isRetryableResultStatus(res.status) && attempt < 10) {
           const why = res.status === 409 ? "aún procesando (409)" : "aún no disponible (404)";
-          stageEl.textContent = `job ${jobId}: resultado ${why}, reintentando...`;
+          setStageText(`job ${jobId}: resultado ${why}, reintentando...`);
           window.setTimeout(() => void fetchResult(jobId, myGen, attempt + 1), 1000);
           return;
         }
@@ -340,8 +452,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           stopLive();
           settled = false;
           clearResult();
-          statusEl.textContent = `job ${jobId}: expiró en frío (TTL 60s). Reintentando en caliente...`;
-          stageEl.textContent = `job ${jobId}: expiró en frío (TTL 60s). Reintentando en caliente...`;
+          setStageText(`job ${jobId}: expiró en frío (TTL 60s). Reintentando en caliente...`);
           void startJob(lastFd);
           return;
         }
@@ -371,7 +482,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           }
           if (res.status === 404) {
             stopLive();
-            statusEl.textContent = `job ${jobId}: no encontrado (404).`;
+            setStageText(`job ${jobId}: no encontrado (404).`);
             return;
           }
           if (!res.ok) return;
@@ -386,15 +497,13 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           const body = { status: poll.value };
           if (body.status === "done") {
             stopLive();
-            stageEl.textContent = `job ${jobId}: listo. Descargando resultado...`;
-            statusEl.textContent = `job ${jobId}: done`;
+            setStageText(`job ${jobId}: listo. Descargando resultado...`);
             setProgress(100);
             void fetchResult(jobId, myGen);
           } else if (isTerminal(body.status)) {
             onEvent(jobId, body.status, body.status === "failed" ? 0 : 1, "?", myGen);
           } else {
-            statusEl.textContent = `job ${jobId}: ${body.status} (polling, sin WS)...`;
-            stageEl.textContent = `job ${jobId}: ${body.status} (polling, sin WS)...`;
+            setStageText(`job ${jobId}: ${body.status} (polling, sin WS)...`);
           }
         };
         pollTimer = window.setInterval(() => void tick(), 1000);
@@ -432,20 +541,21 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         socket.addEventListener("close", onDrop);
       }
 
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        lastFd = new FormData(form);
-        autoRetried = false;
-        await startJob(lastFd);
-      });
+      if (form) {
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          lastFd = new FormData(form);
+          autoRetried = false;
+          await startJob(lastFd);
+        });
+      }
 
       async function startJob(fd: FormData): Promise<void> {
         stopLive();
         settled = false;
         const myGen = ++gen;
         clearResult();
-        statusEl.textContent = "enviando...";
-        stageEl.textContent = "enviando...";
+        setStageText("enviando...");
         setProgress(0);
         const healthy = await checkContractHealth();
         if (!healthy.ok) return;
@@ -455,25 +565,21 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         try {
           rawBody = await res.json();
         } catch {
-          statusEl.textContent = `error ${res.status}: invalid response`;
-          stageEl.textContent = `error ${res.status}: invalid response`;
+          setStageText(`error ${res.status}: invalid response`);
           return;
         }
         if (!res.ok) {
           const detail = errorDetail(rawBody);
-          statusEl.textContent = `error ${res.status}: ${detail}`;
-          stageEl.textContent = `error ${res.status}: ${detail}`;
+          setStageText(`error ${res.status}: ${detail}`);
           return;
         }
         const parsed = parseCompareResponse(rawBody);
         if (!parsed.ok) {
-          statusEl.textContent = `error ${res.status}: invalid response`;
-          stageEl.textContent = `error ${res.status}: invalid response`;
+          setStageText(`error ${res.status}: invalid response`);
           return;
         }
         const jobId = parsed.value.jobId;
-        statusEl.textContent = `job ${jobId} queued...`;
-        stageEl.textContent = `job ${jobId}: en cola...`;
+        setStageText(`job ${jobId}: en cola...`);
         subscribe(jobId, myGen);
       }
     </script>

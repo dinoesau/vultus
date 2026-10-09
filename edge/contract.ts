@@ -3,7 +3,7 @@
  * Python la importa como espejo, nunca al reves.
  * Constantes canonicas: MAX_IMAGE_BYTES, magic JPEG/PNG,
  * TtlSecs 1..=3600 default 60, Stage, JobId uuid.
- * Zip canonico v2: 6 piezas sin heatmap (ADR-008 revoca ADR-002).
+ * Zip canonico v3: 8 piezas sin heatmap (ADR-008 + ADR-012).
  * Pre-validacion fina del gateway para no encolar basura a Queues+R2
  * y no diverger en mensajes 400.
  */
@@ -48,7 +48,8 @@ export const GNM_ISLANDS = [1, 2, 3, 4, 5] as const;
 export type GnmIsland = (typeof GNM_ISLANDS)[number];
 
 // Manifiesto zip versionado: fuente unica que Python espeja.
-// Zip-6 v2 sin heatmap (ADR-008): uv + mesh + PBR, en orden canonico python.
+// Zip-8 v3 sin heatmap (ADR-008 + ADR-012): uv + mesh + PBR + renders
+// frontales 512, en orden canonico python.
 export const ZIP_MANIFEST = {
   uvA: "uv_a.png",
   uvB: "uv_b.png",
@@ -56,6 +57,8 @@ export const ZIP_MANIFEST = {
   meshB: "mesh_b.glb",
   pbrA: "pbr_a.png",
   pbrB: "pbr_b.png",
+  renderA: "render_a.png",
+  renderB: "render_b.png",
 } as const;
 
 export const ZIP_NAMES = [
@@ -65,14 +68,17 @@ export const ZIP_NAMES = [
   ZIP_MANIFEST.meshB,
   ZIP_MANIFEST.pbrA,
   ZIP_MANIFEST.pbrB,
+  ZIP_MANIFEST.renderA,
+  ZIP_MANIFEST.renderB,
 ] as const;
 export type ZipName = (typeof ZIP_NAMES)[number];
 
-// Track v3 FFHQ-UV figure (paralelo, sin tocar la via forense v2).
-// Revoca solo para v3: ADR-009 (FLAME 5023), TTL 60 y zip-6.
-// Migracion versionada: V3_CONTRACT_VERSION = 3 (forense sigue en 2).
+// Track v3 FFHQ-UV figure (paralelo, sin tocar la via forense v3).
+// Revoca solo para v3: ADR-009 (FLAME 5023), TTL 60 y zip-8.
+// Migracion versionada: V3_CONTRACT_VERSION_NUMBER = 3 en track /v3
+// separado (ADR-012: mismo numero, distinto path, sin colision en wire).
 // Bundle v3 de 6 piezas (malla densa + albedo 1024 + neutral + 3 relights
-// con esferas como la figura). Nombres disjuntos del zip-6: prohibido mezclar.
+// con esferas como la figura). Nombres disjuntos del zip-8: prohibido mezclar.
 export const V3_CONTRACT_VERSION_NUMBER = 3;
 export const V3_VERT_COUNT = 20481;
 export const V3_TRI_COUNT = 40832;
@@ -109,7 +115,11 @@ export function v3FigurePath(id: JobId): string {
 }
 
 // Version de contrato: v1 legacy era 7 piezas con heatmap sin versionar;
-// v2 es zip-6 sin heatmap. El transporte (sobre) no cambia, el payload si.
+// v2 era zip-6 sin heatmap; v3 es zip-8 con renders frontales (ADR-012).
+// El transporte (sobre) no cambia, el payload si. Sin dual-read v2:
+// mismatch es VersionMismatch con mensaje actualiza.
+// V3_CONTRACT_VERSION_NUMBER=3 es track /v3 separado (figura densa),
+// sin colision en wire con este contrato forense v3: paths distintos.
 declare const ContractVersionBrand: unique symbol;
 export type ContractVersion = Brand<number, "ContractVersion"> & {
   readonly [ContractVersionBrand]: "ContractVersion";
@@ -130,7 +140,7 @@ function mintContractVersionUnchecked(value: number): ContractVersion {
   return value as ContractVersion;
 }
 
-export const CONTRACT_VERSION: ContractVersion = mintContractVersionUnchecked(2);
+export const CONTRACT_VERSION: ContractVersion = mintContractVersionUnchecked(3);
 
 export function contractVersionToNumber(v: ContractVersion): number {
   return v;

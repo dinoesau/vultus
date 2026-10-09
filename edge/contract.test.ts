@@ -135,7 +135,7 @@ describe("contrato edge como fuente de verdad", () => {
     expect(PROGRESS_DONE).toBe(1.0);
   });
 
-  it("manifiesto zip-6 sin heatmap en orden canonico python", () => {
+  it("manifiesto zip-8 sin heatmap en orden canonico python", () => {
     expect([...GNM_ISLANDS]).toEqual([1, 2, 3, 4, 5]);
     expect(ZIP_MANIFEST.uvA).toBe("uv_a.png");
     expect(ZIP_MANIFEST.uvB).toBe("uv_b.png");
@@ -143,6 +143,8 @@ describe("contrato edge como fuente de verdad", () => {
     expect(ZIP_MANIFEST.meshB).toBe("mesh_b.glb");
     expect(ZIP_MANIFEST.pbrA).toBe("pbr_a.png");
     expect(ZIP_MANIFEST.pbrB).toBe("pbr_b.png");
+    expect(ZIP_MANIFEST.renderA).toBe("render_a.png");
+    expect(ZIP_MANIFEST.renderB).toBe("render_b.png");
     expect("heat" in ZIP_MANIFEST).toBe(false);
     expect([...ZIP_NAMES]).toEqual([
       "uv_a.png",
@@ -151,16 +153,18 @@ describe("contrato edge como fuente de verdad", () => {
       "mesh_b.glb",
       "pbr_a.png",
       "pbr_b.png",
+      "render_a.png",
+      "render_b.png",
     ]);
-    expect(ZIP_NAMES.length).toBe(6);
+    expect(ZIP_NAMES.length).toBe(8);
     expect([...ZIP_NAMES].some((n) => n === "heatmap.png")).toBe(false);
   });
 
   it("contract_version brand con parse Result y mismatch ADT total", () => {
-    expect(contractVersionToNumber(CONTRACT_VERSION)).toBe(2);
-    const ok = parseContractVersion(2);
+    expect(contractVersionToNumber(CONTRACT_VERSION)).toBe(3);
+    const ok = parseContractVersion(3);
     expect(ok.ok).toBe(true);
-    if (ok.ok) expect(contractVersionToNumber(ok.value)).toBe(2);
+    if (ok.ok) expect(contractVersionToNumber(ok.value)).toBe(3);
     expect(parseContractVersion(1).ok).toBe(true);
     expect(parseContractVersion(0).ok).toBe(false);
     expect(parseContractVersion(-1).ok).toBe(false);
@@ -177,7 +181,7 @@ describe("contrato edge como fuente de verdad", () => {
       const mismatch = checkContractVersion(parsed1.value);
       expect(mismatch.kind).toBe("VersionMismatch");
       if (mismatch.kind === "VersionMismatch") {
-        expect(contractVersionToNumber(mismatch.expected)).toBe(2);
+        expect(contractVersionToNumber(mismatch.expected)).toBe(3);
         expect(contractVersionToNumber(mismatch.received)).toBe(1);
       }
     } else {

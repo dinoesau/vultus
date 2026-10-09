@@ -557,7 +557,7 @@ def main() -> int:
         )
     check("5-margen", c5_ok, c5_detail)
 
-    # --- CHECK 6: zip-6 canonico + sync python==TS ---
+    # --- CHECK 6: zip-8 canonico + sync python==TS ---
     alb_a_parsed = parse_rendered_image(albedos["A"])
     assert isinstance(alb_a_parsed, Ok)
     alb_b_parsed = parse_rendered_image(albedos["B"])
@@ -579,6 +579,12 @@ def main() -> int:
         return 1
     assert isinstance(pbr_resolved, Ok)
     pbr_a, pbr_b = pbr_resolved.value
+    from backend.render_preview import build_preview_png as _e2e_preview
+
+    _prev_a = _e2e_preview(fits["A"], alb_a_parsed.value)
+    _prev_b = _e2e_preview(fits["B"], alb_b_parsed.value)
+    assert isinstance(_prev_a, Ok)
+    assert isinstance(_prev_b, Ok)
     bundle = ZipBundle(
         uv_a_png=uv_a_png,
         uv_b_png=uv_b_png,
@@ -586,6 +592,8 @@ def main() -> int:
         mesh_b_glb=glbs["B"],
         pbr_a=pbr_a,
         pbr_b=pbr_b,
+        preview_a_png=_prev_a.value,
+        preview_b_png=_prev_b.value,
     )
     pbr_dup = uv_a_png == bundle.pbr_a and uv_b_png == bundle.pbr_b
     c6b_ok = pbr_dup
@@ -602,7 +610,7 @@ def main() -> int:
     ts_ok = all(f'"{n}"' in ts_text for n in ZIP_NAMES)
     c6_ok = names == list(ZIP_NAMES) and all(c == zipfile.ZIP_STORED for c in compress) and ts_ok
     check(
-        "6-zip6",
+        "6-zip8",
         c6_ok,
         f"namelist={names} (esperado {list(ZIP_NAMES)}); STORED={all(c == zipfile.ZIP_STORED for c in compress)}; "
         f"sync TS={ts_ok}; zip_len={len(zip_bytes)}",

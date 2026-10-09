@@ -1,7 +1,7 @@
 """Ensamblaje FLAME: malla 5023 + PBR 2 materiales + GLB.
 
 Wave 4 Step 5: piel total sin gris, ojos [3931:5023) con material propio,
-PBR real (sin truco emisivo), zip-6 por la unica seam `build_result_zip`
+PBR real (sin truco emisivo), zip-8 por la unica seam `build_result_zip`
 en `backend/gnm.py`. Sin torch, sin FastAPI, sin logging.
 """
 
@@ -425,7 +425,7 @@ _LAST_DISPLACE_STATS = ThreadLocalStats(
 
 # Boundary del cuello: abierto por diseno (ADR-009 vigente: sin hombros).
 # El template FLAME trae el cuello abierto; cerrarlo o poner falda cambia
-# la topologia y rompe VERT_COUNT 5023 + zip-6 + visor. Se deja abierto:
+# la topologia y rompe VERT_COUNT 5023 + zip-8 + visor. Se deja abierto:
 # la costura se disimula con textura y NORMAL suave, no con geometria.
 NECK_BOUNDARY_MODE = "open"
 
@@ -500,7 +500,7 @@ def _eye_png() -> bytes:
     return buf.getvalue()
 
 
-def _smooth_vertex_normals(
+def smooth_vertex_normals(
     positions: list[tuple[float, float, float]],
     tris: list[tuple[int, int, int]],
 ) -> list[tuple[float, float, float]]:
@@ -534,6 +534,9 @@ def _smooth_vertex_normals(
         else:
             out.append((nx / length, ny / length, nz / length))
     return out
+
+
+_smooth_vertex_normals = smooth_vertex_normals
 
 
 def build_personalized_glb(
@@ -598,7 +601,7 @@ def build_personalized_glb(
             eye_png = _eye_png()
         pos_buf = struct.pack(f"<{VERT_COUNT * 3}f", *[c for p in positions for c in p])
         uv_buf = struct.pack(f"<{VERT_COUNT * 2}f", *[c for t in split_uvs for c in t])
-        normals = _smooth_vertex_normals(positions, template_tris)
+        normals = smooth_vertex_normals(positions, template_tris)
         nrm_buf = struct.pack(f"<{VERT_COUNT * 3}f", *[c for n in normals for c in n])
         skin_flat = [v for tri in skin_tris for v in tri]
         eye_flat = [v for tri in eye_tris for v in tri]

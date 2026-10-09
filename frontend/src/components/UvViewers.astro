@@ -1,8 +1,8 @@
 ---
- // Isla presentacional: progreso + visores UV/PBR + descarga.
+ // Isla presentacional: progreso + visores UV/PBR/renders + descarga.
  // Sin lógica de red aquí; el wiring vive en el script de index.astro
  // que importa los helpers de compare-client.ts.
- // Zip-6 v2: 2 UV canónicos + 2 PBR de piel; sin panel de diferencias.
+ // Zip-8 v3: 2 UV canónicos + 2 PBR de piel + 2 renders; sin panel de diferencias.
 ---
 
 <section aria-label="Progreso del análisis" class="panel">
@@ -18,7 +18,7 @@
   <p id="stage-text" role="status">sin job</p>
 </section>
 
-<section aria-label="Visores UV y PBR" class="panel">
+<section aria-label="Visores UV, PBR y renders" class="panel">
   <h2>Visores</h2>
   <div class="viewers">
     <figure>
@@ -53,6 +53,24 @@
       <img
         data-testid="panel-pbr-b"
         alt="Textura PBR de piel de la cara B"
+        hidden
+      />
+      <p class="placeholder">pendiente de resultado</p>
+    </figure>
+    <figure>
+      <figcaption>Render A frontal</figcaption>
+      <img
+        data-testid="panel-render-a"
+        alt="Render frontal 2D de la cara A"
+        hidden
+      />
+      <p class="placeholder">pendiente de resultado</p>
+    </figure>
+    <figure>
+      <figcaption>Render B frontal</figcaption>
+      <img
+        data-testid="panel-render-b"
+        alt="Render frontal 2D de la cara B"
         hidden
       />
       <p class="placeholder">pendiente de resultado</p>
@@ -95,8 +113,13 @@
   }
   .viewers {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     gap: 1rem;
+  }
+  @media (max-width: 1200px) {
+    .viewers {
+      grid-template-columns: repeat(3, 1fr);
+    }
   }
   @media (max-width: 960px) {
     .viewers {

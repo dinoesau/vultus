@@ -60,12 +60,27 @@ ZIP_MESH_A = "mesh_a.glb"
 ZIP_MESH_B = "mesh_b.glb"
 ZIP_PBR_A = "pbr_a.png"
 ZIP_PBR_B = "pbr_b.png"
+ZIP_RENDER_A = "render_a.png"
+ZIP_RENDER_B = "render_b.png"
 
-# Unica constante canonica zip-6 en orden canonico (espejo de edge/contract.ts ZIP_NAMES).
-# Sin heatmap (ADR-008 revoca ADR-002). No inventar literales fuera de aqui.
+PREVIEW_WIDTH = 512
+PREVIEW_HEIGHT = 512
+
+# Unica constante canonica zip-8 en orden canonico (espejo de edge/contract.ts ZIP_NAMES).
+# Sin heatmap (ADR-008 revoca ADR-002). Renders frontales al final (ADR-012).
+# No inventar literales fuera de aqui.
 
 
-ZIP_NAMES = (ZIP_UV_A, ZIP_UV_B, ZIP_MESH_A, ZIP_MESH_B, ZIP_PBR_A, ZIP_PBR_B)
+ZIP_NAMES = (
+    ZIP_UV_A,
+    ZIP_UV_B,
+    ZIP_MESH_A,
+    ZIP_MESH_B,
+    ZIP_PBR_A,
+    ZIP_PBR_B,
+    ZIP_RENDER_A,
+    ZIP_RENDER_B,
+)
 
 
 class ThreadLocalStats:
@@ -134,7 +149,7 @@ DISPLACE_CAUSE_KEYS: tuple[str, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class ZipBundle:
-    """Bundle 6 archivos en orden canonico ZIP_NAMES. Solo via constructores shell."""
+    """Bundle 8 archivos en orden canonico ZIP_NAMES. Solo via constructores shell."""
 
     uv_a_png: bytes
     uv_b_png: bytes
@@ -142,6 +157,8 @@ class ZipBundle:
     mesh_b_glb: bytes
     pbr_a: bytes
     pbr_b: bytes
+    preview_a_png: bytes
+    preview_b_png: bytes
 
 # GNM fit directo: 253 coeficientes finitos + camara 3x4 (12 finitos).
 GNM_COEFFS_LEN = 253
@@ -793,11 +810,50 @@ def parse_gnm_mesh(raw: object) -> Result[GnmMesh, DomainError]:
 
 
 @dataclass(frozen=True, slots=True)
+class PreviewPng:
+    """Render frontal 2D 512x512 determinista. Solo via parse_preview_png."""
+
+    _value: bytes
+
+    def as_bytes(self) -> bytes:
+        return self._value
+
+    def __len__(self) -> int:
+        return len(self._value)
+
+
+def parse_preview_png(raw: object) -> Result[PreviewPng, DomainError]:
+    """Smart constructor unico: magic PNG + IHDR 512x512. Nunca lanza."""
+    if not isinstance(raw, (bytes, bytearray, memoryview)):
+        return Err(MlFailed(detail=MlDecode(details="preview missing png magic")))
+    data = bytes(raw)
+    if len(data) < 33:
+        return Err(MlFailed(detail=MlDecode(details="preview png truncated")))
+    if data[0:8] != PNG_MAGIC:
+        return Err(MlFailed(detail=MlDecode(details="preview missing png magic")))
+    if data[12:16] != b"IHDR":
+        return Err(MlFailed(detail=MlDecode(details="preview png missing IHDR")))
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    if width != PREVIEW_WIDTH or height != PREVIEW_HEIGHT:
+        return Err(
+            MlFailed(
+                detail=MlDecode(
+                    details=f"preview size {width}x{height} != {PREVIEW_WIDTH}x{PREVIEW_HEIGHT}"
+                )
+            )
+        )
+    return Ok(PreviewPng(_value=data))
+
+
+@dataclass(frozen=True, slots=True)
 class CompareResult:
     uv_a: CompleteUv
     uv_b: CompleteUv
     mesh_a: GnmMesh
     mesh_b: GnmMesh
+    preview_a: PreviewPng
+    preview_b: PreviewPng
 
 
 # --- GNM fit directo: tipos probados en el borde del fitter ---

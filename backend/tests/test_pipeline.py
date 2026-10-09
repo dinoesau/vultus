@@ -110,12 +110,13 @@ class FakeMlFailFit:
         return parse_complete_uv(_golden_complete(bytes([10, 200])))
 
 
-def test_pair_produces_zip6_sin_heatmap_y_limpia_tmp() -> None:
+def test_pair_produces_zip8_sin_heatmap_y_limpia_tmp() -> None:
     import io as _io
     import zipfile as _zipfile
 
     from backend.domain import UV_LEN, ZIP_NAMES, new_job_id
     from backend.gnm import build_result_zip, uv_to_png
+    from backend.render_preview import build_preview_png
 
     sink: ProgressSink = InMemorySink()
     image_a = _image(MARKER_A)
@@ -135,7 +136,13 @@ def test_pair_produces_zip6_sin_heatmap_y_limpia_tmp() -> None:
     assert isinstance(sink, InMemorySink)
     assert sink.result == result
     assert not sink.failed
-    # Zip-6 por la unica seam: mismos 6 nombres del dominio en el zip real.
+    # Previews portadas en CompareResult: PNG 512x512 validos.
+    from backend.domain import parse_preview_png
+
+    assert isinstance(parse_preview_png(result.preview_a.as_bytes()), Ok)
+    assert isinstance(parse_preview_png(result.preview_b.as_bytes()), Ok)
+    assert result.preview_a.as_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    # Zip-8 por la unica seam: mismos 8 nombres del dominio en el zip real.
     bundle_probe = build_result_zip(
         __import__("backend.domain", fromlist=["ZipBundle"]).ZipBundle(
             uv_a_png=uv_to_png(result.uv_a),
@@ -144,11 +151,14 @@ def test_pair_produces_zip6_sin_heatmap_y_limpia_tmp() -> None:
             mesh_b_glb=result.mesh_b.as_bytes(),
             pbr_a=uv_to_png(result.uv_a),
             pbr_b=uv_to_png(result.uv_b),
+            preview_a_png=result.preview_a.as_bytes(),
+            preview_b_png=result.preview_b.as_bytes(),
         )
     )
     with _zipfile.ZipFile(_io.BytesIO(bundle_probe)) as z:
         assert z.namelist() == list(ZIP_NAMES)
-        assert len(z.namelist()) == 6
+        assert len(z.namelist()) == 8
+    _ = build_preview_png
     done = parse_progress(1.0)
     assert isinstance(done, Ok)
     assert [(p.value(), s) for p, s in sink.reports] == [
@@ -159,7 +169,7 @@ def test_pair_produces_zip6_sin_heatmap_y_limpia_tmp() -> None:
     assert not job_dir(job_id).exists()
 
 
-def test_zip6_sync_python_ts_zip() -> None:
+def test_zip8_sync_python_ts_zip() -> None:
     import io as _io
     import zipfile as _zipfile
     from pathlib import Path as _Path
@@ -168,8 +178,18 @@ def test_zip6_sync_python_ts_zip() -> None:
     from backend.domain import ZipBundle as _Bundle
     from backend.domain import parse_complete_uv as _parse_uv
     from backend.gnm import build_result_zip, uv_to_png
+    from backend.render_preview import build_preview_png as _preview
 
-    expected = ["uv_a.png", "uv_b.png", "mesh_a.glb", "mesh_b.glb", "pbr_a.png", "pbr_b.png"]
+    expected = [
+        "uv_a.png",
+        "uv_b.png",
+        "mesh_a.glb",
+        "mesh_b.glb",
+        "pbr_a.png",
+        "pbr_b.png",
+        "render_a.png",
+        "render_b.png",
+    ]
     assert list(ZIP_NAMES) == expected
     ts = (_Path(__file__).resolve().parents[2] / "edge" / "contract.ts").read_text()
     for name in expected:
@@ -195,6 +215,8 @@ def test_zip6_sync_python_ts_zip() -> None:
     fit = _Fit(coeffs=c0.value, camera=cam.value)
     ga = _glb(fit, uv.value)
     assert isinstance(ga, Ok)
+    prev = _preview(fit, uv.value)
+    assert isinstance(prev, Ok)
     blob = build_result_zip(
         _Bundle(
             uv_a_png=png,
@@ -203,6 +225,8 @@ def test_zip6_sync_python_ts_zip() -> None:
             mesh_b_glb=ga.value.as_bytes(),
             pbr_a=png,
             pbr_b=png,
+            preview_a_png=prev.value,
+            preview_b_png=prev.value,
         )
     )
     with _zipfile.ZipFile(_io.BytesIO(blob)) as z:

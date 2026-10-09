@@ -1,8 +1,8 @@
 """Bundle v3 nuevo (malla densa + albedo 1024 + relights).
 
-Tipo separado del zip-6 forense a nivel de tipos y de nombres: prohibido
+Tipo separado del zip-8 forense a nivel de tipos y de nombres: prohibido
 mezclar. `V3Bundle` solo via `build_v3_bundle`; `ZipBundle` (dominio)
-sigue siendo el unico dueno del zip-6.
+sigue siendo el unico dueno del zip-8.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def build_v3_bundle(
 
     `albedo_raw` es el atlas 1024 RGB plano (`V3_UV_LEN` bytes); se guarda
     tal cual (el PNG lo hace el visor/worker, aqui es bundle de bytes).
-    Prohibido mezclar con zip-6: los nombres se verifican disjuntos.
+    Prohibido mezclar con zip-8: los nombres se verifican disjuntos.
     """
     try:
         rel = list(relights)
@@ -80,7 +80,7 @@ def build_v3_bundle(
     except ImportError as exc:
         return Err(MlFailed(detail=MlDecode(details=f"v3 bundle forensic check failed: {exc}")))
     if set(V3_ZIP_NAMES) & set(_ZIP6):
-        return Err(MlFailed(detail=MlDecode(details="v3 bundle overlaps zip-6")))
+        return Err(MlFailed(detail=MlDecode(details="v3 bundle overlaps zip-8")))
     return Ok(
         V3Bundle(
             mesh_dense_glb=bytes(mesh_glb),

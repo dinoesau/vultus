@@ -49,6 +49,7 @@ from backend.domain import (
     parse_complete_uv,
     parse_gnm_coeffs,
     parse_landmarks,
+    parse_preview_png,
     parse_progress,
 )
 from backend.flame_texture import (
@@ -58,6 +59,7 @@ from backend.flame_texture import (
 )
 from backend.gnm import uv_to_png
 from backend.gnm_assemble import build_personalized_glb
+from backend.render_preview import build_preview_png
 
 logger = logging.getLogger("vultus-pipeline")
 
@@ -398,7 +400,8 @@ def run_pair(
 
     assemble_start = time.monotonic()
     # Wave 4 Step 5 (FLAME): sin mapa termico. La unica seam
-    # de ensamblaje es build_personalized_glb (PBR 2 materiales) + sink zip-6.
+    # de ensamblaje es build_personalized_glb (PBR 2 materiales) + sink zip-8.
+    # ADR-012: previews frontales 512 via build_preview_png tras el GLB.
     # Wave 4-fix P4: gate sentinel/evidence sobre salida seam textura.
     # El albedo nunca trae SKIN_SENTINEL magenta; evidence>=EVIDENCE_MIN.
     # PBR skin-duplicate (DAG v10 HIL dueno): el zip usa `resolve_pbr_pngs`
@@ -425,6 +428,20 @@ def run_pair(
         return _fail(f"assemble mesh_b failed: {mesh_b_result.error}")
     mesh_a = mesh_a_result.value
     mesh_b = mesh_b_result.value
+    preview_start = time.monotonic()
+    preview_a_result = build_preview_png(fit_a, uv_a)
+    if isinstance(preview_a_result, Err):
+        return _fail(f"preview_a failed: {preview_a_result.error}")
+    preview_b_result = build_preview_png(fit_b, uv_b)
+    if isinstance(preview_b_result, Err):
+        return _fail(f"preview_b failed: {preview_b_result.error}")
+    parsed_a = parse_preview_png(preview_a_result.value)
+    if isinstance(parsed_a, Err):
+        return _fail(f"preview_a invalid: {parsed_a.error}")
+    parsed_b = parse_preview_png(preview_b_result.value)
+    if isinstance(parsed_b, Err):
+        return _fail(f"preview_b invalid: {parsed_b.error}")
+    preview_ms = int((time.monotonic() - preview_start) * 1000)
     assemble_ms = int((time.monotonic() - assemble_start) * 1000)
     logger.info(
         "assemble flame done job=%s assemble_ms=%d mesh_a_len=%d mesh_b_len=%d",
@@ -433,7 +450,21 @@ def run_pair(
         len(mesh_a.as_bytes()),
         len(mesh_b.as_bytes()),
     )
-    output = CompareResult(uv_a=uv_a, uv_b=uv_b, mesh_a=mesh_a, mesh_b=mesh_b)
+    logger.info(
+        "preview done job=%s preview_ms=%d preview_a_len=%d preview_b_len=%d",
+        job_id.as_str(),
+        preview_ms,
+        len(preview_a_result.value),
+        len(preview_b_result.value),
+    )
+    output = CompareResult(
+        uv_a=uv_a,
+        uv_b=uv_b,
+        mesh_a=mesh_a,
+        mesh_b=mesh_b,
+        preview_a=parsed_a.value,
+        preview_b=parsed_b.value,
+    )
     completed = sink.complete(output)
     if isinstance(completed, Err):
         cleanup_job_dir(job_id)

@@ -14,8 +14,8 @@ export const API_PATHS = {
   figureV3: (id: string) => `/v3/jobs/${id}/figure`,
 } as const;
 
-// Nombres exactos del bundle (contrato con el worker, zip-6 v2 sin heatmap:
-// 2 UV + 2 GLB + 2 PBR en orden canonico python).
+// Nombres exactos del bundle (contrato con el worker, zip-8 v3 sin heatmap:
+// 2 UV + 2 GLB + 2 PBR + 2 renders frontales en orden canonico python).
 // Espejo de edge/contract.ts ZIP_MANIFEST; no renombrar sin cambiar el worker.
 export const RESULT_FILES = {
   uvA: "uv_a.png",
@@ -24,6 +24,8 @@ export const RESULT_FILES = {
   meshB: "mesh_b.glb",
   pbrA: "pbr_a.png",
   pbrB: "pbr_b.png",
+  renderA: "render_a.png",
+  renderB: "render_b.png",
 } as const;
 
 // Bundle figura v3 (malla densa + albedo 1024 + neutral + 3 relights).
@@ -195,7 +197,7 @@ export interface ResultMeshes {
 }
 
 // Version esperada del contrato (espejo de edge/contract.ts CONTRACT_VERSION;
-// v2 = zip-6 sin heatmap). El frontend la valida contra GET /health.
+// v3 = zip-8 con renders). El frontend la valida contra GET /health.
 // Bundle-split: edge y frontend son bundles separados, asi que el brand se
 // espeja aqui (single mint via mintContractVersionUnchecked) en vez de importar edge.
 // Fuente unica local: CONTRACT_VERSION; EXPECTED_CONTRACT_VERSION es alias compat.
@@ -212,7 +214,7 @@ function mintContractVersionUnchecked(value: number): ContractVersion {
   return value as ContractVersion;
 }
 
-export const CONTRACT_VERSION: ContractVersion = mintContractVersionUnchecked(2);
+export const CONTRACT_VERSION: ContractVersion = mintContractVersionUnchecked(3);
 
 export function contractVersionToNumber(v: ContractVersion): number {
   return v;
@@ -316,8 +318,8 @@ export async function tryExtractResultMeshes(zipBlob: Blob): Promise<Result<Resu
   return { ok: true, value: { meshA: meshA.value, meshB: meshB.value } };
 }
 
-// Parte visor (Wave 5): el zip-6 completo en una sola carga para pintar
-// UV + PBR + meshes sin reparsear el zip tres veces. Result, no throw.
+// Parte visor (Wave 5 + ADR-012): el zip-8 completo en una sola carga para pintar
+// UV + PBR + renders + meshes sin reparsear el zip tres veces. Result, no throw.
 export interface ViewerBlobs {
   uvA: Blob;
   uvB: Blob;
@@ -325,6 +327,8 @@ export interface ViewerBlobs {
   pbrB: Blob;
   meshA: Blob;
   meshB: Blob;
+  renderA: Blob;
+  renderB: Blob;
 }
 export async function tryExtractViewerBlobs(
   zipBlob: Blob,
@@ -342,6 +346,10 @@ export async function tryExtractViewerBlobs(
   if (!meshA.ok) return meshA;
   const meshB = await tryPickEntry(zip, RESULT_FILES.meshB);
   if (!meshB.ok) return meshB;
+  const renderA = await tryPickEntry(zip, RESULT_FILES.renderA);
+  if (!renderA.ok) return renderA;
+  const renderB = await tryPickEntry(zip, RESULT_FILES.renderB);
+  if (!renderB.ok) return renderB;
   return {
     ok: true,
     value: {
@@ -351,12 +359,14 @@ export async function tryExtractViewerBlobs(
       pbrB: pbrB.value,
       meshA: meshA.value,
       meshB: meshB.value,
+      renderA: renderA.value,
+      renderB: renderB.value,
     },
   };
 }
 
 // Visor figura v3 (track paralelo): las 6 piezas del bundle denso en una
-// sola carga. Espejo de V3_RESULT_FILES; disjunto del zip-6. Result, no throw.
+// sola carga. Espejo de V3_RESULT_FILES; disjunto del zip-8. Result, no throw.
 export interface V3ViewerBlobs {
   meshDense: Blob;
   albedo: Blob;

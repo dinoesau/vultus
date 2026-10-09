@@ -123,7 +123,7 @@ MODAL_VOLUME_NAME = _env("MODAL_VOLUME", "vultus-weights") or "vultus-weights"
 # VULTUS_REAL_ML: 1 fuerza real, 0 fuerza dobles, auto decide por pesos+deps.
 REAL_MODE = os.environ.get("VULTUS_REAL_ML", "auto").lower()
 
-# Nombres del bundle: dominio es dueno de ZIP_NAMES zip-6 (ver backend/domain.py).
+# Nombres del bundle: dominio es dueno de ZIP_NAMES zip-8 (ver backend/domain.py).
 # Este modulo no define ZIP_* locales para evitar divergencia con edge/contract.ts.
 ZIP_MESH_A = "mesh_a.glb"
 ZIP_MESH_B = "mesh_b.glb"
@@ -1144,8 +1144,8 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
 
     Borde: r2_a/r2_b ya probados (R2Key); imagenes via _fetch_r2_bytes ->
     Result[ImageBytes]; landmarks via parse_landmarks; fit via parse_fit_result;
-    uv via parse_complete_uv. Zip-6 via ZipBundle/build_result_zip sin heatmap
-    (ADR-008). PBR skin-duplicate via resolve_pbr_pngs (ambos modos duplican
+    uv via parse_complete_uv. Zip-8 via ZipBundle/build_result_zip sin heatmap
+    (ADR-008) + renders frontales (ADR-012). PBR skin-duplicate via resolve_pbr_pngs (ambos modos duplican
     el albedo: placeholder honesto sin mapas reales; ojos en GLB 2
     primitivas; TODO mapas reales futuros). JobId queda en shell (str).
     """
@@ -1164,6 +1164,7 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
         from backend.gnm_assemble import build_personalized_glb as _glb
         from backend.pipeline_local import parse_fit_result as _parse_fit
         from backend.pipeline_local import resolve_pbr_pngs as _resolve_pbrR
+        from backend.render_preview import build_preview_png as _previewR
     except ImportError:  # pragma: no cover - paridad ruta plana en imagen
         from domain import Err as _ErrR  # type: ignore[no-redef]
         from domain import Ok as _OkR  # type: ignore[no-redef]
@@ -1182,6 +1183,9 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
         )
         from pipeline_local import (
             resolve_pbr_pngs as _resolve_pbrR,  # type: ignore[no-redef]
+        )
+        from render_preview import (  # type: ignore[no-redef]
+            build_preview_png as _previewR,
         )
 
     def _raise_for_domain(err_obj: object, context: str) -> None:
@@ -1356,9 +1360,10 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
         len(mesh_a),
         len(mesh_b),
     )
-    # PNG + zip en memoria, sin disco. Zip-6 canonico (ADR-008, sin heatmap).
+    # PNG + zip en memoria, sin disco. Zip-8 canonico (ADR-008 sin heatmap + ADR-012 renders).
     # PBR skin-duplicate via resolve_pbr_pngs (mismo helper que local_runner:
     # ambos modos duplican; TODO mapas reales futuros -> pbr!=uv).
+    # Previews frontales 512 via build_preview_png (misma seam que pipeline_local).
     uv_a_png = _uv_pngR(ra_uv.value)
     uv_b_png = _uv_pngR(rb_uv.value)
     pbr_resolved = _resolve_pbrR(ra_uv.value, rb_uv.value)
@@ -1367,6 +1372,23 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
     if not isinstance(pbr_resolved, _OkR):
         raise RuntimeError("pbr resolve failed")
     pbr_a, pbr_b = pbr_resolved.value
+    t_preview = time.perf_counter()
+    r_prev_a = _previewR(ra_fit.value, ra_uv.value)
+    if isinstance(r_prev_a, _ErrR):
+        _raise_for_domain(r_prev_a.error, "preview a failed")
+    r_prev_b = _previewR(rb_fit.value, rb_uv.value)
+    if isinstance(r_prev_b, _ErrR):
+        _raise_for_domain(r_prev_b.error, "preview b failed")
+    if not isinstance(r_prev_a, _OkR) or not isinstance(r_prev_b, _OkR):
+        raise RuntimeError("preview failed")
+    preview_ms = int((time.perf_counter() - t_preview) * 1000)
+    logger.info(
+        "preview done job=%s preview_ms=%d preview_a_len=%d preview_b_len=%d",
+        job_id,
+        preview_ms,
+        len(r_prev_a.value),
+        len(r_prev_b.value),
+    )
     bundle = _BundleR(
         uv_a_png=uv_a_png,
         uv_b_png=uv_b_png,
@@ -1374,6 +1396,8 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
         mesh_b_glb=mesh_b,
         pbr_a=pbr_a,
         pbr_b=pbr_b,
+        preview_a_png=r_prev_a.value,
+        preview_b_png=r_prev_b.value,
     )
     zip_bytes = _zip6R(bundle)
     _r2_client().put_object(

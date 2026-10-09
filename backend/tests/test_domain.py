@@ -274,10 +274,10 @@ def test_texture_request_rejects_truncated_and_nonbytes() -> None:
     assert domain_to_status(result.error) == 500
 
 
-def test_zip_canonical_six_no_heatmap() -> None:
+def test_zip_canonical_eight_no_heatmap() -> None:
     from backend.domain import ZIP_NAMES
 
-    assert len(ZIP_NAMES) == 6
+    assert len(ZIP_NAMES) == 8
     assert list(ZIP_NAMES) == [
         "uv_a.png",
         "uv_b.png",
@@ -285,6 +285,8 @@ def test_zip_canonical_six_no_heatmap() -> None:
         "mesh_b.glb",
         "pbr_a.png",
         "pbr_b.png",
+        "render_a.png",
+        "render_b.png",
     ]
     assert "heatmap.png" not in ZIP_NAMES
 

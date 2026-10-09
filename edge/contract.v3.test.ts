@@ -16,9 +16,9 @@ import {
 } from "./contract";
 
 describe("track v3 FFHQ-UV figure (paralelo, forense congelado)", () => {
-  it("forense intacto: zip-6 y CONTRACT_VERSION 2", () => {
-    expect(contractVersionToNumber(CONTRACT_VERSION)).toBe(2);
-    expect(ZIP_NAMES.length).toBe(6);
+  it("forense intacto: zip-8 y CONTRACT_VERSION 3", () => {
+    expect(contractVersionToNumber(CONTRACT_VERSION)).toBe(3);
+    expect(ZIP_NAMES.length).toBe(8);
   });
 
   it("v3 en paralelo: version 3, malla densa, atlas 1024, bundle disjunto", () => {

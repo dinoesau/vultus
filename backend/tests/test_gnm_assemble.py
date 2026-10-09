@@ -1,7 +1,7 @@
-"""Assemble FLAME: GLB PBR 2 materiales + zip-6, goldens congelados a mano.
+"""Assemble FLAME: GLB PBR 2 materiales + zip-8, goldens congelados a mano.
 
 Wave 4 Step 5: ojos [3931:5023) con material propio, piel sin ese rango,
-PBR real (sin truco emisivo), zip-6 por la unica seam de ensamblaje.
+PBR real (sin truco emisivo), zip-8 por la unica seam de ensamblaje.
 """
 
 from __future__ import annotations
@@ -56,6 +56,14 @@ def _fit(marker: float):
     assert isinstance(coeffs, Ok)
     assert isinstance(camera, Ok)
     return FitResult(coeffs=coeffs.value, camera=camera.value)
+
+
+def _preview_bytes(fit, albedo) -> bytes:  # type: ignore[no-untyped-def]
+    from backend.render_preview import build_preview_png
+
+    out = build_preview_png(fit, albedo)
+    assert isinstance(out, Ok)
+    return out.value
 
 
 def test_flame_consts_canonicas() -> None:
@@ -187,7 +195,9 @@ def test_glb_determinista_x2_y_difiere_por_identidad() -> None:
     assert first.value.as_bytes() != other.value.as_bytes()
 
 
-def test_zip6_por_seam_ensamblaje() -> None:
+def test_zip8_por_seam_ensamblaje() -> None:
+    from backend.render_preview import build_preview_png
+
     fit_a = _fit(0.1)
     fit_b = _fit(0.5)
     alb_a = _albedo(0xA1)
@@ -196,6 +206,10 @@ def test_zip6_por_seam_ensamblaje() -> None:
     mb = build_personalized_glb(fit_b, alb_b)
     assert isinstance(ma, Ok)
     assert isinstance(mb, Ok)
+    prev_a = build_preview_png(fit_a, alb_a)
+    prev_b = build_preview_png(fit_b, alb_b)
+    assert isinstance(prev_a, Ok)
+    assert isinstance(prev_b, Ok)
     bundle = ZipBundle(
         uv_a_png=uv_to_png(alb_a),
         uv_b_png=uv_to_png(alb_b),
@@ -203,12 +217,14 @@ def test_zip6_por_seam_ensamblaje() -> None:
         mesh_b_glb=mb.value.as_bytes(),
         pbr_a=uv_to_png(alb_a),
         pbr_b=uv_to_png(alb_b),
+        preview_a_png=prev_a.value,
+        preview_b_png=prev_b.value,
     )
     blob = build_result_zip(bundle)
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
         names = z.namelist()
     assert names == list(ZIP_NAMES)
-    assert len(names) == 6
+    assert len(names) == 8
 
 
 def test_glb_embeds_skin_png() -> None:
@@ -419,6 +435,8 @@ def test_pbr_intentional_double_pbr_eq_uv(monkeypatch, tmp_path) -> None:  # typ
         mesh_b_glb=ma.value.as_bytes(),
         pbr_a=uv_png,
         pbr_b=uv_to_png(_albedo(0xB2)),
+        preview_a_png=_preview_bytes(fit_a, alb_a),
+        preview_b_png=_preview_bytes(fit_a, _albedo(0xB2)),
     )
     blob = build_result_zip(bundle)
     with zipfile.ZipFile(io.BytesIO(blob)) as z:

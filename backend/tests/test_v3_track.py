@@ -2,7 +2,7 @@
 
 Seams bajo test (acordados):
 - Seam forensic-freeze: `backend.domain` + `backend.gnm_assemble` + `edge/contract.ts`
-  (zip-6, 5023, TTL 60 intactos; prohibido mezclar con v3).
+  (zip-8, 5023, TTL 60 intactos; prohibido mezclar con v3).
 - Seam v3-dense: `backend.v3_dense.compute_shape_numpy` + `add_eyeballs`
   (mean + idBase@id + exBase@exp -> 20481v/40832f, solo numpy/pure-python,
   finita determinista x2).
@@ -17,7 +17,7 @@ import numpy as np
 
 
 def test_v3_forensic_track_frozen() -> None:
-    """La via forense no se mueve: zip-6, 5023, TTL 60, CONTRACT_VERSION 2."""
+    """La via forense no se mueve salvo ADR-012: zip-8, 5023, TTL 60, CONTRACT_VERSION 3."""
     from backend import gnm_assemble
     from backend.domain import (
         TOTAL_TIMEOUT_SECS,
@@ -35,8 +35,10 @@ def test_v3_forensic_track_frozen() -> None:
         "mesh_b.glb",
         "pbr_a.png",
         "pbr_b.png",
+        "render_a.png",
+        "render_b.png",
     )
-    assert len(ZIP_NAMES) == 6
+    assert len(ZIP_NAMES) == 8
     assert UV_LEN == 512 * 512 * 3 == 786432
     assert TOTAL_TIMEOUT_SECS == 60
 
@@ -44,7 +46,7 @@ def test_v3_forensic_track_frozen() -> None:
 def test_v3_contract_parallel_to_forensic() -> None:
     """Track v3 en paralelo: version 3, malla densa, atlas 1024, bundle nuevo.
 
-    Prohibido mezclar con zip-6: los nombres v3 no comparten literales.
+    Prohibido mezclar con zip-8: los nombres v3 no comparten literales.
     """
     from backend.v3_contract import (
         V3_CONTRACT_VERSION,
@@ -63,7 +65,7 @@ def test_v3_contract_parallel_to_forensic() -> None:
     assert V3_UV_LEN == 1024 * 1024 * 3
     # Bundle v3 nuevo (malla densa + albedo 1024 + neutral + 3 relights
     # con esferas como la figura): 6 piezas, ningun literal coincide
-    # con el zip-6 forense.
+    # con el zip-8 forense.
     assert len(V3_ZIP_NAMES) == 6
     assert len(set(V3_ZIP_NAMES)) == 6
     forensic = {
@@ -73,6 +75,8 @@ def test_v3_contract_parallel_to_forensic() -> None:
         "mesh_b.glb",
         "pbr_a.png",
         "pbr_b.png",
+        "render_a.png",
+        "render_b.png",
     }
     assert not (set(V3_ZIP_NAMES) & forensic)
     # Retencion de dias, no TTL 60: el worker v3 no vive en 60s.
@@ -236,8 +240,8 @@ def test_v3_light_albedo_stable_under_two_lights() -> None:
     assert SHADING_CLAMP == (0.5, 2.0)
 
 
-def test_v3_bundle_separate_from_zip6_and_branch_log_keys() -> None:
-    """Bundle v3 nuevo disjunto del zip-6 + claves de ramas efectivas."""
+def test_v3_bundle_separate_from_zip8_and_branch_log_keys() -> None:
+    """Bundle v3 nuevo disjunto del zip-8 + claves de ramas efectivas."""
     from backend.domain import Err as _ErrB
     from backend.v3_bundle import V3Bundle, build_v3_bundle
     from backend.v3_contract import V3_ZIP_NAMES
@@ -250,7 +254,7 @@ def test_v3_bundle_separate_from_zip6_and_branch_log_keys() -> None:
     bundle = result.value
     assert isinstance(bundle, V3Bundle)
     assert tuple(bundle.names()) == tuple(V3_ZIP_NAMES)
-    # Prohibido mezclar con zip-6 a nivel de tipos y de nombres.
+    # Prohibido mezclar con zip-8 a nivel de tipos y de nombres.
     from backend.domain import ZIP_NAMES as _ZIP6
 
     assert not (set(bundle.names()) & set(_ZIP6))

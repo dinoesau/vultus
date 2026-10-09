@@ -120,56 +120,13 @@ def _require_bake_bridge(monkeypatch: pytest.MonkeyPatch) -> dict[str, str] | No
 
 
 def _front_render(verts: np.ndarray, uvs: np.ndarray, tris: list[tuple[int, int, int]], atlas: np.ndarray) -> np.ndarray:
-    """Raster ortografico frontal 256: x->col, y max->row 0, depth max-z."""
-    side = 256
-    img = np.zeros((side, side, 3), dtype=np.float64)
-    depth = np.full((side, side), -np.inf)
-    xs = verts[:, 0]
-    ys = verts[:, 1]
-    zs = verts[:, 2]
-    x0, x1 = float(xs.min()), float(xs.max())
-    y0, y1 = float(ys.min()), float(ys.max())
-    cols = (xs - x0) / max(x1 - x0, 1e-9) * (side - 1)
-    rows = (y1 - ys) / max(y1 - y0, 1e-9) * (side - 1)
-    for a, b, c in tris:
-        px = np.array([cols[a], cols[b], cols[c]])
-        py = np.array([rows[a], rows[b], rows[c]])
-        pz = np.array([zs[a], zs[b], zs[c]])
-        xa, xb = int(max(0, px.min())), int(min(side - 1, px.max()))
-        ya, yb = int(max(0, py.min())), int(min(side - 1, py.max()))
-        if xb < xa or yb < ya:
-            continue
-        denom = (py[1] - py[2]) * (px[0] - px[2]) + (px[2] - px[1]) * (py[0] - py[2])
-        if abs(denom) < 1e-12:
-            continue
-        gx, gy = np.meshgrid(np.arange(xa, xb + 1), np.arange(ya, yb + 1))
-        w0 = ((py[1] - py[2]) * (gx - px[2]) + (px[2] - px[1]) * (gy - py[2])) / denom
-        w1 = ((py[2] - py[0]) * (gx - px[2]) + (px[0] - px[2]) * (gy - py[2])) / denom
-        w2 = 1.0 - w0 - w1
-        inside = (w0 >= 0.0) & (w1 >= 0.0) & (w2 >= 0.0)
-        if not bool(inside.any()):
-            continue
-        z = w0 * pz[0] + w1 * pz[1] + w2 * pz[2]
-        u = (w0 * uvs[a][0] + w1 * uvs[b][0] + w2 * uvs[c][0]) * 511.0
-        v = (w0 * uvs[a][1] + w1 * uvs[b][1] + w2 * uvs[c][1]) * 511.0
-        u = np.clip(u, 0.0, 511.0)
-        v = np.clip(v, 0.0, 511.0)
-        x_lo = np.clip(u.astype(int), 0, 510)
-        y_lo = np.clip(v.astype(int), 0, 510)
-        fx = (u - x_lo)[..., None]
-        fy = (v - y_lo)[..., None]
-        sample = (
-            atlas[y_lo, x_lo] * (1 - fx) * (1 - fy)
-            + atlas[y_lo, x_lo + 1] * fx * (1 - fy)
-            + atlas[y_lo + 1, x_lo] * (1 - fx) * fy
-            + atlas[y_lo + 1, x_lo + 1] * fx * fy
-        )
-        region_depth = depth[ya : yb + 1, xa : xb + 1]
-        update = inside & (z > region_depth)
-        region_depth[update] = z[update]
-        region = img[ya : yb + 1, xa : xb + 1]
-        region[update] = sample[update]
-    return img
+    """Delega al raster productivo (seam unica, sin duplicar)."""
+    from backend.gnm_assemble import smooth_vertex_normals
+    from backend.render_preview import raster_frontal_array
+
+    verts_list = [(float(r[0]), float(r[1]), float(r[2])) for r in verts.tolist()]
+    normals = np.asarray(smooth_vertex_normals(verts_list, tris), dtype=np.float64)
+    return raster_frontal_array(verts, uvs, normals, tris, atlas, 256)
 
 
 def test_glb_render_matches_atlas_orientation(monkeypatch: pytest.MonkeyPatch) -> None:

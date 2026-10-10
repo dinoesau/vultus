@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { DEMO_LOAD_ERROR_MESSAGE } from "../src/components/demo-loader.ts";
 
 // Demo Obama E1-E4. Sin backend para E1-E3 (solo assets
 // estáticos + DOM); E4 usa el gateway vivo igual que compare.spec.ts.
@@ -100,7 +101,7 @@ test("E3 boton muestra loading y el guard ignora clicks concurrentes", async ({ 
   expect(demoHits.length).toBe(2);
 });
 
-test("E5 fallo 404 en B restaura boton sin parciales ni mensaje", async ({ page }) => {
+test("E5 fallo 404 en B muestra mensaje sin parciales y conserva stage", async ({ page }) => {
   await page.goto(FRONT);
   const bHits: string[] = [];
   await page.route("**/demo/obama-b.jpg", async (route) => {
@@ -115,8 +116,10 @@ test("E5 fallo 404 en B restaura boton sin parciales ni mensaje", async ({ page 
   await expect(btn).toBeEnabled({ timeout: 10_000 });
   await expect(btn).toContainText(/Cargar demo/);
   await expect(btn).not.toHaveAttribute("aria-busy", "true");
+  // Mensaje exigible #123: literal único, canal #result-error con role=alert.
+  await expect(page.locator("#result-error")).toBeVisible();
+  await expect(page.locator("#result-error")).toHaveText(DEMO_LOAD_ERROR_MESSAGE);
   // Sin parciales: inputs vacíos, previews ocultos, stage intacto.
-  // El mensaje visible ante el fallo vive fuera de este flujo; aquí no debe haberlo.
   for (const slot of ["a", "b"] as const) {
     const count = await page.evaluate((s) => {
       const input = document.querySelector<HTMLInputElement>(`input[name="image_${s}"]`);
@@ -125,6 +128,36 @@ test("E5 fallo 404 en B restaura boton sin parciales ni mensaje", async ({ page 
     expect(count).toBe(0);
   }
   await expect(page.getByTestId("preview-a")).toBeHidden();
+  await expect(page.getByTestId("preview-b")).toBeHidden();
+  await expect(page.locator("#stage-text")).toHaveText(initialStage ?? "");
+});
+
+test("E6 fallo demo conserva archivos previos del usuario", async ({ page }) => {
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(56, 0),
+  ]);
+  await page.goto(FRONT);
+  await page
+    .locator('input[name="image_a"]')
+    .setInputFiles({ name: "mia.png", mimeType: "image/png", buffer: png });
+  await expect(page.getByTestId("preview-a")).toBeVisible();
+  const initialStage = await page.locator("#stage-text").textContent();
+  await page.route("**/demo/obama-b.jpg", async (route) => {
+    await route.fulfill({ status: 404, body: "no" });
+  });
+  await page.locator(DEMO_BTN).click();
+  const btn = page.locator(DEMO_BTN);
+  await expect(btn).toBeEnabled({ timeout: 10_000 });
+  await expect(page.locator("#result-error")).toHaveText(DEMO_LOAD_ERROR_MESSAGE);
+  // Estado previo intacto: el archivo del usuario sobrevive al fallo demo.
+  const fileName = await page.evaluate(() => {
+    const input = document.querySelector<HTMLInputElement>('input[name="image_a"]');
+    return input?.files?.[0]?.name ?? null;
+  });
+  expect(fileName).toBe("mia.png");
+  await expect(page.getByTestId("preview-a")).toBeVisible();
+  await expect(page.getByTestId("preview-a")).toHaveAttribute("src", /^blob:/);
   await expect(page.getByTestId("preview-b")).toBeHidden();
   await expect(page.locator("#stage-text")).toHaveText(initialStage ?? "");
 });

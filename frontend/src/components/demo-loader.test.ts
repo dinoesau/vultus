@@ -6,7 +6,6 @@ import {
   demoImageToBlob,
   loadDemoBlobs,
   parseDemoBlob,
-  resolveDemoPaths,
   sniffDemoMime,
   type DemoImage,
 } from "./demo-loader.ts";
@@ -31,29 +30,6 @@ async function mustParse(blob: Blob): Promise<DemoImage> {
   if (!parsed.ok) throw new Error("unreachable in test");
   return parsed.value;
 }
-
-describe("demo-loader: rutas demo (seam config)", () => {
-  it("defaults apuntan a /demo/obama-*.jpg", () => {
-    expect(DEMO_PATHS).toEqual({ a: "/demo/obama-a.jpg", b: "/demo/obama-b.jpg" });
-    expect(resolveDemoPaths(undefined)).toEqual(DEMO_PATHS);
-  });
-
-  it("env VITE_DEMO_A/B_overridea, vacio y blancos se ignoran", () => {
-    expect(resolveDemoPaths({ VITE_DEMO_A: "/x/a.jpg" })).toEqual({
-      a: "/x/a.jpg",
-      b: "/demo/obama-b.jpg",
-    });
-    expect(resolveDemoPaths({ VITE_DEMO_A: "", VITE_DEMO_B: 42 })).toEqual(DEMO_PATHS);
-    expect(resolveDemoPaths({ VITE_DEMO_A: " ", VITE_DEMO_B: "\n\t " })).toEqual(
-      DEMO_PATHS,
-    );
-    expect(resolveDemoPaths({ VITE_DEMO_A: "  /x/a.jpg  " })).toEqual({
-      a: "/x/a.jpg",
-      b: "/demo/obama-b.jpg",
-    });
-    expect(() => resolveDemoPaths(null)).not.toThrow();
-  });
-});
 
 describe("demo-loader: sniffDemoMime por contenido, no por type", () => {
   it("JPEG y PNG reales dan su MIME aunque type mienta", async () => {

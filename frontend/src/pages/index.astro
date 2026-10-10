@@ -465,7 +465,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       import {
         blobsToFiles,
         loadDemoBlobs,
-        resolveDemoPaths,
+        DEMO_PATHS,
       } from "../components/demo-loader.ts";
 
       const api = document.body.dataset.apiUrl ?? "http://localhost:8000";
@@ -630,7 +630,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         btn.setAttribute("aria-busy", "true");
         btn.textContent = "Cargando demo...";
         try {
-          const loaded = await loadDemoBlobs(resolveDemoPaths(import.meta.env));
+          const loaded = await loadDemoBlobs(DEMO_PATHS);
           if (!loaded.ok) return loaded;
           const files = await blobsToFiles(loaded.value.a, loaded.value.b);
           if (!files.ok) {

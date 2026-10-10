@@ -12,7 +12,6 @@ export const DEMO_PATHS = {
 } as const;
 
 export type DemoPaths = { readonly a: string; readonly b: string };
-
 export type DemoSlot = "a" | "b";
 
 export type DemoMime = "image/jpeg" | "image/png";
@@ -79,21 +78,6 @@ export async function parseDemoBlob(raw: unknown): Promise<Result<DemoImage, Dem
     return { ok: false, error: { kind: "InvalidDemoBlob", reason: "magic" } };
   }
   return { ok: true, value: mintDemoImageUnchecked(raw) };
-}
-
-/** Config por env con default estático (12-Factor III). Total, nunca lanza. */
-export function resolveDemoPaths(env: unknown): DemoPaths {
-  const get = (key: string): string | undefined => {
-    if (typeof env !== "object" || env === null) return undefined;
-    const value = (env as Record<string, unknown>)[key];
-    if (typeof value !== "string") return undefined;
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
-  };
-  return {
-    a: get("VITE_DEMO_A") ?? DEMO_PATHS.a,
-    b: get("VITE_DEMO_B") ?? DEMO_PATHS.b,
-  };
 }
 
 export type DemoPair = { readonly a: DemoImage; readonly b: DemoImage };

@@ -638,6 +638,31 @@ def _fetch_r2_bytes(bucket: str, key: "R2Key", job_id: str = "unknown") -> "Resu
     return parsed
 
 
+def _delete_r2_inputs(bucket: str, r2_a: "R2Key", r2_b: "R2Key", job_id: str = "unknown") -> int:
+    """Borde R2: borra inputs a|b tras PUT result.zip + report done. Best-effort.
+
+    Claves ya probadas (R2Key via .as_str(), sin revalidar). Nunca lanza:
+    un fallo de borrado se loguea con kind y se continua con la otra key;
+    el job ya esta done (zip recuperable) y tumbarlo seria Shooting the Messenger.
+    Sin bytes en logs: solo job_id, key (jobs/{id}/a|b) y kind.
+    Retorna delete_inputs_ms para el log `job done`.
+    No llamar antes del assemble ni si el PUT fallo (conserva a|b para reintento).
+    """
+    t0 = time.perf_counter()
+    keys = (r2_a.as_str(), r2_b.as_str())
+    try:
+        r2 = _r2_client()
+    except Exception as exc:
+        logger.warning("delete inputs skipped job=%s kind=%s", job_id, type(exc).__name__)
+        return int((time.perf_counter() - t0) * 1000)
+    for key_str in keys:
+        try:
+            r2.delete_object(Bucket=bucket, Key=key_str)
+        except Exception as exc:
+            logger.warning("delete input failed job=%s key=%s kind=%s", job_id, key_str, type(exc).__name__)
+    return int((time.perf_counter() - t0) * 1000)
+
+
 
 
 
@@ -1404,8 +1429,17 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
         Bucket=bucket, Key=f"jobs/{job_id}/result.zip", Body=zip_bytes, ContentType="application/zip"
     )
     _report_progress(job_id, PROGRESS_DONE, "done")
+    # Olvido #133: solo despues de PUT ok + report done. Si el PUT lanza,
+    # esta linea nunca corre y a|b se conservan para reintento.
+    delete_inputs_ms = _delete_r2_inputs(bucket, r2_a, r2_b, job_id)
     dt = int((time.perf_counter() - t0) * 1000)
-    logger.info("job done job=%s zip_len=%d duration_ms=%d", job_id, len(zip_bytes), dt)
+    logger.info(
+        "job done job=%s zip_len=%d duration_ms=%d delete_inputs_ms=%d",
+        job_id,
+        len(zip_bytes),
+        dt,
+        delete_inputs_ms,
+    )
 
 
 def queue_pull_consumer():

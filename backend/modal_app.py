@@ -1429,8 +1429,6 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
         Bucket=bucket, Key=f"jobs/{job_id}/result.zip", Body=zip_bytes, ContentType="application/zip"
     )
     _report_progress(job_id, PROGRESS_DONE, "done")
-    # Olvido #133: solo despues de PUT ok + report done. Si el PUT lanza,
-    # esta linea nunca corre y a|b se conservan para reintento.
     delete_inputs_ms = _delete_r2_inputs(bucket, r2_a, r2_b, job_id)
     dt = int((time.perf_counter() - t0) * 1000)
     logger.info(

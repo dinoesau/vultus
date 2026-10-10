@@ -1,0 +1,44 @@
+name: User Story
+description: Small slice of value that fits in one sprint. Link it to its parent epic.
+title: "[Story] "
+labels: ["story"]
+body:
+  - type: textarea
+    id: story
+    attributes:
+      label: User story
+      description: Role, goal, benefit. One statement.
+      placeholder: "As a user, I want to click 'Load demo', so I can see a working example without uploading files."
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Current behavior, relevant screen, contract or seam if applicable.
+      placeholder: |
+        Button next to "Compare" on index. Images go into slots A and B.
+        Contract: frontend only, no API change.
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable checklist. Use Given/When/Then or plain checks.
+      placeholder: |
+        - [ ] On click, 2 sample images load into slots A and B
+        - [ ] Images are ready for Compare
+        - [ ] Existing images are replaced
+        - [ ] Button shows loading state while fetching
+        - [ ] On failure: "Could not load demo. Try again", prior state intact
+    validations:
+      required: true
+  - type: input
+    id: epic
+    attributes:
+      label: Parent epic
+      description: Link the parent epic issue. GitHub Sub-issues does this automatically.
+      placeholder: "#<epic-issue-number>"
+    validations:
+      required: false

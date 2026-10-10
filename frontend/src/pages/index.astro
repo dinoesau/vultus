@@ -546,21 +546,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         if (ph instanceof HTMLElement) ph.hidden = false;
       }
 
-      function clearPreviews(): void {
-        for (const url of previewUrls.values()) URL.revokeObjectURL(url);
-        previewUrls.clear();
-        for (const selector of ['[data-testid="preview-a"]', '[data-testid="preview-b"]']) {
-          const found = document.querySelector(selector);
-          if (!(found instanceof HTMLImageElement)) continue;
-          found.hidden = true;
-          found.removeAttribute("src");
-          const ph = found.closest(".drop")?.querySelector(".ph");
-          if (ph instanceof HTMLElement) ph.hidden = false;
-          const meta = found.closest(".drop")?.querySelector("[data-meta-a], [data-meta-b]");
-          if (meta instanceof HTMLElement) meta.textContent = "JPG · PNG";
-        }
-      }
-
       function bindPreview(inputName: string, previewTestId: string): void {
         const foundInput = document.querySelector(inputName);
         const foundImg = document.querySelector(previewTestId);
@@ -759,12 +744,14 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         return { ok: false, error: parsed.error };
       }
 
-      function clearResult(): void {
+      // Limpia solo salidas del job (zip + UV + 3D + errores). El intake
+      // (preview-a/b) persiste tras Compare por #124: el usuario ve lo
+      // enviado mientras el resultado carga y puede reemplazar sin reload.
+      function clearResultOutputs(): void {
         if (zipUrl) URL.revokeObjectURL(zipUrl);
         for (const u of imgUrls) URL.revokeObjectURL(u);
         zipUrl = null;
         imgUrls = [];
-        clearPreviews();
         window.dispatchEvent(new Event("vultus:clear"));
         if (downloadEl) {
           downloadEl.hidden = true;
@@ -897,7 +884,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           autoRetried = true;
           stopLive();
           settled = false;
-          clearResult();
+          clearResultOutputs();
           setStageText(`job ${jobId}: expiró en frío (TTL 60s). Reintentando en caliente...`);
           void startJob(lastFd);
           return;
@@ -1001,7 +988,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         stopLive();
         settled = false;
         const myGen = ++gen;
-        clearResult();
+        clearResultOutputs();
         setStageText("enviando...");
         setJobLabel("enviando...");
         setProgress(0);

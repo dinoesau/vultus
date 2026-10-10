@@ -18,7 +18,7 @@ graph TD
     A[Astro Pages<br/>upload 2 jpg/png] --> B[Worker POST /v1/compare<br/>prod y dev]
     B --> C{validación + R2 PutObject}
     C -->|400| E[Bad Request sin encolar]
-    C -->|ok| D[enqueue {job_id, r2_keys}<br/>a Queues]
+    C -->|ok| D["enqueue {job_id, r2_keys}<br/>a Queues"]
     D --> F[dev: consumer → webhook runner :8001<br/>prod: HTTP Pull Consumer Modal]
     F --> G[W1 MediaPipe 478 landmarks]
     G --> H[W2 fit DECA 253 + cámara]

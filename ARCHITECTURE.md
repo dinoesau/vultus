@@ -47,7 +47,7 @@ graph TD
 
 ## 1. Principios
 
-- **Stateless por defecto.** Nada persiste más allá de la ventana: DO TTL 60 + purga a 2×TTL, R2 `jobs/` con lifecycle, `/tmp` en tmpfs con `unlink` por job. v3 es la única excepción (retención de días, cola separada).
+- **Stateless por defecto.** Nada persiste más allá de la ventana: DO TTL 60 + purga a 2×TTL, R2 `jobs/` con borrado lógico 60s (DO + Python DEL) + lifecycle red 1 día (`expire-jobs`, mínimo R2, ver `scripts/r2-lifecycle-apply.sh`), `/tmp` en tmpfs con `unlink` por job. v3 es la única excepción (retención lógica de días, cola separada; la red 1 día sobre `jobs/` aplica como piso hasta prefijo propio).
 - **Parse-once en el borde, core sin revalidar.** `backend/domain.py:1-6` + `edge/contract.ts:254-308`. Todo lo que cruza un seam llega ya probado (`ImageBytes`, `JobId`, `Landmarks`, `GnmCoeffs`, `CameraParams`, `RenderedImage`, `TtlSecs`, `Stage`, `ContractVersion`). El core nunca lanza por input esperado: retorna `Result`.
 - **Deep modules, interfaces estrechas.** Cada worker una sola responsabilidad. `workers/*` no conocen HTTP ni frontend. El sink `report/complete/fail` es el único acoplamiento pipeline→progreso.
 - **Un solo dueño por seam.** TS es dueño del ciclo HTTP; Python es dueño del runner local, el orquestador y el assemble CPU. Sin duplicar `TtlSecs` ni ciclo de vida en Python.
@@ -138,7 +138,7 @@ Puente de pesos (8 archivos + legados): `mediapipe/face_landmarker.task`, `deca/
 
 ### 3.6 track v3 — paralelo, sin tocar forense
 
-`backend/v3_contract.py` + `v3_dense.py` + `v3_texture.py` + `v3_pose.py` + `v3_light.py` + `v3_bundle.py` + `v3_worker.py` y `edge/contract.ts:V3_*`. Denso `20481v/40832f`, atlas 1024 (`V3_UV_LEN = 3145728`), `TV ≤ 2.0`, bundle de 6 (`mesh_dense.glb`, `albedo_1024.png`, `relight_{neutral,key,fill,rim}.png`), retención 7 días, timeouts 600/900, gate FFHQ 1024 + yaw 15°. Ver ADR-011.
+`backend/v3_contract.py` + `v3_dense.py` + `v3_texture.py` + `v3_pose.py` + `v3_light.py` + `v3_bundle.py` + `v3_worker.py` y `edge/contract.ts:V3_*`. Denso `20481v/40832f`, atlas 1024 (`V3_UV_LEN = 3145728`), `TV ≤ 2.0`, bundle de 6 (`mesh_dense.glb`, `albedo_1024.png`, `relight_{neutral,key,fill,rim}.png`), retención lógica 7 días (`V3_RETENTION_DAYS`, cola separada `v3-queue`, timeouts 600/900), gate FFHQ 1024 + yaw 15°. Excepción aparte: `figure-v3.zip` vive hoy bajo `jobs/` (`worker.ts:373`), así que la red `expire-jobs` 1 día aplica como piso mínimo; los 7 días exigen prefijo propio futuro con regla aparte. Ver ADR-011.
 
 ## 4. Dependencias (siempre hacia adentro)
 
@@ -167,7 +167,7 @@ Fit directo con `Compare = distancia de coefs + albedo; el heatmap sobrevive`. E
 
 ### ADR-003 Stateless sin Postgres ni S3
 
-Sin cache ni re-descarga desde servidor; se gana privacidad y simplicidad. Local: DO TTL 60 + purga 2×TTL + tmpfs. Prod: R2 lifecycle + Queues retención 24 h pero TTL lógico 60 vía alarm.
+Sin cache ni re-descarga desde servidor; se gana privacidad y simplicidad. Local: DO TTL 60 + purga 2×TTL + tmpfs. Prod: borrado lógico 60s (DO + Python DEL) + lifecycle red 1 día (`expire-jobs` sobre `jobs/`, mínimo R2) + Queues retención 24 h pero TTL lógico 60 vía alarm.
 
 ### ADR-004 Cloudflare + Modal
 

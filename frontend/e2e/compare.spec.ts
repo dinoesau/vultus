@@ -39,6 +39,51 @@ test("compare upload 2 PNG returns queued job", async ({ page }) => {
   });
 });
 
+test("intake images stay visible after Compare and are replaceable (#124)", async ({
+  page,
+}) => {
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(56, 0),
+  ]);
+  await page.goto(FRONT);
+  await page
+    .locator('input[name="image_a"]')
+    .setInputFiles({ name: "a.png", mimeType: "image/png", buffer: png });
+  await page
+    .locator('input[name="image_b"]')
+    .setInputFiles({ name: "b.png", mimeType: "image/png", buffer: png });
+  const previewA = page.getByTestId("preview-a");
+  const previewB = page.getByTestId("preview-b");
+  await expect(previewA).toBeVisible();
+  await expect(previewB).toBeVisible();
+  await page.getByRole("button", { name: /Comparar/ }).click();
+  // El job avanza queued->processing->done en ms con sidecar local; aceptar
+  // cualquier estado con job_id evita flake sin perder el intent tracer.
+  await expect(page.locator("#stage-text")).toContainText(
+    /job .*(queued|processing|done|cola|procesando|listo)|enviando/,
+    { timeout: 15_000 },
+  );
+  // AC1+AC2: intake persiste, no vuelve a empty state.
+  await expect(previewA).toBeVisible();
+  await expect(previewB).toBeVisible();
+  await expect(previewA).toHaveAttribute("src", /^blob:/);
+  await expect(previewB).toHaveAttribute("src", /^blob:/);
+  const srcBAfterCompare = await previewB.getAttribute("src");
+  // AC3: reemplazar A sin reload deja B intacto.
+  const png2 = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(56, 1),
+  ]);
+  await page
+    .locator('input[name="image_a"]')
+    .setInputFiles({ name: "a2.png", mimeType: "image/png", buffer: png2 });
+  await expect(previewA).toBeVisible();
+  await expect(previewA).toHaveAttribute("src", /^blob:/);
+  await expect(previewB).toBeVisible();
+  expect(await previewB.getAttribute("src")).toBe(srcBAfterCompare);
+});
+
 test("golden pair reaches done, 2 UV panels plus 2 viewers, zero heatmap, download starts", async ({
   page,
 }) => {

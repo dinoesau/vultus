@@ -328,6 +328,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
                 <button class="btn btn-primary" type="submit">Comparar →</button>
                 <button class="btn btn-secondary" type="button" id="btn-demo">Cargar demo</button>
               </div>
+              <p class="micro" id="demo-credit">Fotos demo: Pete Souza · A dominio público · B CC-BY 3.0</p>
             </form>
           </div>
         </div>
@@ -441,7 +442,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         </div>
         <div><h5>Producto</h5><a href="#metodo">Metodología</a><a href="#uv">Espacio UV</a><a href="#estudio">Visor 3D</a></div>
         <div><h5>Recursos</h5><a href="#metodo">Pipeline</a><a href="#estudio">Arquitectura</a></div>
-        <div><h5>Legal</h5><a href="#entrega">Disclaimer no-ID</a><a href="#entrega">Privacidad stateless</a></div>
+        <div><h5>Legal</h5><a href="#entrega">Disclaimer no-ID</a><a href="#entrega">Privacidad stateless</a><a href="#demo-credit">Fotos demo</a></div>
       </div>
       <div class="copy"><span>© 2026 Vultus · cream #faf9f5 · coral #cc785c</span><span>contract v3 · TTL 60s</span></div>
     </footer>
@@ -461,6 +462,13 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         tryExtractViewerBlobs,
       } from "../components/compare-client.ts";
       import type { HealthVersionError, Result } from "../components/compare-client.ts";
+      import {
+        blobsToFiles,
+        loadDemoBlobs,
+        DEMO_PATHS,
+        demoLoadErrorMessage,
+      } from "../components/demo-loader.ts";
+      import type { DemoDomError, DemoPresentableError } from "../components/demo-loader.ts";
 
       const api = document.body.dataset.apiUrl ?? "http://localhost:8000";
       const foundForm = document.getElementById("compare");
@@ -538,21 +546,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         if (ph instanceof HTMLElement) ph.hidden = false;
       }
 
-      function clearPreviews(): void {
-        for (const url of previewUrls.values()) URL.revokeObjectURL(url);
-        previewUrls.clear();
-        for (const selector of ['[data-testid="preview-a"]', '[data-testid="preview-b"]']) {
-          const found = document.querySelector(selector);
-          if (!(found instanceof HTMLImageElement)) continue;
-          found.hidden = true;
-          found.removeAttribute("src");
-          const ph = found.closest(".drop")?.querySelector(".ph");
-          if (ph instanceof HTMLElement) ph.hidden = false;
-          const meta = found.closest(".drop")?.querySelector("[data-meta-a], [data-meta-b]");
-          if (meta instanceof HTMLElement) meta.textContent = "JPG · PNG";
-        }
-      }
-
       function bindPreview(inputName: string, previewTestId: string): void {
         const foundInput = document.querySelector(inputName);
         const foundImg = document.querySelector(previewTestId);
@@ -585,41 +578,103 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       bindPreview('input[name="image_b"]', '[data-testid="preview-b"]');
 
       const demoBtn = document.getElementById("btn-demo");
-      if (demoBtn instanceof HTMLButtonElement) {
-        demoBtn.addEventListener("click", () => {
-          for (const [sel, c1, c2] of [
-            ['[data-testid="preview-a"]', "#cc785c", "#a9583e"],
-            ['[data-testid="preview-b"]', "#5db8a6", "#252320"],
-          ] as const) {
-            const found = document.querySelector(sel);
-            if (!(found instanceof HTMLImageElement)) continue;
-            found.src = makeDemoFace(c1, c2);
-            found.hidden = false;
-            const ph = found.closest(".drop")?.querySelector(".ph");
-            if (ph instanceof HTMLElement) ph.hidden = true;
-          }
-          setStageText("demo visual cargada — elige 2 archivos reales y pulsa Comparar.");
-        });
+      let demoLoading = false;
+
+      type LoadDemoError = DemoPresentableError;
+
+      // Limpia solo el canal de error demo sin tocar previews ni stage:
+      // el fallo demo no debe romper el estado previo de comparación (#123).
+      function clearDemoError(): void {
+        if (foundError instanceof HTMLElement) {
+          foundError.hidden = true;
+          foundError.textContent = "";
+        }
       }
 
-      function makeDemoFace(c1: string, c2: string): string {
-        const c = document.createElement("canvas");
-        c.width = 512;
-        c.height = 512;
-        const x = c.getContext("2d");
-        if (!x) return "";
-        const g = x.createLinearGradient(0, 0, 512, 512);
-        g.addColorStop(0, c1);
-        g.addColorStop(1, c2);
-        x.fillStyle = g;
-        x.fillRect(0, 0, 512, 512);
-        x.fillStyle = "rgba(250,249,245,.16)";
-        for (let i = 0; i < 24; i++) {
-          x.beginPath();
-          x.arc((i * 97) % 512, (i * 57) % 512, 30 + ((i * 13) % 50), 0, 7);
-          x.fill();
+      // Pone un File real en el input file para que el FormData de Comparar
+      // lo incluya. Sin esto la validación `required` bloquea el submit.
+      // Total: el DataTransfer va en try porque el throw escapa al `void`
+      // del listener; la rama Err se cubre en node, el Ok en e2e E1/E2.
+      function setInputFiles(inputEl: unknown, file: File): Result<void, DemoDomError> {
+        const err = { ok: false as const, error: { kind: "DemoDomError" } as const };
+        if (!(inputEl instanceof HTMLInputElement)) return err;
+        try {
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          inputEl.files = dt.files;
+        } catch {
+          return err;
         }
-        return c.toDataURL();
+        return { ok: true, value: undefined };
+      }
+
+      // Carga demo E1-E4: fetch del par -> Files -> inputs + previews.
+      // Reemplaza lo previo (E2) via updatePreview (revoca URLs viejas).
+      // Orden atómico: TODOS los nodos se verifican antes de mutar nada, así
+      // un fallo no deja mitad demo / mitad usuario (P0-2).
+      // Ante Err se pinta "Could not load demo. Try again" en #result-error
+      // sin tocar stage-text ni previews previos (#123 C3). Nunca lanza:
+      // cada paso es total, por eso el `void` del listener es seguro.
+      // Sin AbortController: el guard hace imposible la invocación
+      // concurrente, el abort era código muerto con rama que trababa el botón.
+      async function loadDemo(btn: HTMLButtonElement): Promise<Result<void, LoadDemoError>> {
+        if (demoLoading) return { ok: true, value: undefined };
+        demoLoading = true;
+        const prevLabel = btn.textContent;
+        btn.disabled = true;
+        btn.setAttribute("aria-busy", "true");
+        btn.textContent = "Cargando demo...";
+        clearDemoError();
+        const fail = (
+          error: LoadDemoError,
+        ): { ok: false; error: LoadDemoError } => {
+          if (errorEl) {
+            errorEl.hidden = false;
+            errorEl.textContent = demoLoadErrorMessage(error);
+          }
+          return { ok: false, error };
+        };
+        try {
+          const loaded = await loadDemoBlobs(DEMO_PATHS);
+          if (!loaded.ok) return fail(loaded.error);
+          const files = await blobsToFiles(loaded.value.a, loaded.value.b);
+          if (!files.ok) return fail(files.error);
+          const foundA = document.querySelector('input[name="image_a"]');
+          const foundB = document.querySelector('input[name="image_b"]');
+          const foundImgA = document.querySelector('[data-testid="preview-a"]');
+          const foundImgB = document.querySelector('[data-testid="preview-b"]');
+          if (
+            !(foundA instanceof HTMLInputElement) ||
+            !(foundB instanceof HTMLInputElement) ||
+            !(foundImgA instanceof HTMLImageElement) ||
+            !(foundImgB instanceof HTMLImageElement)
+          ) {
+            return fail({ kind: "DemoDomError" });
+          }
+          const putA = setInputFiles(foundA, files.value.fileA);
+          if (!putA.ok) return fail(putA.error);
+          const putB = setInputFiles(foundB, files.value.fileB);
+          if (!putB.ok) return fail(putB.error);
+          const prevA = updatePreview(foundA, foundImgA);
+          if (!prevA.ok) return fail({ kind: "DemoDomError" });
+          const prevB = updatePreview(foundB, foundImgB);
+          if (!prevB.ok) return fail({ kind: "DemoDomError" });
+          clearDemoError();
+          setStageText(
+            "demo Obama A/B cargada — lista para Comparar. Fotos: Pete Souza (A dominio público · B CC-BY 3.0).",
+          );
+          return { ok: true, value: undefined };
+        } finally {
+          btn.disabled = false;
+          btn.removeAttribute("aria-busy");
+          btn.textContent = prevLabel;
+          demoLoading = false;
+        }
+      }
+
+      if (demoBtn instanceof HTMLButtonElement) {
+        const btnRef = demoBtn;
+        btnRef.addEventListener("click", () => void loadDemo(btnRef));
       }
 
       // Blob URL del zip en memoria: permite re-descarga local sin volver
@@ -689,12 +744,14 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         return { ok: false, error: parsed.error };
       }
 
-      function clearResult(): void {
+      // Limpia solo salidas del job (zip + UV + 3D + errores). El intake
+      // (preview-a/b) persiste tras Compare por #124: el usuario ve lo
+      // enviado mientras el resultado carga y puede reemplazar sin reload.
+      function clearResultOutputs(): void {
         if (zipUrl) URL.revokeObjectURL(zipUrl);
         for (const u of imgUrls) URL.revokeObjectURL(u);
         zipUrl = null;
         imgUrls = [];
-        clearPreviews();
         window.dispatchEvent(new Event("vultus:clear"));
         if (downloadEl) {
           downloadEl.hidden = true;
@@ -827,7 +884,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           autoRetried = true;
           stopLive();
           settled = false;
-          clearResult();
+          clearResultOutputs();
           setStageText(`job ${jobId}: expiró en frío (TTL 60s). Reintentando en caliente...`);
           void startJob(lastFd);
           return;
@@ -931,7 +988,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         stopLive();
         settled = false;
         const myGen = ++gen;
-        clearResult();
+        clearResultOutputs();
         setStageText("enviando...");
         setJobLabel("enviando...");
         setProgress(0);

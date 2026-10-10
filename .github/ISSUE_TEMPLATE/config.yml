@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/dinoesau/vultus/blob/main/README.md
+    about: Start with README, ARCHITECTURE.md, and CONTEXT.md

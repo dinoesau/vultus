@@ -488,7 +488,7 @@ describe("gateway http en worker runtime", () => {
   });
 });
 
-describe("sweeper cron #134 borra result.zip en expired o purga", () => {
+describe("sweeper cron borra result.zip en expired o purga", () => {
   const ZIP = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
 
   function fakeBucket(initialKeys: string[]) {

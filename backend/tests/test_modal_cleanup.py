@@ -1,4 +1,4 @@
-"""#133: borrar inputs a|b tras PUT result.zip en Modal, exito o fallo.
+"""Borrar inputs a|b tras PUT result.zip en Modal, exito o fallo.
 
 Seams bajo prueba (acordados en plan):
 - (a) `_run_job_from_r2` orquestador (pipeline + olvido garantizado).

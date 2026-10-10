@@ -8,7 +8,7 @@ compatibility_date = "2026-09-03"
 # workers.dev como fallback hasta hardening (Fase 4 apaga con `false`).
 workers_dev = true
 
-# Olvido total en R2 (#134): cron 1/min borra jobs/{id}/result.zip cuando el
+# Olvido total en R2: cron 1/min borra jobs/{id}/result.zip cuando el
 # DO dice expired o ya purgo. Sin sleep en Modal. v3 figure-v3.zip excluido.
 [triggers]
 crons = ["* * * * *"]

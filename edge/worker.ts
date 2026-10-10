@@ -457,7 +457,7 @@ function parseSweepKey(key: string): Result<JobId, WorkerDomainError> {
 }
 
 /**
- * Borrador del cron 1/min (#134, decision A+B).
+ * Borrador del cron 1/min. Borra en expired o purga; ventana desde env.
  * Lista `jobs/` filtrando `result.zip`, pregunta al DO y borra si `expired`
  * o si el DO ya purgo (404). `done/queued/processing/failed` se conservan:
  * el fallo ya lo limpia Modal y el exito vive hasta su ventana. Nunca borra

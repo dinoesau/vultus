@@ -60,7 +60,7 @@ V3_ZIP_NAMES = (
 # 1 dia (`expire-jobs` sobre `jobs/`); v3 no vive en 60s por diseno.
 # Excepcion documentada aparte: figure-v3.zip vive hoy bajo `jobs/`, asi que
 # la red 1 dia aplica como piso minimo hasta que v3 migre a prefijo propio
-# con regla aparte (issue #135).
+# con regla aparte.
 V3_RETENTION_DAYS = 7
 V3_FIT_TIMEOUT_SECS = 600
 V3_TEXTURE_TIMEOUT_SECS = 900

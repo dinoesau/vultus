@@ -665,7 +665,7 @@ def _delete_r2_inputs(bucket: str, r2_a: "R2Key", r2_b: "R2Key", job_id: str = "
     """Borra inputs a|b tras PUT result.zip ok. Best-effort, nunca lanza.
 
     Claves ya probadas (R2Key via .as_str(), sin revalidar). El zip se
-    conserva: es el output que sirve GET /result hasta su purga (#134).
+    conserva: es el output que sirve GET /result hasta su purga.
     """
     return _delete_r2_keys(bucket, (r2_a.as_str(), r2_b.as_str()), job_id)
 

@@ -20,11 +20,11 @@ export const RESULT_TTL_SECONDS = 60;
 export const TTL_MIN_SECS = 1;
 export const TTL_MAX_SECS = 3600;
 
-// Olvido total en R2 (#134, epic #132): el DO purga metadata a 2xTTL pero el
+// Olvido total en R2: el DO purga metadata a 2xTTL pero el
 // objeto queda. Un cron 1/min borra `jobs/{id}/result.zip` cuando el DO dice
 // `expired` o ya purgo (404). Nunca en primer GET: la ventana permite
-// reintento 10x1s y re-descarga. Sin `sleep` en Modal. Decisiones: A (borrar
-// en expired) + B (ventana desde env, sin exponer ttl en /status).
+// reintento 10x1s y re-descarga. Sin `sleep` en Modal. Se borra en expired
+// y la ventana sale del env, sin exponer ttl en /status.
 export const RESULT_ZIP_NAME = "result.zip";
 export const RESULT_WINDOW_FACTOR = 2;
 export const SWEEP_CRON = "* * * * *";
@@ -296,7 +296,7 @@ export function ttlToNumber(ttl: TtlSecs): number {
   return ttl;
 }
 
-/** Ventana de olvido: 2xTTL desde env (decision B). El DO la aplica con alarmas; el sweeper solo la reporta. */
+/** Ventana de olvido: 2xTTL desde env. El DO la aplica con alarmas; el sweeper solo la reporta. */
 export function resultWindowSecs(ttl: TtlSecs): number {
   return ttlToNumber(ttl) * RESULT_WINDOW_FACTOR;
 }

@@ -3,7 +3,7 @@
 #
 # Borrado logico 60s vive en ProgressDO/Python (DO TTL 60 + DEL tras entrega).
 # R2 no soporta expiracion < 1 dia: esta regla es solo red de seguridad para
-# que R2 se limpie aunque falle el borrado logico (issue #135, epic #132).
+# que R2 se limpie aunque falle el borrado logico.
 #
 # Regla canonica: id `expire-jobs`, prefijo `jobs/`, `--expire-days 1`
 # (minimo R2). Se aplica en prod (`vultus-jobs`) y preview
@@ -33,7 +33,7 @@ DEFAULT_DAYS="1"
 
 usage() {
   cat <<EOF
-r2-lifecycle-apply.sh v${LIFECYCLE_VERSION} - red R2 1 dia sobre jobs/ (issue #135)
+r2-lifecycle-apply.sh v${LIFECYCLE_VERSION} - red R2 1 dia sobre jobs/
 Env: R2_BUCKET (o R2_BUCKETS="prod preview"), LIFECYCLE_RULE (default expire-jobs),
      LIFECYCLE_PREFIX (default jobs/), EXPIRE_DAYS (default 1), WRANGLER_CMD override tests
   --check    solo lectura: exige regla + prefijo + dias correctos (exit 0/1)

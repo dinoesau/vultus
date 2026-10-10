@@ -299,6 +299,10 @@
     pbrUrl: string | null,
     label: string,
   ): Promise<{ readonly pbrOk: boolean }> {
+    // Yaw inicial frontal: la cara del GLB apunta a -Z y la camara
+    // (0,0.2,3.2) mira al origen desde +Z; PI la frontaliza en el primer
+    // frame. Giro lento conservado (tick 240 frames).
+    const FRONT_YAW: number = Math.PI;
     const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
     const loader = new GLTFLoader();
     const gltf = await loader.loadAsync(glbUrl);
@@ -356,6 +360,7 @@
     const scene = new THREE.Scene();
     applyStudio(THREE, scene);
     const camera = makeCamera(THREE);
+    gltf.scene.rotation.y = FRONT_YAW;
     scene.add(gltf.scene);
     await applyProbes(THREE, scene, renderer);
     renderer.render(scene, camera);

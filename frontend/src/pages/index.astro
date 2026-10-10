@@ -1,7 +1,6 @@
 ---
 import ThreeViewer from "../components/ThreeViewer.astro";
 import UvViewers from "../components/UvViewers.astro";
-import FigureV3 from "../components/FigureV3.astro";
 
 const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 ---
@@ -93,7 +92,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
     </form>
     <UvViewers />
     <ThreeViewer />
-    <FigureV3 />
     <script>
       import {
         API_PATHS,
@@ -107,7 +105,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         parsePollStatus,
         statusMessage,
         toWsUrl,
-        tryExtractV3Blobs,
         tryExtractViewerBlobs,
       } from "../components/compare-client.ts";
       import type { HealthVersionError, Result } from "../components/compare-client.ts";
@@ -279,7 +276,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           errorEl.textContent = "";
         }
         for (const img of document.querySelectorAll<HTMLImageElement>(
-          'img[data-testid="panel-uv-a"], img[data-testid="panel-uv-b"], img[data-testid="panel-pbr-a"], img[data-testid="panel-pbr-b"], img[data-testid="panel-render-a"], img[data-testid="panel-render-b"]',
+          'img[data-testid="panel-uv-a"], img[data-testid="panel-uv-b"]',
         )) {
           img.hidden = true;
           img.removeAttribute("src");
@@ -330,76 +327,14 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           showError(`job ${jobId}: zip sin piezas (falta ${parsed.error.name}).`);
           return;
         }
-        const { uvA, uvB, pbrA, pbrB, meshA, meshB, renderA, renderB } = parsed.value;
+        const { uvA, uvB, pbrA, pbrB, meshA, meshB } = parsed.value;
         setImage('[data-testid="panel-uv-a"]', uvA);
         setImage('[data-testid="panel-uv-b"]', uvB);
-        setImage('[data-testid="panel-pbr-a"]', pbrA);
-        setImage('[data-testid="panel-pbr-b"]', pbrB);
-        setImage('[data-testid="panel-render-a"]', renderA);
-        setImage('[data-testid="panel-render-b"]', renderB);
         window.dispatchEvent(
           new CustomEvent("vultus:meshes", { detail: { meshA, meshB, pbrA, pbrB } }),
         );
         setStageText(`job ${jobId}: listo. Zip guardado en memoria para re-descarga local.`);
         setProgress(100);
-        void fetchFigureV3(jobId, myGen);
-      }
-
-      // Figura v3 best-effort (track paralelo, sin TTL 60): 404/409 solo
-      // anotan "no disponible", nunca error. 200 pinta los 5 paneles.
-      async function fetchFigureV3(jobId: string, myGen: number): Promise<void> {
-        if (myGen !== gen) return;
-        const noteEl = document.getElementById("figure-v3-note");
-        const foundMesh = document.getElementById("download-figure-v3");
-        const meshEl = foundMesh instanceof HTMLAnchorElement ? foundMesh : null;
-        let res: Response;
-        try {
-          res = await fetch(`${api}${API_PATHS.figureV3(jobId)}`);
-        } catch {
-          if (noteEl) noteEl.textContent = "figura v3 no disponible (sin conexión)";
-          return;
-        }
-        if (!res.ok) {
-          if (noteEl) noteEl.textContent = `figura v3 no disponible (HTTP ${res.status})`;
-          return;
-        }
-        let blob: Blob;
-        try {
-          blob = await res.blob();
-        } catch {
-          if (noteEl) noteEl.textContent = "figura v3 no disponible (zip ilegible)";
-          return;
-        }
-        const parsed = await tryExtractV3Blobs(blob);
-        if (myGen !== gen) return;
-        if (!parsed.ok) {
-          if (noteEl) noteEl.textContent = `figura v3 incompleta (falta ${parsed.error.name})`;
-          return;
-        }
-        const { albedo, neutral, key, fill, rim, meshDense } = parsed.value;
-        const paint = (selector: string, b: Blob): void => {
-          const url = URL.createObjectURL(b);
-          imgUrls.push(url);
-          const found = document.querySelector(selector);
-          if (!(found instanceof HTMLImageElement)) return;
-          found.src = url;
-          found.hidden = false;
-          found.closest("figure")?.querySelector(".placeholder")?.setAttribute("hidden", "");
-        };
-        paint('[data-testid="panel-v3-albedo"]', albedo);
-        paint('[data-testid="panel-v3-neutral"]', neutral);
-        paint('[data-testid="panel-v3-key"]', key);
-        paint('[data-testid="panel-v3-fill"]', fill);
-        paint('[data-testid="panel-v3-rim"]', rim);
-        if (meshEl) {
-          const meshUrl = URL.createObjectURL(meshDense);
-          imgUrls.push(meshUrl);
-          meshEl.href = meshUrl;
-          meshEl.download = `figure-v3-${jobId}.zip`;
-          meshEl.textContent = "Descargar malla densa (mesh_dense.glb)";
-          meshEl.hidden = false;
-        }
-        if (noteEl) noteEl.textContent = `figura v3 lista (job ${jobId})`;
       }
 
       // Tolerante a 404/409 durante processing: el zip solo existe tras done y

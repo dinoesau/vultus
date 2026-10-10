@@ -11,7 +11,6 @@ export const API_PATHS = {
   job: (id: string) => `/v1/jobs/${id}`,
   events: (id: string) => `/v1/jobs/${id}/events`,
   result: (id: string) => `/v1/jobs/${id}/result`,
-  figureV3: (id: string) => `/v3/jobs/${id}/figure`,
 } as const;
 
 // Nombres exactos del bundle (contrato con el worker, zip-8 v3 sin heatmap:
@@ -26,17 +25,6 @@ export const RESULT_FILES = {
   pbrB: "pbr_b.png",
   renderA: "render_a.png",
   renderB: "render_b.png",
-} as const;
-
-// Bundle figura v3 (malla densa + albedo 1024 + neutral + 3 relights).
-// Espejo de edge/contract.ts V3_ZIP_MANIFEST; disjunto del zip-6.
-export const V3_RESULT_FILES = {
-  meshDense: "mesh_dense.glb",
-  albedo: "albedo_1024.png",
-  neutral: "relight_neutral.png",
-  key: "relight_key.png",
-  fill: "relight_fill.png",
-  rim: "relight_rim.png",
 } as const;
 
 export type Result<T, E> =
@@ -361,46 +349,6 @@ export async function tryExtractViewerBlobs(
       meshB: meshB.value,
       renderA: renderA.value,
       renderB: renderB.value,
-    },
-  };
-}
-
-// Visor figura v3 (track paralelo): las 6 piezas del bundle denso en una
-// sola carga. Espejo de V3_RESULT_FILES; disjunto del zip-8. Result, no throw.
-export interface V3ViewerBlobs {
-  meshDense: Blob;
-  albedo: Blob;
-  neutral: Blob;
-  key: Blob;
-  fill: Blob;
-  rim: Blob;
-}
-
-export async function tryExtractV3Blobs(
-  zipBlob: Blob,
-): Promise<Result<V3ViewerBlobs, ZipMissing>> {
-  const zip = await JSZip.loadAsync(zipBlob);
-  const meshDense = await tryPickEntry(zip, V3_RESULT_FILES.meshDense);
-  if (!meshDense.ok) return meshDense;
-  const albedo = await tryPickEntry(zip, V3_RESULT_FILES.albedo);
-  if (!albedo.ok) return albedo;
-  const neutral = await tryPickEntry(zip, V3_RESULT_FILES.neutral);
-  if (!neutral.ok) return neutral;
-  const key = await tryPickEntry(zip, V3_RESULT_FILES.key);
-  if (!key.ok) return key;
-  const fill = await tryPickEntry(zip, V3_RESULT_FILES.fill);
-  if (!fill.ok) return fill;
-  const rim = await tryPickEntry(zip, V3_RESULT_FILES.rim);
-  if (!rim.ok) return rim;
-  return {
-    ok: true,
-    value: {
-      meshDense: meshDense.value,
-      albedo: albedo.value,
-      neutral: neutral.value,
-      key: key.value,
-      fill: fill.value,
-      rim: rim.value,
     },
   };
 }

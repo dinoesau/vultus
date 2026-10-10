@@ -1,7 +1,7 @@
-"""Pins reproducibles F2: lock unificado + receta Modal pineada por digest.
+"""Pins reproducibles F2: lock asesorio + receta Modal pineada por digest.
 
-El lock es la fuente reproducible para CI (`pip install --require-hashes`,
-job lock-check); la receta Modal instala primero el build cu126 de la misma
+El lock (torch 2.13.0 + hashes) es asesorio, sin gate en CI; el gate es
+este test estatico en el job fast. La receta Modal instala primero el build
 VERSION y luego requirements.txt (torch-free por diseno). Si cambias torch o
 la base CUDA, regenera el lock y re-pinea el digest o estos tests fallan.
 """

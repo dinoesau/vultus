@@ -41,7 +41,7 @@ python3 -c "import sys; sys.path.insert(0,'.'); import backend.modal_app; import
 backend/
 ├── requirements-api.txt   # deps compute/ML local (httpx/Pillow/numpy + pytest/mypy/ruff)
 ├── requirements.txt       # deps Modal GPU (torch cu126, mediapipe, DECA/FFHQ-UV)
-├── requirements.lock      # pins con hashes (CI lock-check: --require-hashes + torch 2.13.0)
+├── requirements.lock      # pins asesarios con hashes (torch 2.13.0, gate estatico en fast)
 ├── requirements-constraints.txt  # anchor torch==2.13.0 para regen del lock
 ├── Dockerfile.wrangler    # gateway worker local (misma entrada dev que prod)
 ├── Dockerfile.runner      # runner local (webhook + pipeline contra sidecar)
@@ -112,7 +112,7 @@ modal app logs vultus-workers        # logs GPU
 ```
 
 Modal escala `0 -> 100` GPUs, paga por segundo. Ver `ARCHITECTURE.md` ADR-004.
-Receta pineada: imagen base por digest + `requirements.lock` con hashes (`torch==2.13.0`) + `pytorch3d` por SHA desde source; el job `lock-check` de CI verifica frescura.
+Receta pineada: imagen base por digest + `requirements.lock` asesorio con hashes (`torch==2.13.0`, gate estatico en fast) + `pytorch3d` por SHA desde source.
 El deploy real (con build log) corre en el release tag via CD, nunca desde rama dev.
 Aviso: hay un solo environment (`main`) y el consumer corre con schedule cada 5s:
 `modal serve` robaria jobs de la queue prod y `modal deploy` actualiza prod directo. No hay staging Modal.
@@ -215,7 +215,7 @@ Verifica `tmpfs` vacío tras cada par (`job_dir` no existe) y TTL canónico en e
 Si no tienes GPU local, corre `pytest backend/tests -q` (CPU puro con dobles deterministas).
 En CI los workers GPU corren solo en runner con GPU o se skippean.
 En prod usa `Modal` para fit/textura GPU sin hardware local y consume tus `$30/mes free` (~50h T4).
-El lock (`requirements.lock`, torch 2.13.0) se verifica en CI con `pip install --require-hashes`; si el lock driftea, regen con uv 0.12.19 (la misma que CI): `uv pip compile --python-version 3.10 --python-platform x86_64-unknown-linux-gnu --generate-hashes -c backend/requirements-constraints.txt -o backend/requirements.lock backend/requirements.txt`.
+El lock (`requirements.lock`, torch 2.13.0) es asesorio, sin gate en CI; el gate es `test_deploy_pins` en fast. Si el lock driftea, regen manual con uv 0.12.19: `uv pip compile --python-version 3.10 --python-platform x86_64-unknown-linux-gnu --generate-hashes -c backend/requirements-constraints.txt -o backend/requirements.lock backend/requirements.txt`.
 
 ## 9. Lint y formato
 

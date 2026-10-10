@@ -64,7 +64,7 @@ test("E2 demo reemplaza archivos previos del usuario", async ({ page }) => {
   expect(fileName).toBe("demo-obama-a.jpg");
 });
 
-test("E3 boton muestra loading y bloquea doble click", async ({ page }) => {
+test("E3 boton muestra loading y el guard ignora clicks concurrentes", async ({ page }) => {
   await page.goto(FRONT);
   let releaseGate: () => void = () => {};
   const gate = new Promise<void>((resolve) => {
@@ -76,20 +76,57 @@ test("E3 boton muestra loading y bloquea doble click", async ({ page }) => {
     await gate;
     await route.continue();
   });
+  // Dispatch sintético (no click real): atraviesa el `disabled` del botón,
+  // así lo que se prueba es el guard `demoLoading` del código y no la
+  // supresión de clicks que ya hace el navegador. Sin guard pediría 6.
+  const dispatchClick = () =>
+    page.evaluate(() => {
+      document
+        .getElementById("btn-demo")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+  await dispatchClick();
+  await dispatchClick();
+  await dispatchClick();
+  await expect.poll(async () => demoHits.length, { timeout: 10_000 }).toBe(2);
   const btn = page.locator(DEMO_BTN);
-  await btn.click();
-  // Doble click durante la carga: el guard lo ignora (un solo par pedido).
-  await btn.click({ force: true }).catch(() => {});
-  // La compuerta sigue cerrada hasta que afirmamos el estado loading.
-  await expect(btn).toBeDisabled({ timeout: 10_000 });
+  await expect(btn).toBeDisabled();
   await expect(btn).toContainText(/Cargando demo/);
   await expect(btn).toHaveAttribute("aria-busy", "true");
   releaseGate();
   await expect(btn).toBeEnabled({ timeout: 10_000 });
   await expect(btn).toContainText(/Cargar demo/);
   await expect(page.getByTestId("preview-a")).toBeVisible();
-  expect(demoHits.filter((u) => u.endsWith("obama-a.jpg")).length).toBe(1);
-  expect(demoHits.filter((u) => u.endsWith("obama-b.jpg")).length).toBe(1);
+  expect(demoHits.length).toBe(2);
+});
+
+test("E5 fallo 404 en B restaura boton sin parciales ni mensaje", async ({ page }) => {
+  await page.goto(FRONT);
+  const bHits: string[] = [];
+  await page.route("**/demo/obama-b.jpg", async (route) => {
+    bHits.push(route.request().url());
+    await route.fulfill({ status: 404, body: "no" });
+  });
+  const initialStage = await page.locator("#stage-text").textContent();
+  await page.locator(DEMO_BTN).click();
+  // Prueba de que el intento ocurrió (si el click fuera no-op, esto falla).
+  await expect.poll(async () => bHits.length, { timeout: 10_000 }).toBe(1);
+  const btn = page.locator(DEMO_BTN);
+  await expect(btn).toBeEnabled({ timeout: 10_000 });
+  await expect(btn).toContainText(/Cargar demo/);
+  await expect(btn).not.toHaveAttribute("aria-busy", "true");
+  // Sin parciales: inputs vacíos, previews ocultos, stage intacto.
+  // El mensaje visible ante el fallo lo posee #123; aquí no debe haberlo.
+  for (const slot of ["a", "b"] as const) {
+    const count = await page.evaluate((s) => {
+      const input = document.querySelector<HTMLInputElement>(`input[name="image_${s}"]`);
+      return input?.files?.length ?? -1;
+    }, slot);
+    expect(count).toBe(0);
+  }
+  await expect(page.getByTestId("preview-a")).toBeHidden();
+  await expect(page.getByTestId("preview-b")).toBeHidden();
+  await expect(page.locator("#stage-text")).toHaveText(initialStage ?? "");
 });
 
 test("E4 tras demo, Comparar envia 2 JPEG y abre job", async ({ page }) => {

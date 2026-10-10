@@ -592,58 +592,82 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
       const demoBtn = document.getElementById("btn-demo");
       let demoLoading = false;
-      let demoCtrl: AbortController | null = null;
+
+      type LoadDemoError =
+        | { readonly kind: "DemoLoadFailed"; readonly which: string; readonly detail: string }
+        | { readonly kind: "DemoDomError" };
 
       // Pone un File real en el input file para que el FormData de Comparar
       // lo incluya. Sin esto la validación `required` bloquea el submit.
-      function setInputFiles(inputEl: unknown, file: File): boolean {
-        if (!(inputEl instanceof HTMLInputElement)) return false;
-        const dt = new DataTransfer();
-        dt.items.add(file);
-        inputEl.files = dt.files;
-        return true;
+      // Total: el DataTransfer va en try porque el throw escapa al `void`
+      // del listener; la rama Err se cubre en node, el Ok en e2e E1/E2.
+      function setInputFiles(inputEl: unknown, file: File): Result<void, LoadDemoError> {
+        const err = { ok: false as const, error: { kind: "DemoDomError" } as const };
+        if (!(inputEl instanceof HTMLInputElement)) return err;
+        try {
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          inputEl.files = dt.files;
+        } catch {
+          return err;
+        }
+        return { ok: true, value: undefined };
       }
 
       // Carga demo E1-E4: fetch del par -> Files -> inputs + previews.
       // Reemplaza lo previo (E2) via updatePreview (revoca URLs viejas).
-      // Ante Err no se toca el estado previo; el mensaje visible lo posee #123.
-      async function loadDemo(btn: HTMLButtonElement): Promise<void> {
-        if (demoLoading) return;
+      // Orden atómico: TODOS los nodos se verifican antes de mutar nada, así
+      // un fallo no deja mitad demo / mitad usuario (P0-2). Cada Err se
+      // retorna (no se descarta): el mensaje visible lo posee #123.
+      // Nunca lanza: cada paso es total, por eso el `void` del listener es
+      // seguro. Sin AbortController: el guard hace imposible la invocación
+      // concurrente, el abort era código muerto con rama que trababa el botón.
+      async function loadDemo(btn: HTMLButtonElement): Promise<Result<void, LoadDemoError>> {
+        if (demoLoading) return { ok: true, value: undefined };
         demoLoading = true;
-        demoCtrl?.abort();
-        const ctrl = new AbortController();
-        demoCtrl = ctrl;
         const prevLabel = btn.textContent;
         btn.disabled = true;
         btn.setAttribute("aria-busy", "true");
         btn.textContent = "Cargando demo...";
         try {
-          const loaded = await loadDemoBlobs(resolveDemoPaths(import.meta.env), {
-            signal: ctrl.signal,
-          });
-          if (ctrl.signal.aborted) return;
-          if (!loaded.ok) return;
-          const { fileA, fileB } = blobsToFiles(loaded.value.a, loaded.value.b);
+          const loaded = await loadDemoBlobs(resolveDemoPaths(import.meta.env));
+          if (!loaded.ok) return loaded;
+          const files = await blobsToFiles(loaded.value.a, loaded.value.b);
+          if (!files.ok) {
+            return {
+              ok: false,
+              error: { kind: "DemoLoadFailed", which: "files", detail: "blob-invalid" },
+            };
+          }
           const foundA = document.querySelector('input[name="image_a"]');
           const foundB = document.querySelector('input[name="image_b"]');
           const foundImgA = document.querySelector('[data-testid="preview-a"]');
           const foundImgB = document.querySelector('[data-testid="preview-b"]');
-          if (!setInputFiles(foundA, fileA) || !setInputFiles(foundB, fileB)) return;
-          updatePreview(foundA, foundImgA);
-          updatePreview(foundB, foundImgB);
+          if (
+            !(foundA instanceof HTMLInputElement) ||
+            !(foundB instanceof HTMLInputElement) ||
+            !(foundImgA instanceof HTMLImageElement) ||
+            !(foundImgB instanceof HTMLImageElement)
+          ) {
+            return { ok: false, error: { kind: "DemoDomError" } };
+          }
+          const putA = setInputFiles(foundA, files.value.fileA);
+          if (!putA.ok) return putA;
+          const putB = setInputFiles(foundB, files.value.fileB);
+          if (!putB.ok) return putB;
+          const prevA = updatePreview(foundA, foundImgA);
+          if (!prevA.ok) return { ok: false, error: { kind: "DemoDomError" } };
+          const prevB = updatePreview(foundB, foundImgB);
+          if (!prevB.ok) return { ok: false, error: { kind: "DemoDomError" } };
           setStageText(
             "demo Obama A/B cargada — lista para Comparar. Fotos: Pete Souza (A dominio público · B CC-BY 3.0).",
           );
+          return { ok: true, value: undefined };
         } finally {
-          if (!ctrl.signal.aborted) {
-            btn.disabled = false;
-            btn.removeAttribute("aria-busy");
-            btn.textContent = prevLabel;
-          }
-          if (demoCtrl === ctrl) {
-            demoCtrl = null;
-            demoLoading = false;
-          }
+          btn.disabled = false;
+          btn.removeAttribute("aria-busy");
+          btn.textContent = prevLabel;
+          demoLoading = false;
         }
       }
 

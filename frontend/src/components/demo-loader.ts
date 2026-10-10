@@ -13,26 +13,22 @@ export const DEMO_PATHS = {
 
 export type DemoPaths = { readonly a: string; readonly b: string };
 
-// Nombres fijos para el FormData: el meta del slot muestra de dónde vino
-// cada archivo y el gateway recibe filename con sentido.
-export const DEMO_FILE_NAMES = {
-  a: "demo-obama-a.jpg",
-  b: "demo-obama-b.jpg",
-} as const;
+export type DemoSlot = "a" | "b";
 
-// Magics espejo de backend/domain.py JPEG_MAGIC/PNG_MAGIC: el gateway
-// revalida de todos modos; aquí solo se filtra basura temprano.
+export type DemoMime = "image/jpeg" | "image/png";
+
+// Magics espejo de backend/domain.py JPEG_MAGIC/PNG_MAGIC. El MIME se
+// olfatea por contenido, nunca por `Blob.type` (viene del Content-Type del
+// host y miente: `""`, `image/jpg`, `application/octet-stream` son reales).
+// El gateway revalida de todos modos; aquí solo se filtra basura temprano.
 const JPEG_MAGIC = [0xff, 0xd8, 0xff] as const;
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] as const;
 
-// Bundle-split: edge y frontend son bundles separados, así que el brand se
-// espeja aquí (single mint via mintDemoImageUnchecked), igual que
-// CONTRACT_VERSION en compare-client.ts.
+// Brand local de un solo mint (ver mintDemoImageUnchecked). El `__brand`
+// impide pasar un Blob crudo donde se exige DemoImage (ver test negativo
+// con @ts-expect-error en demo-loader.test.ts).
 type Brand<T, Name extends string> = T & { readonly __brand: Name };
-declare const DemoImageBrand: unique symbol;
-export type DemoImage = Brand<Blob, "DemoImage"> & {
-  readonly [DemoImageBrand]: "DemoImage";
-};
+export type DemoImage = Brand<Blob, "DemoImage">;
 
 // Single mint site en este módulo: la aserción vive solo aquí,
 // se revisa como sudo. Todo path smart-constructor la usa.
@@ -54,6 +50,22 @@ function hasPrefix(bytes: Uint8Array, magic: readonly number[]): boolean {
   return magic.every((byte, i) => bytes[i] === byte);
 }
 
+/**
+ * Olfatea el MIME por magic, nunca por `Blob.type`. Total, nunca lanza.
+ * `null` = bytes que no son JPEG ni PNG.
+ */
+export async function sniffDemoMime(raw: Blob): Promise<DemoMime | null> {
+  let head: Uint8Array;
+  try {
+    head = new Uint8Array(await raw.slice(0, 8).arrayBuffer());
+  } catch {
+    return null;
+  }
+  if (hasPrefix(head, JPEG_MAGIC)) return "image/jpeg";
+  if (hasPrefix(head, PNG_MAGIC)) return "image/png";
+  return null;
+}
+
 /** Parse-once del blob demo a DemoImage probada. Total, nunca lanza. */
 export async function parseDemoBlob(raw: unknown): Promise<Result<DemoImage, DemoImageError>> {
   if (!(raw instanceof Blob)) {
@@ -62,19 +74,8 @@ export async function parseDemoBlob(raw: unknown): Promise<Result<DemoImage, Dem
   if (raw.size === 0) {
     return { ok: false, error: { kind: "InvalidDemoBlob", reason: "empty" } };
   }
-  const isJpeg = raw.type === "image/jpeg";
-  const isPng = raw.type === "image/png";
-  if (!isJpeg && !isPng) {
-    return { ok: false, error: { kind: "InvalidDemoBlob", reason: "type" } };
-  }
-  let head: Uint8Array;
-  try {
-    head = new Uint8Array(await raw.slice(0, 8).arrayBuffer());
-  } catch {
-    return { ok: false, error: { kind: "InvalidDemoBlob", reason: "magic" } };
-  }
-  const magicOk = isJpeg ? hasPrefix(head, JPEG_MAGIC) : hasPrefix(head, PNG_MAGIC);
-  if (!magicOk) {
+  const mime = await sniffDemoMime(raw);
+  if (mime === null) {
     return { ok: false, error: { kind: "InvalidDemoBlob", reason: "magic" } };
   }
   return { ok: true, value: mintDemoImageUnchecked(raw) };
@@ -85,7 +86,9 @@ export function resolveDemoPaths(env: unknown): DemoPaths {
   const get = (key: string): string | undefined => {
     if (typeof env !== "object" || env === null) return undefined;
     const value = (env as Record<string, unknown>)[key];
-    return typeof value === "string" && value.length > 0 ? value : undefined;
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   };
   return {
     a: get("VITE_DEMO_A") ?? DEMO_PATHS.a,
@@ -97,8 +100,8 @@ export type DemoPair = { readonly a: DemoImage; readonly b: DemoImage };
 
 export type DemoLoadError = {
   readonly kind: "DemoLoadFailed";
-  readonly which: "a" | "b";
-  readonly detail: "network" | "status" | "blob";
+  readonly which: DemoSlot;
+  readonly detail: "network" | "status" | "blob-transport" | "blob-invalid";
   readonly status?: number;
 };
 
@@ -108,7 +111,7 @@ export interface DemoLoadOptions {
 }
 
 async function loadOne(
-  which: "a" | "b",
+  which: DemoSlot,
   url: string,
   options: DemoLoadOptions,
 ): Promise<Result<DemoImage, DemoLoadError>> {
@@ -129,18 +132,19 @@ async function loadOne(
   try {
     blob = await res.blob();
   } catch {
-    return { ok: false, error: { kind: "DemoLoadFailed", which, detail: "blob" } };
+    return { ok: false, error: { kind: "DemoLoadFailed", which, detail: "blob-transport" } };
   }
   const parsed = await parseDemoBlob(blob);
   if (!parsed.ok) {
-    return { ok: false, error: { kind: "DemoLoadFailed", which, detail: "blob" } };
+    return { ok: false, error: { kind: "DemoLoadFailed", which, detail: "blob-invalid" } };
   }
   return parsed;
 }
 
 /**
  * Carga el par demo en paralelo. Railway total: el par llega probado o
- * llega un único Err clasificado por slot. Nunca lanza.
+ * llega un único Err clasificado por slot. Prioridad documentada: ante
+ * doble fallo gana el slot `a` (el primero que se pide). Nunca lanza.
  * El mensaje visible ante Err lo posee #123; aquí solo se clasifica.
  */
 export async function loadDemoBlobs(
@@ -158,12 +162,37 @@ export async function loadDemoBlobs(
 
 export type DemoFiles = { readonly fileA: File; readonly fileB: File };
 
-/** DemoImage probadas a Files listos para DataTransfer + FormData. Total. */
-export function blobsToFiles(a: DemoImage, b: DemoImage): DemoFiles {
+/** Nombre del archivo por slot y MIME real: extensión y bytes coinciden. */
+export function demoFileName(which: DemoSlot, mime: DemoMime): string {
+  const ext = mime === "image/png" ? "png" : "jpg";
+  return `demo-obama-${which}.${ext}`;
+}
+
+/**
+ * DemoImages probadas a Files listos para DataTransfer + FormData. Total:
+ * el MIME se re-olfatea del contenido (el `Blob.type` no es confiable) y el
+ * nombre acompaña al MIME. El `null` es inalcanzable para DemoImage (el
+ * brand solo nace en parseDemoBlob con magic válido) pero se propaga como
+ * Err en vez de fallback muerto o throw.
+ */
+export async function blobsToFiles(
+  a: DemoImage,
+  b: DemoImage,
+): Promise<Result<DemoFiles, DemoImageError>> {
+  const [mimeA, mimeB] = await Promise.all([
+    sniffDemoMime(demoImageToBlob(a)),
+    sniffDemoMime(demoImageToBlob(b)),
+  ]);
+  if (mimeA === null || mimeB === null) {
+    return { ok: false, error: { kind: "InvalidDemoBlob", reason: "magic" } };
+  }
   const blobA = demoImageToBlob(a);
   const blobB = demoImageToBlob(b);
   return {
-    fileA: new File([blobA], DEMO_FILE_NAMES.a, { type: blobA.type || "image/jpeg" }),
-    fileB: new File([blobB], DEMO_FILE_NAMES.b, { type: blobB.type || "image/jpeg" }),
+    ok: true,
+    value: {
+      fileA: new File([blobA], demoFileName("a", mimeA), { type: mimeA }),
+      fileB: new File([blobB], demoFileName("b", mimeB), { type: mimeB }),
+    },
   };
 }

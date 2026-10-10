@@ -1,51 +1,47 @@
-# PIPELINE - Flujo Completo Vultus
+# PIPELINE — Flujo completo
 
-> Estado objetivo sin Rust ni API Python: gateway unico TS en `edge/`
-> (prod `wrangler.toml`, dev `wrangler.dev.toml`), runner local Python en `backend/local_runner.py`
-> (sink HTTP + timeouts landmarks 5s/fit 10s/texture 30s/total 60s=TTL), assemble FLAME CPU en `backend/gnm_assemble.py`.
-> Comandos nuevos: `pytest backend/tests/test_pipeline.py -q`, `bash scripts/smoke-fase0.sh`,
-> gate visual `python3 scripts/e2e-flame-real.py`, `bash scripts/modal-weights-sync.sh --check`.
+> Fuente de verdad: `edge/worker.ts` (rutas) · `edge/progress-do.ts` (ciclo/TTL) · `backend/pipeline_local.py` (orquestador + wire v2) · `backend/local_runner.py` (webhook + sink) · `backend/modal_app.py` (workers GPU) · `backend/gnm_assemble.py + gnm.py` (zip-8).
+> Presupuesto `5 + 10 + 30 ≤ 60 = TTL` · zip-8 v3 sin heatmap · stateless con olvido total.
+
+![ttl](https://img.shields.io/badge/TTL-60s-orange) ![zip](https://img.shields.io/badge/zip--8-v3-blue) ![stages](https://img.shields.io/badge/stages-queued_fit_texture_assemble_done-green)
 
 ## 1. Resumen
 
-Este documento describe el flujo end-to-end desde que el usuario sube 2 caras hasta que descarga el resultado.
-El pipeline es asíncrono, stateless y sin persistencia.
-En prod cada etapa es un worker en `Modal` que consume de `Cloudflare Queues` vía `HTTP Pull Consumer`; en dev el runner local consume la queue emulada vía webhook del consumer dev.
+El usuario sube 2 caras → el gateway valida y encola `{job_id, r2_keys}` → MediaPipe → fit DECA → textura FFHQ-UV → assemble FLAME → zip-8 → descarga → olvido. Async, stateless, sin persistencia. En prod cada etapa GPU corre en Modal vía `HTTP Pull Consumer`; en dev el runner local consume la queue emulada vía webhook.
 
-## 2. Diagrama de pipeline
+## 2. Diagrama end-to-end
 
-> Infra prod: Cloudflare Pages + Workers + Queues + R2 + Durable Objects + Modal. Dev local: mismo worker con R2/Queue/DO emulados (`wrangler.dev.toml`) + runner webhook, sin `Redis`.
+> Prod: Pages + Workers + Queues + R2 + DO + Modal. Dev: mismo worker con R2/Queue/DO emulados (`wrangler.dev.toml`) + runner webhook, sin Redis.
 
 ```mermaid
 graph TD
-    A[Cliente Astro - Cloudflare Pages Upload 2 jpgs] --> B[Worker POST /v1/compare (prod y dev)]
-    B --> C{Validacion + R2 PutObject}
-    C -->|ok| D["Enqueue {job_id, r2_keys} a Queues"]
-    C -->|fail| E[400 Bad Request]
-    D --> F[Runner local via webhook dev / Modal Worker 1 - MediaPipe 478 landmarks]
-    F --> G[Fit DECA feed-forward - 253 coefs + camara]
-    G --> H[Textura FFHQ-UV completion - piel total sin gris]
-    H --> I[Assemble FLAME CPU - piel/ojos + PBR + GLB + zip-6]
-    I --> J[Result bytes TTL 60s (R2 prod / PUT dev local)]
-    J --> K[Worker StreamingResponse zip]
-    K --> L[Cliente descarga - UV_A UV_B mesh PBR + visor estudio]
-    J -. lifecycle 60s .-> M[Olvido total - tmpfs wipe + R2 DEL + Queue 24h]
-    D -. progress .-> N[Durable Objects WS /v1/jobs/id/events]
-    N --> A
+    A[Astro Pages<br/>upload 2 jpg/png] --> B[Worker POST /v1/compare<br/>prod y dev]
+    B --> C{validación + R2 PutObject}
+    C -->|400| E[Bad Request sin encolar]
+    C -->|ok| D[enqueue {job_id, r2_keys}<br/>a Queues]
+    D --> F[dev: consumer → webhook runner :8001<br/>prod: HTTP Pull Consumer Modal]
+    F --> G[W1 MediaPipe 478 landmarks]
+    G --> H[W2 fit DECA 253 + cámara]
+    H --> I[W3 textura FFHQ-UV piel total]
+    I --> J[W4 assemble FLAME 5023 + PBR + zip-8]
+    J --> K[result.zip TTL 60s<br/>R2 prod / PUT /dev/results local]
+    K --> L[Worker StreamingResponse zip]
+    L --> M[cliente: UV_A/B + mesh + PBR + renders<br/>visor estudio + re-descarga local]
+    K -. lifecycle 60s .-> N[olvido: tmpfs wipe + R2 DEL + purga 2xTTL]
+    D -. progress 0.40/0.75/0.95/1.0 .-> O[DO WS /v1/jobs/id/events]
+    O --> A
 ```
 
 ## 3. Secuencia de modelos
 
-Esta sección muestra como se encadenan los 4 stages y que dato produce cada uno.
-
 ```mermaid
 graph LR
-    I["Imagen 512x512"] --> M["MediaPipe<br/>Tasks Vision<br/>CPU 25ms"]
-    M -->|"478 landmarks 3D"| F["Fit DECA<br/>feed-forward + camara<br/>GPU"]
-    F -->|"FitResult"| U["Textura FFHQ-UV<br/>completion piel total<br/>GPU"]
+    I["Imagen"] --> M["MediaPipe<br/>CPU 25ms"]
+    M -->|"478 landmarks"| F["Fit DECA<br/>feed-forward + cámara<br/>GPU deadline 10s"]
+    F -->|"FitResult 1060B"| U["Textura FFHQ-UV<br/>completion piel total<br/>GPU bottleneck c=1"]
     U -->|"RenderedImage 512"| G["Assemble FLAME<br/>piel/ojos + PBR + GLB<br/>CPU 150ms"]
-    G -->|"mesh personalizado + PBR"| H["Zip-6 + viewers<br/>estudio blanco<br/>CPU 200ms"]
-    H --> O["Salida: uv_a, uv_b, mesh_a/b.glb, pbr_a/b.png"]
+    G -->|"zip-8"| H["Viewers<br/>estudio blanco<br/>CPU 200ms"]
+    H --> O["uv_a/b mesh_a/b.glb pbr_a/b render_a/b"]
 
     style M fill:#e3f2fd
     style F fill:#fff3e0
@@ -54,206 +50,153 @@ graph LR
     style H fill:#f3e5f5
 ```
 
-Dependencias por modelo:
-
-- **MediaPipe** es entrada.
-No depende de nadie.
-Salida `landmarks 478` alimenta al fit.
-
-- **Fit DECA** depende de `image + landmarks`.
-Salida `FitResult { 253 coefs + camara 3x4 }` (falla ruidoso sin cara).
-Determinista x2, deadline 10s dentro de TTL 60.
-Sin landmarks no puede estimar pose.
-
-- **Textura FFHQ-UV** depende de `image + fit + landmarks`.
-Salida `RenderedImage` con piel total foto-derivada; cero `SKIN_SENTINEL`, `evidence >= 0.99`.
-Es el cuello de botella (`concurrency_limit=1` en Modal) y corre 2 veces en paralelo, una por cara.
-Vocabulario del bake: evidencia (texeles derivados de la foto) vs sentinel.
-El gate E2E (`scripts/e2e-flame-real.py` CHECK 2/5/7) exige cero sentinel + margen estricto `d(A,A)=0 < d(A,B) < d(A,C)` + SSIM misma>distinta con landmarks reales y fotos congeladas por sha256.
-
-- **Assemble** depende de `fit + albedo` por cara.
-Ensambla malla FLAME 5023 con ojos `[3931:5023)` en material propio, 2 primitivas PBR real sin emisivo.
-Salida `mesh` con geometria de la persona + zip-6.
-
-- **Viewers** dependen del zip-6 ya en mismo espacio canónico.
-`UvViewers` muestra `uv_a/uv_b` + `pbr_a/pbr_b`; `ThreeViewer` pinta ambos GLB en estudio blanco (fondo + 3 luces, conserva materiales embebidos) con estado `cara real lista`.
+| Modelo | Depende de | Produce | Regla |
+|---|---|---|---|
+| MediaPipe | nada (entrada) | `landmarks 478` | stub/largo wrong = `Ml::Decode`; escribe `/tmp/{job}/landmarks.json` |
+| Fit DECA | `image + landmarks` | `FitResult {253 + cámara 3×4}` | determinista ×2; sin cara `FitFailed` ruidoso; gate LFW `d(A,A)=0<d(A,B)<d(A,C)` |
+| Textura | `image + fit + landmarks` | `RenderedImage` piel total + ojos aparte | cero sentinel, `evidence ≥ 0.99`, idéntico ×2; 2 ramas en paralelo, una por cara |
+| Assemble | `fit + albedo` por cara | mesh personalizado + zip-8 | ojos `[3931:5023)` propios, PBR sin emisivo |
+| Viewers | zip-8 canónico | UV A/B + 2 GLB estudio | `UvViewers` + `ThreeViewer`; sin heatmap ni slider |
 
 ```mermaid
 sequenceDiagram
     participant I as Imagen
     participant MP as MediaPipe
     participant FIT as Fit DECA
-    participant TX as Textura FFHQ-UV
-    participant ASM as Assemble FLAME
+    participant TX as Textura
+    participant ASM as Assemble
     participant VW as Viewers
-
-    I->>MP: bytes jpg
+    I->>MP: bytes jpg/png
     MP-->>FIT: landmarks 478
-    I->>FIT: bytes jpg
-    FIT->>FIT: feed-forward 253 coefs + camara
-    FIT-->>TX: FitResult
-    I->>TX: bytes jpg
+    I->>FIT: bytes
+    FIT->>FIT: feed-forward 253 + cámara
+    FIT-->>TX: FitResult 1060B
+    I->>TX: bytes
     TX->>TX: completion piel total
     TX-->>ASM: RenderedImage 512
-    ASM->>ASM: FLAME 5023 + piel/ojos + PBR + zip-6
-    ASM-->>VW: uv + mesh + pbr
+    ASM->>ASM: FLAME 5023 + PBR + zip-8
+    ASM-->>VW: uv + mesh + pbr + renders
     VW->>VW: estudio blanco + 2 GLB
-    VW-->>I: output bundle
+    VW-->>I: bundle descargable
 ```
 
-Paralelización:
+Paralelización: A y B corren en paralelo en `MediaPipe → fit → texture` (un chain por cara, `ThreadPoolExecutor(2)`); `assemble` y viewers hacen join cuando ambas ramas terminan.
 
-- Cara A y cara B se procesan en paralelo en `MediaPipe -> fit -> texture`.
-- Cada cara usa su propio chain.
-- `Assemble` y `Viewers` esperan a que ambas ramas terminen y hacen join.
-
-## 4. Secuencia detallada end-to-end
+## 4. Secuencia detallada
 
 ```mermaid
 sequenceDiagram
-    participant FE as Astro Frontend (Pages)
-    participant CF as Cloudflare Worker API
+    participant FE as Astro Pages
+    participant CF as Worker API
     participant R2 as R2 Bucket
-    participant Q as Cloudflare Queues
-    participant MO as Modal Workers
-    participant W1 as Worker MediaPipe
-    participant W2 as Worker Fit DECA
-    participant W3 as Worker Textura FFHQ-UV
-    participant W4 as Worker FLAME/PBR
-    participant DO as Durable Objects WS
-
-    FE->>CF: POST /v1/compare multipart 2 images
-    CF->>CF: Validar tipo, tamaño, una cara por imagen
-    CF->>R2: PutObject r2_keys (emulado en dev)
-    CF->>Q: enqueue compare_job job_id=uuid r2_keys
-    CF-->>FE: 202 Accepted {job_id, status: queued}
-    FE->>DO: WS /v1/jobs/{id}/events subscribe
-    Q->>MO: HTTP Pull Consumer en prod, webhook al runner en dev
-    MO->>W1: consume job_id + R2 GetObject (blobs por ruta dev en local)
+    participant Q as Queues
+    participant MO as Modal
+    participant W1 as MediaPipe
+    participant W2 as Fit DECA
+    participant W3 as Textura
+    participant W4 as Assemble
+    participant DO as Durable Object WS
+    FE->>CF: POST /v1/compare multipart 2 imgs
+    CF->>CF: valida tipo/tamaño/magic
+    CF->>R2: PutObject jobs/id/a|b (emulado dev)
+    CF->>Q: enqueue {job_id, r2_keys}
+    CF-->>FE: 202 {job_id, queued}
+    FE->>DO: WS /v1/jobs/{id}/events
+    Q->>MO: pull consumer prod / webhook runner dev
+    MO->>W1: job_id + R2 GetObject (dev: /dev/blobs)
     W1->>W2: landmarks + images
-    W2->>DO: progress 0.40 fit done
+    W2->>DO: progress 0.40 fit
     W2->>W3: FitResult
-    W3->>DO: progress 0.75 albedo done
+    W3->>DO: progress 0.75 albedo
     W3->>W4: UV_A UV_B + fits
-    W4->>DO: progress 0.95 assemble done
-    W4->>R2: PutObject result.zip keep 60s (local: PUT /dev/results)
-    R2->>CF: result ready
+    W4->>DO: progress 0.95 assemble
+    W4->>R2: PutObject result.zip 60s (dev: PUT /dev/results)
     CF->>DO: progress 1.0 done
-    DO-->>FE: WS event done
+    DO-->>FE: WS done
     FE->>CF: GET /v1/jobs/{id}/result
-    CF->>R2: fetch result bytes
-    CF-->>FE: 200 StreamingResponse zip
-    R2->>R2: lifecycle 60s DEL (local: purga DO a 2xTTL)
-    W1->>W1: unlink /tmp/job_id/* (Modal tmpfs / runner tmpfs)
+    CF->>R2: fetch bytes
+    CF-->>FE: 200 zip StreamingResponse
+    R2->>R2: lifecycle 60s DEL (dev: purga 2xTTL)
+    W1->>W1: unlink /tmp/job_id/* (tmpfs)
 ```
 
 ## 5. Etapas
 
-### 5.1 Entrada - POST /v1/compare
+### 5.1 Entrada — `POST /v1/compare`
 
-El cliente envía `multipart/form-data` con `image_a` y `image_b`.
-Cada imagen debe ser JPEG o PNG menor a 8MB (errores `SizeOutOfRange | UnsupportedFormat`).
-Faltante o multipart roto es `400 {"detail":...}` sin encolar.
-Si pasa, el worker encola `{job_id, r2_keys}` y retorna `202 {job_id, status:"queued"}`.
-`GET /v1/jobs/{id}` valida uuid con `trim` y retorna `200 {job_id, status}`; uuid roto es `400`, desconocido es `404`. El `GET` lee el `ProgressDO /status` como fuente de verdad.
+`multipart/form-data` con `image_a + image_b` (JPEG/PNG ≤ 8 MiB). Faltante o multipart roto → `400 {"detail"…}` sin encolar. OK → `202 {job_id, status:"queued"}`. `GET /v1/jobs/{id}` valida uuid con `trim` (`400` roto, `404` desconocido) leyendo `ProgressDO /status`.
 
-### 5.2 Queue - Cloudflare Queues + R2 (prod) / emulados (local)
+### 5.2 Queue — Queues + R2 (prod) / emulados (local)
 
-El worker hace `R2 PutObject` con `image_a/b` y serializa solo `compare_job(job_id, r2_keys jobs/{id}/a|b)` (límite 128KB/mensaje, no caben 2x8MB).
-`Cloudflare Queues` cobra `10k ops/día free` (write/read/delete = 3 ops por job -> ~3.333 jobs/día free), retención `24h` en free pero `TTL lógico 60s` (`TtlSecs` default 60) vía `Durable Object alarm` + `R2 lifecycle 60s`.
-En local la misma entrada dev (`wrangler.dev.toml`) emula R2/Queue/DO y el consumer dev reenvia al webhook del runner.
-Modal consume vía `HTTP Pull Consumer`. El progreso va por `Durable Objects WS` con `Stage::{queued, fit, texture, assemble, done}`.
+`R2 PutObject image_a/b` + mensaje `compare_job(job_id, r2_keys jobs/{id}/a|b)` (Queues < 128 KiB: nunca bytes). `10k ops/día free` (3 ops/job → ~3.333 jobs/día), retención 24 h pero **TTL lógico 60** vía alarm + lifecycle. Local: misma entrada dev emula R2/Queue/DO; consumer reenvía al webhook. Progreso por WS con `Stage queued|fit|texture|assemble|done`. Sin Postgres ni MinIO; egress R2 free.
 
-No hay Postgres ni MinIO persistente. En prod el egress de R2 es free.
+### 5.3 W1 — MediaPipe 478
 
-### 5.3 Worker 1 - MediaPipe 478 landmarks
+`MlSidecarClient::landmarks(&JobId, &ImageBytes) → Landmarks` (`POST /ml/landmarks`, `X-Job-Id`, `BaseUrl::join`). CPU 20-30 ms/cara. Stub o largo wrong → `Ml::Decode`.
 
-Input: `&ImageBytes`.
-Output: `Landmarks` (JSON `[[x,y,z],...]` 478 finitos, `LANDMARKS_LEN`).
-Firma `MlSidecarClient::landmarks(&JobId, &ImageBytes) -> Landmarks` (`POST /ml/landmarks` con `X-Job-Id`, `BaseUrl::join`).
-Runtime CPU, 20-30ms por cara.
-Si el sidecar retorna stub `{"todo":...}` o largo wrong, `Landmarks::parse` falla con `Ml::Decode`.
-Escribe landmarks a `/tmp/{job_id}/landmarks.json` en tmpfs.
+### 5.4 W2 — Fit DECA
 
-### 5.4 Worker 2 - Fit DECA
+`MlSidecarClient::fit → FitResult` con `encode_fit_request` v2 (`VERSION 0x02 + u32 BE len + landmarks_json + image`) sobre `POST /ml/fit`. Respuesta `253 f32 LE + 12 f32 LE`. Feed-forward determinista, deadline 10 s. Gate LFW CHECK 5 con landmarks reales.
 
-Input: `&ImageBytes + &Landmarks`.
-Output: `FitResult` (253 coefs + camara 3x4 = 1060 bytes).
-Firma `MlSidecarClient::fit(&JobId, &ImageBytes, &Landmarks) -> FitResult` con `encode_fit_request` v2 (`VERSION u8 + u32 BE len + landmarks_json + image_bytes`) sobre `POST /ml/fit`.
-Fit real es DECA feed-forward determinista (deadline 10s, `Result` total).
-Estima identidad y pose; sin cara falla ruidoso (`FitFailed`).
-Gate LFW exige `d(A,A)=0 < d(A,B misma) < d(A,C distinta)` (`scripts/e2e-flame-real.py` CHECK 5, landmarks reales).
+### 5.5 W3 — Textura FFHQ-UV
 
-### 5.5 Worker 3 - Textura FFHQ-UV
+`MlSidecarClient::texture → RenderedImage` sobre `POST /ml/texture` (wire v2: `VERSION + u32 BE len(fit_request) + fit_request + fit_result`, consumo exacto). Piel total foto-derivada; `BaseUrl` exige `http(s)://`; vacío `Ml::Empty`, no-2xx `Ml::BadStatus`, truncate `Ml::Decode`, versión ajena `VersionMismatch 400`. Etapa más costosa (`concurrency_limit=1`).
 
-Input: `&ImageBytes + &FitResult + &Landmarks`.
-Output: `RenderedImage` (`UV_LEN`) + ojos a textura separada.
-Firma `MlSidecarClient::texture(&JobId, &ImageBytes, &FitResult, &Landmarks) -> RenderedImage` sobre `POST /ml/texture`.
-Completion foto-derivada con piel total; cero `SKIN_SENTINEL`, `evidence >= 0.99`, bytes identicos x2.
-Es la etapa más costosa (`concurrency_limit=1` en Modal).
-`BaseUrl::parse` exige `http(s)://` y recorta `/`; payload vacío es `Ml::Empty`, status no-2xx es `Ml::BadStatus`, truncate es `Ml::Decode`, version ajena es `VersionMismatch` (400).
+### 5.6 W4 — Assemble + zip-8
 
-### 5.6 Worker 4 - Assemble FLAME y zip-6
+Input `fit + RenderedImage` ya probados (`UV_LEN`). Partición piel/ojos (`EYE 3931:5023`, tris a caballo = `Err`), `build_personalized_glb` (2 primitivas `SkinPBR/EyePBR`, padding a 4), `build_result_zip` (8 nombres en orden), distancias antropométricas normalizadas por interpupilar. CPU 300-500 ms. Todo en `/tmp/{job_id}/`.
 
-Input: `fit + RenderedImage` por cara (`UV_LEN` ya probado).
-Pasos: particion piel/ojos (`EYE_VERT_START = 3931` inclusivo, `EYE_VERT_END = 5023` exclusivo, tris a caballo son `Err`), `build_personalized_glb(fit, albedo) -> GnmMesh` (2 primitivas `SkinPBR`/`EyePBR` sin emisivo, padding a 4 por seccion), `build_result_zip` con 6 nombres, cálculo de distancias antropométricas normalizadas por interpupilar en UV canónico.
-Output: `uv_a.png, uv_b.png, mesh_a.glb, mesh_b.glb, pbr_a.png, pbr_b.png` (pbr duplicado documentado de piel hasta mapas reales; ojos viven en el GLB).
-Runtime CPU 300-500ms.
-Todo se escribe a `/tmp/{job_id}/` y se retorna como dict de bytes.
-Tipos `FitResult` / `RenderedImage` / `EyeTexture` cruzan el seam.
+### 5.7 Entrega — `GET /v1/jobs/{id}/result`
 
-### 5.7 Entrega - GET /v1/jobs/{id}/result
-
-El frontend pide el resultado tras recibir `WS done` (Durable Objects en prod y dev).
-El Worker hace `R2 GetObject(job_id/result.zip)` y arma un `StreamingResponse` con `Content-Type: application/zip` y `Content-Disposition: attachment`.
-El zip contiene `uv_a.png, uv_b.png, mesh_a.glb, mesh_b.glb, pbr_a.png, pbr_b.png` en memoria, sin escribir a disco.
-Tras el stream, en prod `R2 lifecycle 60s` borra solo y en local el DO purga a 2xTTL.
-El frontend crea `URL.createObjectURL` para descarga y ofrece re-descarga local desde memoria sin volver al servidor.
+Tras `WS done`, el Worker hace `R2 GetObject(result.zip)` → `StreamingResponse application/zip + Content-Disposition: attachment`, sin escribir a disco. Frontend crea `URL.createObjectURL` (`result-{jobId}.zip`) y ofrece re-descarga local desde memoria. Tras el stream: prod `lifecycle 60 s`, local purga 2×TTL. `404/409` = aún no listo (reintento acotado 10×1 s); `404` tras purga = expirado.
 
 ### 5.8 Limpieza stateless
 
-Cada worker hace `unlink` de `/tmp/{job_id}/*` al terminar, éxito o fallo.
-Local: pipeline con `cleanup_job_dir` + DO TTL 60s con purga a 2xTTL automático. Prod: `R2 lifecycle 60s` + `Queue retención 24h` pero `TTL lógico 60s` vía `Durable Object alarm`.
-Logs no contienen bytes de imagen, solo `job_id` y `duration_ms`.
-Verificación: el pipeline inexorablemente limpia `tmpfs` (tests) y el DO expone `expired` visible antes de purgar. Sin `redis.exists`.
+`unlink /tmp/{job}/*` siempre (éxito o fallo) + `cleanup_job_dir`. Local: DO TTL 60 + purga 2×TTL. Prod: R2 lifecycle + alarm DO. Logs con `job_id + duration_ms`, sin bytes. Verificación: tests exigen `tmpfs` vacío + DO expone `expired` visible antes de purgar.
 
 ## 6. Contratos de datos
 
-Job enqueue: `{job_id, r2_keys jobs/{id}/a|b}` en la queue (patrón `R2 pointer`, límite Queues 128KB).
-Worker return tipado: `Landmarks -> FitResult -> RenderedImage + EyeTexture` (cada `parse` exige forma, `Ml::Decode` si no).
-`FitRequest` v2 es `VERSION u8 + u32 BE len + landmarks_json + image_bytes`; respuesta fit `253 f32 LE + 12 f32 LE`; request texture `VERSION u8 + u32 BE len + fit_request + fit_result`; v1 es `VersionMismatch` 400.
-Progress events WS: `{job_id, progress: Progress 0.0-1.0, stage: Stage queued|fit|texture|assemble|done}` vía `Durable Objects` en prod y dev.
-Error HTTP: `400` validación (imagen, uuid, progreso, multipart), `404` desconocido, `500` infra con `{"detail":...}`.
+| Dato | Forma canónica |
+|---|---|
+| enqueue | `{job_id, r2_keys jobs/{id}/a\|b}` (R2 pointer) |
+| fit wire v2 | `VERSION u8 + u32 BE len + landmarks_json + image` → resp `1060 B` |
+| texture wire v2 | `VERSION + u32 BE len(fit_request) + fit_request + fit_result` → resp `UV_LEN` |
+| WS events | `{job_id, progress 0..1, stage queued\|fit\|texture\|assemble\|done}` |
+| zip-8 | `uv_a/b.png, mesh_a/b.glb, pbr_a/b.png, render_a/b.png` en orden |
+| errores | `400` validación · `404` desconocido · `500` infra, cuerpo `{"detail"…}` |
 
-## 7. Manejo de errores
+v1 en vuelo durante deploy = `VersionMismatch 400` por diseño (flag-day con drain TTL60/visibility180, sin dual-read). `/health` expone `contract_version: 3`; frontend bloquea con `actualiza` ante mismatch.
 
-Imagen inválida: `400 {"detail":...}` inmediato sin encolar (`InvalidImage`).
-Faltante / multipart roto: `400` (`BadRequest`).
-UUID roto: `400` (`InvalidJobId` con `trim`).
-Job desconocido: `404` (`NotFound`).
-Wire v1 o version ajena: `400 VersionMismatch` con mensaje `actualiza` (flag-day con drain TTL60/visibility180, sin dual-read).
-`/health` expone `contract_version`; el frontend lo valida antes de pedir resultado.
-No face / UV wrong / stub: `Ml::Decode` (500 infra, solo desde sidecar, nunca cliente directo).
-Sidecar caído / status no-2xx / vacío: `Ml::{Transport, BadStatus, Empty}` (500 `internal error` al cliente, detalle en logs con `job_id`).
-Invariante rota (`TtlSecs`, `assert_ok`): `Invariant` (500, pagina al dev).
-Timeout: landmarks `5s`, fit `10s`, texture `30s`, `max 60s` total (`TtlSecs` default 60, S10).
-Intactos tras el fit real.
-Cliente cierra pestaña: `Store` expira solo, sin leak.
+## 7. Pesos, bridge y gates
 
-## 8. Observabilidad
+Volumen `vultus-weights` (`SYNC_VERSION=4`, layout `/weights/{flame,deca,ffhq-uv,gnm,mediapipe}`):
 
-Métricas por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms` (local `Store` / `Cloudflare Queues lag + Modal GPU util` prod).
-Fit real expone `iterations/loss/duration_ms` más rama efectiva `deep3d=/pose=` en logs (`_LAST_FIT_STATS`).
-Textura expone `parsing=/texgan=/dpr=/pose_tex=` en `texture ok` (`_LAST_TEXTURE_STATS`).
-Assemble expone `template synthetic=` más `displacement=real|legacy` (`_LAST_DISPLACE_STATS`).
-Prohibido otro fallback sin línea de log.
-Logs estructurados con `job_id` sin datos biométricos (Workers Logs 3 días free, Modal logs).
-`app.py` con lifespan (reaper TTL/2) y logs con `job_id` + `duration_ms`, sin bytes.
-Health: `GET /health` verifica `queue ping` (local `Store` / Queues health prod) y `gpu available` (local `nvidia-smi` / Modal `torch.cuda.is_available`). En prod `Cloudflare Analytics` + `OpenTelemetry` + `Sentry` si se configura.
+```
+mediapipe/face_landmarker.task
+deca/deca_model.tar                                  (DECA_DIR)
+flame/flame2023_Open.pkl                             (FLAME_ASSETS_DIR)
+ffhq-uv/FLAME_w_HIFI3D_UV.obj + eye_ball_tex.png     (FFHQ_UV_DIR)
+checkpoints/texgan_model/texgan_ffhq_uv.pth          (TEXGAN_DIR)
+checkpoints/deep3d_model/epoch_latest.pth            (DEEP3D_DIR)
+topo_assets/unwrap_1024_info.mat + hifi3dpp_mean_face.obj (TOPO_DIR)
+checkpoints/dpr_model/trained_model_03.t7            (DPR_DIR)
+flame/flame_template.bin + flame_hifi_transfer.npz + flame68_embed.npz
+gnm/ legacy (rm solo tras cutover + backup verificada)
+```
 
-## 9. Escalado
+Gates: `fit_weights_present()` + `tex_weights_present()` deciden `PIPELINE_REAL`; `texgan/deep3d/dpr/parsing` igual. Extractores resuelven `ENV_DIR → WEIGHTS_DIR → repo weights/…`. Orden estricto: `puente-up → cutover(FLAME_CUTOVER=1) → backup(gnm→gnm.bak-<tag> + manifiesto sha256) → rm por archivo`. `--check` es solo lectura.
 
-Local: Workers CPU y GPU escalan independiente vía `docker compose --scale`, `Store` tras `RLock` + `dict`.
-Prod: `Cloudflare Workers` escala a 0 automático, `Modal` escala GPU `0 -> 100` (`Starter 10 GPU concurrency free`, `Team 50`), `1-2s` cold start, R2/Queues sin gestión. `texture concurrency=1` por GPU para no OOM sigue vigente en Modal.
-Sin storage persistente, no hay cuello de botella de I/O.
-Cache opcional efímera `hash(image) -> UV` en R2 con TTL 60s (`TtlSecs`) si se quiere evitar recomputar misma cara en ventana corta, desactivada por defecto por stateless estricto.
+| Gate | Comando | Qué exige |
+|---|---|---|
+| visual FLAME | `DECA_DIR=… FLAME_ASSETS_DIR=… FFHQ_UV_DIR=… TOPO_DIR=… VULTUS_REAL_ML=1 python3 scripts/e2e-flame-real.py` | CHECK 0-7: sha256, landmarks reales, geometría, cero sentinel, ojos, determinismo ×2, margen `d(A,A)=0<d(A,B)<d(A,C)`, PBR/zip-8, SSIM misma>distinta |
+| bridge | `MODAL_VOLUME=… R2_BUCKET=… bash scripts/modal-weights-sync.sh --check` | puente + cutover + backup por contenido |
+| figura v3 | `DATASET_DIR=… python3 scripts/e2e-v3-figure.py` (`TEXGAN_STEPS` default 2) | denso 20481 + TV ≤ 2.0 + cero sentinel 1024 |
+| SLO | `bash scripts/smoke-slo.sh` (`SMOKE_SLO_RUNS=10`) | `p95 < 20 s` compare-to-done (1 warmup excluido) |
+
+Pesos y JPEGs LFW nunca se commitean (fotos congeladas por sha256).
+
+## 8. Observabilidad y escalado
+
+Por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms`. Ramas efectivas en logs (`deep3d=/pose=/texgan=/dpr=/displacement=`; prohibido fallback sin log). Health verifica queue ping + `torch.cuda.is_available`. Prod: `Analytics + Workers Logs` (3 días free) + `Modal logs` + `OpenTelemetry` opcional.
+
+Local: servicios independientes (`docker compose`). Prod: Workers a 0, Modal `0→100` (`Starter 10`, `Team 50`, cold 1-2 s), `texture c=1`, R2/Queues sin gestión. v3 en cola separada con timeouts de minutos (`600/900`) y retención de días — nunca en el presupuesto 60 s. Cache opcional `hash(image)→UV` en R2 con TTL 60 desactivada por defecto (stateless estricto).

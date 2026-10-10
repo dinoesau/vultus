@@ -60,22 +60,30 @@ jobs:
             BUMP="${BUMP_DISPATCH:-patch}"
           else
             LABELS=""
-            API_LABELS="$(gh api "repos/$EVENT_REPO/commits/$EVENT_SHA/pulls" --jq '[.[]? | .labels[]? | .name?] | join(",")' 2>&1 || true)"
+            if ! API_LABELS="$(gh api "repos/$EVENT_REPO/commits/$EVENT_SHA/pulls" --jq '[.[]? | .labels[]? | .name?] | join(",")' 2>&1)"; then
+              echo "::warning::no se pudo leer el PR asociado al commit $EVENT_SHA: $API_LABELS"
+              API_LABELS=""
+            fi
             echo "api_labels=$API_LABELS"
             LABELS="$LABELS,$API_LABELS"
-            PRS="$(jq -r '[(.commits // [])[].message, (.head_commit.message // "")] | join("\n")' "$GITHUB_EVENT_PATH" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true)"
-            echo "prs=$PRS"
-            for N in $PRS; do
-              # -R explicito: este job no hace checkout y sin .git el gh
-              # muere con "not a git repository" (run 38068519786 -> skip
-              # silencioso). El fallo de gh ahora es error ruidoso, no skip.
-              if ! L="$(gh pr view "$N" -R "$EVENT_REPO" --json labels --jq '[.labels[].name] | join(",")' 2>&1)"; then
-                echo "::error::no se pudieron leer labels del PR #$N: $L"
-                exit 1
-              fi
-              echo "pr=$N labels=$L"
-              LABELS="$LABELS,$L"
-            done
+            # Respaldo: solo el PR de produccion. El push no trae el numero,
+            # se extrae unicamente de "Merge pull request #NN". Nunca "#NN"
+            # generico porque pesca issues (Closes #122, (#124)) y rompe el
+            # run con "Could not resolve to a PullRequest" (run 38086408247).
+            if ! echo ",$LABELS," | grep -qE ",Release: (Major|Minor|Patch),"; then
+              PRS="$(jq -r '[(.commits // [])[].message, (.head_commit.message // "")] | join("\n")' "$GITHUB_EVENT_PATH" | grep -oE 'Merge pull request #[0-9]+' | grep -oE '[0-9]+' | sort -u || true)"
+              echo "prs_fallback=$PRS"
+              for N in $PRS; do
+                # -R explicito: este job no hace checkout y sin .git el gh
+                # muere con "not a git repository" (run 38068519786).
+                if ! L="$(gh pr view "$N" -R "$EVENT_REPO" --json labels --jq '[.labels[].name] | join(",")' 2>&1)"; then
+                  echo "::warning::no se pudieron leer labels del PR #$N: $L (se ignora)"
+                  continue
+                fi
+                echo "pr=$N labels=$L"
+                LABELS="$LABELS,$L"
+              done
+            fi
             echo "labels=$LABELS"
             if echo ",$LABELS," | grep -q ",Release: Major,"; then
               BUMP=major

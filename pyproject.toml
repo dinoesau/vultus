@@ -1,6 +1,12 @@
 [tool.mypy]
 strict = true
 
+[tool.ruff]
+# Piso real: la imagen Modal pina Python 3.10 (ver backend/domain.py:20-26).
+# Sin esto, ruff nuevo infiere >=3.11 y marca UP036 sobre un bloque
+# de compatibilidad load-bearing.
+target-version = "py310"
+
 [tool.ruff.lint]
 extend-select = ["SLF"]
 

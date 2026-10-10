@@ -390,9 +390,9 @@ if HAVE_MODAL:
     # fetch y actualizar ambas lineas (tag + digest amd64).
     # F2 split CI-vs-Modal documentado: backend/requirements.lock (torch
     # 2.13.0 unificado, hashes via `uv pip compile ... -c
-    # backend/requirements-constraints.txt`) es la fuente reproducible para
-    # CI (`pip install --require-hashes -r backend/requirements.lock`, job
-    # lock-check). Modal instala primero el build cu126 (misma VERSION
+    # backend/requirements-constraints.txt`) es asesorio, sin gate en CI
+    # (job lock-check retirado: costo sin senal, prod no lo consume).
+    # Modal instala primero el build cu126 (misma VERSION
     # 2.13.0/0.28.0, variante GPU) y luego requirements.txt, que es
     # torch-free por diseno para no clobberar el cu126 con el build PyPI;
     # fvcore==0.1.5.post20221221 e iopath==0.1.10 espejan el lock.

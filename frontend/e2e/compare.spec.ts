@@ -39,12 +39,16 @@ test("compare upload 2 PNG returns queued job", async ({ page }) => {
   });
 });
 
-test("golden pair reaches done, 6 panels plus 2 viewers, zero heatmap, download starts", async ({
+test("golden pair reaches done, 2 UV panels plus 2 viewers, zero heatmap, download starts", async ({
   page,
 }) => {
   test.slow();
   // En prod el pipeline warm tarda ~18s; en cold + cola hasta 70s. Timeout amplio sin colgar.
   const doneTimeout = process.env.FRONT_URL ? 120_000 : 80_000;
+  const v3Requests: string[] = [];
+  page.on("request", (req) => {
+    if (req.url().includes("/v3/")) v3Requests.push(req.url());
+  });
   await page.goto(FRONT);
   await page.locator('input[name="image_a"]').setInputFiles(GOLDEN_A);
   await page.locator('input[name="image_b"]').setInputFiles(GOLDEN_B);
@@ -52,8 +56,8 @@ test("golden pair reaches done, 6 panels plus 2 viewers, zero heatmap, download 
   await expect(page.locator("#stage-text")).toContainText(/done|listo/, {
     timeout: doneTimeout,
   });
-  // Zip-8 sin heatmap (ADR-008 + ADR-012): 6 paneles uv/pbr/render con blob src.
-  for (const id of ["panel-uv-a", "panel-uv-b", "panel-pbr-a", "panel-pbr-b", "panel-render-a", "panel-render-b"] as const) {
+  // UV-only: solo 2 paneles UV con blob src; PBR/render viven en zip-8 + visor 3D.
+  for (const id of ["panel-uv-a", "panel-uv-b"] as const) {
     const img = page.getByTestId(id);
     await expect(img).toBeVisible();
     await expect(img).toHaveAttribute("src", /^blob:/);
@@ -61,10 +65,23 @@ test("golden pair reaches done, 6 panels plus 2 viewers, zero heatmap, download 
       .poll(async () => img.evaluate((e) => (e as HTMLImageElement).naturalWidth))
       .toBeGreaterThan(0);
   }
+  // Cero paneles 2D redundantes: ni PBR ni renders sobreviven al corte UV-only.
+  await expect(page.getByTestId("panel-pbr-a")).toHaveCount(0);
+  await expect(page.getByTestId("panel-pbr-b")).toHaveCount(0);
+  await expect(page.getByTestId("panel-render-a")).toHaveCount(0);
+  await expect(page.getByTestId("panel-render-b")).toHaveCount(0);
   // Cero heatmap: ni panel ni slider sobreviven al corte (Wave 5).
   await expect(page.getByTestId("panel-heatmap")).toHaveCount(0);
   await expect(page.locator("#heatmap-opacity")).toHaveCount(0);
   await expect(page.locator("#heatmap-opacity-value")).toHaveCount(0);
+  // Cero figura v3: seccion eliminada, sin paneles ni nota ni descarga ni requests a /v3.
+  await expect(page.getByTestId("panel-v3-albedo")).toHaveCount(0);
+  await expect(page.getByTestId("panel-v3-neutral")).toHaveCount(0);
+  await expect(page.getByTestId("panel-v3-key")).toHaveCount(0);
+  await expect(page.getByTestId("panel-v3-fill")).toHaveCount(0);
+  await expect(page.getByTestId("panel-v3-rim")).toHaveCount(0);
+  await expect(page.locator("#figure-v3-note")).toHaveCount(0);
+  await expect(page.locator("#download-figure-v3")).toHaveCount(0);
   for (const id of ["viewer-3d-a", "viewer-3d-b"] as const) {
     const viewer = page.getByTestId(id);
     await expect(viewer).toBeVisible();
@@ -99,4 +116,5 @@ test("golden pair reaches done, 6 panels plus 2 viewers, zero heatmap, download 
   const filePath = await download.path();
   expect(filePath).toBeTruthy();
   expect(statSync(filePath as string).size).toBeGreaterThan(0);
+  expect(v3Requests).toEqual([]);
 });

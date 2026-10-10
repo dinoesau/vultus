@@ -3,10 +3,10 @@
 # cu126 GPU build first (torch==2.13.0 + torchvision==0.28.0 from the cu126
 # index in backend/modal_app.py), and bare transitive torch requirements are
 # then already satisfied at image build time. These anchors force the same
-# torch VERSION into the PyPI lock so CI (--require-hashes) and Modal agree
-# on version; only the build variant differs (PyPI CPU in lock, cu126 in
+# torch VERSION into the PyPI lock so the static fast gate
+# (test_deploy_pins) and Modal agree on version; only the build variant
 # Modal), which is the documented CI-vs-Modal split.
-# Regenerate con (uv 0.12.19 pineado; CI usa el mismo; plataforma linux para
+# Regenerate manual con uv 0.12.19 (plataforma linux para
 # que el lock incluya deps solo-linux como triton/cuda; backend auto para que
 # torch quede en su version PyPI instalable por pip, sin sufijo local +cpu):
 #   uv pip compile --python-version 3.10 --python-platform x86_64-unknown-linux-gnu \

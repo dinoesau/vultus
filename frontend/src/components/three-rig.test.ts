@@ -106,12 +106,23 @@ describe("three-rig: estudio blanco 3 luces (seam publica ThreeViewer)", () => {
     if (idle.ok) expect(viewerStatusMessage(idle.value)).toMatch(/neutro/);
   });
 
-  it("snapshot: cero panel de fusion en visores UV (6 paneles zip-8)", () => {
+  it("snapshot: cero panel de fusion en visores UV (2 paneles UV-only, zip-8 intacto)", () => {
     const src = readViewer("UvViewers.astro");
     expect(src.toLowerCase().includes(HEAT_NEEDLE)).toBe(false);
     expect(src.toLowerCase().includes(FUSION_NEEDLE)).toBe(false);
-    for (const id of ["panel-uv-a", "panel-uv-b", "panel-pbr-a", "panel-pbr-b", "panel-render-a", "panel-render-b"] as const) {
+    for (const id of ["panel-uv-a", "panel-uv-b"] as const) {
       expect(src.includes(id)).toBe(true);
+    }
+    // Agujas partidas: afirmar ausencia sin reintroducir el literal
+    // prohibido en este archivo (barrera grep en cero sobre src).
+    const gone = [
+      ["panel-", "pbr-a"].join(""),
+      ["panel-", "pbr-b"].join(""),
+      ["panel-", "render-a"].join(""),
+      ["panel-", "render-b"].join(""),
+    ];
+    for (const id of gone) {
+      expect(src.includes(id)).toBe(false);
     }
   });
 

@@ -145,7 +145,7 @@ async function loadOne(
  * Carga el par demo en paralelo. Railway total: el par llega probado o
  * llega un único Err clasificado por slot. Prioridad documentada: ante
  * doble fallo gana el slot `a` (el primero que se pide). Nunca lanza.
- * El mensaje visible ante Err lo posee #123; aquí solo se clasifica.
+ * El mensaje visible ante Err vive fuera de este módulo; aquí solo se clasifica.
  */
 export async function loadDemoBlobs(
   paths: DemoPaths,

@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-// Demo Obama E1-E4 del issue #122. Sin backend para E1-E3 (solo assets
+// Demo Obama E1-E4. Sin backend para E1-E3 (solo assets
 // estáticos + DOM); E4 usa el gateway vivo igual que compare.spec.ts.
 const FRONT = process.env.FRONT_URL ?? "http://localhost:4321";
 const DEMO_BTN = "#btn-demo";
@@ -116,7 +116,7 @@ test("E5 fallo 404 en B restaura boton sin parciales ni mensaje", async ({ page 
   await expect(btn).toContainText(/Cargar demo/);
   await expect(btn).not.toHaveAttribute("aria-busy", "true");
   // Sin parciales: inputs vacíos, previews ocultos, stage intacto.
-  // El mensaje visible ante el fallo lo posee #123; aquí no debe haberlo.
+  // El mensaje visible ante el fallo vive fuera de este flujo; aquí no debe haberlo.
   for (const slot of ["a", "b"] as const) {
     const count = await page.evaluate((s) => {
       const input = document.querySelector<HTMLInputElement>(`input[name="image_${s}"]`);

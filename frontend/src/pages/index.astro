@@ -618,7 +618,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       // Reemplaza lo previo (E2) via updatePreview (revoca URLs viejas).
       // Orden atómico: TODOS los nodos se verifican antes de mutar nada, así
       // un fallo no deja mitad demo / mitad usuario (P0-2). Cada Err se
-      // retorna (no se descarta): el mensaje visible lo posee #123.
+      // retorna (no se descarta): el mensaje visible ante el fallo vive fuera de este flujo.
       // Nunca lanza: cada paso es total, por eso el `void` del listener es
       // seguro. Sin AbortController: el guard hace imposible la invocación
       // concurrente, el abort era código muerto con rama que trababa el botón.

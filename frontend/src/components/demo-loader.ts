@@ -89,6 +89,24 @@ export type DemoLoadError = {
   readonly status?: number;
 };
 
+// Fuente única del mensaje visible ante fallo demo (#123). El loader
+// clasifica el Err; la presentación lo pinta sin ramificar por detail/slot.
+export const DEMO_LOAD_ERROR_MESSAGE = "Could not load demo. Try again" as const;
+
+export type DemoDomError = { readonly kind: "DemoDomError" };
+
+export type DemoPresentableError = DemoLoadError | DemoImageError | DemoDomError;
+
+/**
+ * Mapper total del Err demo al mensaje visible. Un solo literal para los
+ * 4 details + blob-invalid + DOM, así el e2e y la UI no duplican strings.
+ * Nunca lanza.
+ */
+export function demoLoadErrorMessage(_err: DemoPresentableError): typeof DEMO_LOAD_ERROR_MESSAGE {
+  void _err;
+  return DEMO_LOAD_ERROR_MESSAGE;
+}
+
 export interface DemoLoadOptions {
   readonly fetchImpl?: typeof fetch;
   readonly signal?: AbortSignal;
@@ -129,7 +147,8 @@ async function loadOne(
  * Carga el par demo en paralelo. Railway total: el par llega probado o
  * llega un único Err clasificado por slot. Prioridad documentada: ante
  * doble fallo gana el slot `a` (el primero que se pide). Nunca lanza.
- * El mensaje visible ante Err vive fuera de este módulo; aquí solo se clasifica.
+ * El pintado del Err vive en `index.astro` vía `demoLoadErrorMessage`;
+ * aquí solo se clasifica y se expone el literal único.
  */
 export async function loadDemoBlobs(
   paths: DemoPaths,

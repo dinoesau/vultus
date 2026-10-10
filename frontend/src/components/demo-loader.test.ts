@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEMO_LOAD_ERROR_MESSAGE,
   DEMO_PATHS,
   blobsToFiles,
   demoFileName,
   demoImageToBlob,
+  demoLoadErrorMessage,
   loadDemoBlobs,
   parseDemoBlob,
   sniffDemoMime,
@@ -167,8 +169,7 @@ describe("demo-loader: loadDemoBlobs railway, nunca lanza", () => {
   });
 });
 
-describe("demo-loader: blobsToFiles listos para FormData", () => {
-  it("JPEG da .jpg con tipo y bytes preservados", async () => {
+describe("demo-loader: blobsToFiles listos para FormData", () => {  it("JPEG da .jpg con tipo y bytes preservados", async () => {
     const files = await blobsToFiles(await mustParse(jpegBlob()), await mustParse(jpegBlob()));
     expect(files.ok).toBe(true);
     if (!files.ok) return;
@@ -192,5 +193,33 @@ describe("demo-loader: blobsToFiles listos para FormData", () => {
     expect(await files.value.fileA.arrayBuffer()).toEqual(
       await new Blob([PNG_BYTES]).arrayBuffer(),
     );
+  });
+});
+
+describe("demo-loader: demoLoadErrorMessage literal único (#123)", () => {
+  it("el literal es el exigible por el issue", () => {
+    expect(DEMO_LOAD_ERROR_MESSAGE).toBe("Could not load demo. Try again");
+  });
+
+  it("todo detail de carga mapea al mismo literal", () => {
+    expect(
+      demoLoadErrorMessage({ kind: "DemoLoadFailed", which: "a", detail: "network" }),
+    ).toBe(DEMO_LOAD_ERROR_MESSAGE);
+    expect(
+      demoLoadErrorMessage({ kind: "DemoLoadFailed", which: "b", detail: "status", status: 404 }),
+    ).toBe(DEMO_LOAD_ERROR_MESSAGE);
+    expect(
+      demoLoadErrorMessage({ kind: "DemoLoadFailed", which: "a", detail: "blob-transport" }),
+    ).toBe(DEMO_LOAD_ERROR_MESSAGE);
+    expect(
+      demoLoadErrorMessage({ kind: "DemoLoadFailed", which: "b", detail: "blob-invalid" }),
+    ).toBe(DEMO_LOAD_ERROR_MESSAGE);
+  });
+
+  it("blob inválido y DOM mapean al mismo literal", () => {
+    expect(
+      demoLoadErrorMessage({ kind: "InvalidDemoBlob", reason: "magic" }),
+    ).toBe(DEMO_LOAD_ERROR_MESSAGE);
+    expect(demoLoadErrorMessage({ kind: "DemoDomError" })).toBe(DEMO_LOAD_ERROR_MESSAGE);
   });
 });

@@ -97,12 +97,12 @@ vultus/
 
 ```mermaid
 graph LR
-    U[2 fotos] --> W[Worker POST /v1/compare]
-    W --> Q[Queues {job_id, r2_keys}]
-    Q --> M[Modal: MediaPipe → fit DECA → textura → assemble]
-    M --> R[R2 result.zip 60s]
-    R --> D[StreamingResponse zip-8 + visor estudio]
-    D -. olvido .-> X[tmpfs wipe + DEL + purga]
+    U["2 fotos"] --> W["Worker POST /v1/compare"]
+    W --> Q["Queues {job_id, r2_keys}"]
+    Q --> M["Modal: MediaPipe → fit DECA → textura → assemble"]
+    M --> R["R2 result.zip 60s"]
+    R --> D["StreamingResponse zip-8 + visor estudio"]
+    D -. olvido .-> X["tmpfs wipe + DEL + purga"]
 ```
 
 Usuario sube 2 jpg/png en Pages → Worker valida (8 MiB, magic JPEG/PNG) y encola puntero → GPU procesa en paralelo por cara → `result.zip` con TTL 60 → Worker lo sirve en streaming → todo se borra (R2 lifecycle + purga DO 2xTTL + `unlink /tmp`).

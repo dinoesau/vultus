@@ -178,7 +178,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           QUEUE_NAME: vultus-jobs
           R2_BUCKET: vultus-jobs
-          LIFECYCLE_RULE: expire-jobs
+          PREVIEW_BUCKET: vultus-jobs-preview
         run: |
           if npx --yes wrangler@4 queues list 2>/dev/null | grep -q "$QUEUE_NAME"; then
             echo "queue $QUEUE_NAME ya existe, se omite"
@@ -190,11 +190,20 @@ jobs:
           else
             npx --yes wrangler@4 r2 bucket create "$R2_BUCKET"
           fi
-          if npx --yes wrangler@4 r2 bucket lifecycle list "$R2_BUCKET" 2>/dev/null | grep -q "$LIFECYCLE_RULE"; then
-            echo "lifecycle $LIFECYCLE_RULE ya existe, se omite"
+          if npx --yes wrangler@4 r2 bucket list 2>/dev/null | grep -q "$PREVIEW_BUCKET"; then
+            echo "bucket $PREVIEW_BUCKET ya existe, se omite"
           else
-            npx --yes wrangler@4 r2 bucket lifecycle add "$R2_BUCKET" "$LIFECYCLE_RULE" 'jobs/' --expire-days 1 -y
+            npx --yes wrangler@4 r2 bucket create "$PREVIEW_BUCKET"
           fi
+          # Red R2 1 dia sobre jobs/ en prod + preview (borrado logico 60s
+          # vive en DO/Python; R2 minimo 1 dia). Idempotente via script.
+          R2_BUCKETS="$R2_BUCKET $PREVIEW_BUCKET" bash scripts/r2-lifecycle-apply.sh --apply
+      - name: verify r2 lifecycle
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKETS: vultus-jobs vultus-jobs-preview
+        run: bash scripts/smoke-r2-lifecycle.sh
       - name: deploy worker production
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

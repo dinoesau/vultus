@@ -1,136 +1,92 @@
 ---
- // Isla presentacional: progreso + visores UV + descarga.
- // Sin lógica de red aquí; el wiring vive en el script de index.astro
- // que importa los helpers de compare-client.ts.
- // Zip-8 intacto: solo se pintan 2 UV; PBR/meshes alimentan el visor 3D via evento.
+// Isla presentacional UV-only: dos paneles canonicos.
+// Sin logica de red; el wiring (progreso + zip + 3D via evento)
+// vive en pages/index.astro. Sin PBR/renders/heatmap aqui.
 ---
 
-<section aria-label="Progreso del análisis" class="panel">
-  <h2>Progreso</h2>
-  <progress
-    id="job-progress"
-    max="100"
-    value="0"
-    aria-label="Progreso del análisis"
-  >
-    0%
-  </progress>
-  <p id="stage-text" role="status">sin job</p>
-</section>
-
-<section aria-label="Visores UV" class="panel">
-  <h2>Visores UV</h2>
-  <div class="viewers">
+<div class="uvband">
+  <div class="uvcard">
+    <h3>UV A canónico</h3>
+    <p>Albedo con piel total · frontal normalizado</p>
     <figure>
-      <figcaption>UV A canónico</figcaption>
-      <img
-        data-testid="panel-uv-a"
-        alt="Mapa UV canónico de la cara A"
-        hidden
-      />
-      <p class="placeholder">pendiente de resultado</p>
-    </figure>
-    <figure>
-      <figcaption>UV B canónico</figcaption>
-      <img
-        data-testid="panel-uv-b"
-        alt="Mapa UV canónico de la cara B"
-        hidden
-      />
-      <p class="placeholder">pendiente de resultado</p>
+      <figcaption>uv_a.png</figcaption>
+      <img data-testid="panel-uv-a" alt="Mapa UV canónico de la cara A" hidden />
+      <p class="placeholder" data-pl-uv-a>pendiente de resultado</p>
     </figure>
   </div>
-  <p class="download-row">
-    <a id="download-zip" hidden download="">Descargar zip</a>
-  </p>
-  <p id="result-error" role="alert" hidden></p>
-</section>
+  <div class="uvcard">
+    <h3>UV B canónico</h3>
+    <p>Mismo atlas, misma pose neutra</p>
+    <figure>
+      <figcaption>uv_b.png</figcaption>
+      <img data-testid="panel-uv-b" alt="Mapa UV canónico de la cara B" hidden />
+      <p class="placeholder" data-pl-uv-b>pendiente de resultado</p>
+    </figure>
+  </div>
+</div>
 
 <style>
-  .panel {
-    background: #fff;
-    border: 1px solid #d7dde5;
-    border-radius: 10px;
-    padding: 1rem 1.25rem;
-    margin-top: 1.25rem;
-  }
-  .panel h2 {
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: #8a5a2b;
-    margin: 0 0 0.75rem;
-  }
-  #job-progress {
-    width: 100%;
-    height: 0.9rem;
-    accent-color: #c2410c;
-  }
-  #stage-text {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.9rem;
-    background: #1c1917;
-    color: #ffd9c2;
-    border-radius: 6px;
-    padding: 0.6rem 0.8rem;
-    min-height: 1.2em;
-  }
-  .viewers {
+  .uvband {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1rem;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
   }
-  @media (max-width: 560px) {
-    .viewers {
+  @media (max-width: 640px) {
+    .uvband {
       grid-template-columns: 1fr;
     }
   }
-  figure {
+  .uvcard {
+    background: var(--canvas, #faf9f5);
+    border: 1px solid var(--hairline, #e6dfd8);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .uvcard h3 {
+    font-family: "Cormorant Garamond", Tiempos Headline, Garamond, serif;
+    font-weight: 500;
+    font-size: 22px;
+    letter-spacing: -0.02em;
+    color: var(--ink, #141413);
+    margin: 0 0 4px;
+  }
+  .uvcard p {
+    font-size: 14px;
+    color: var(--muted, #6c6a64);
+    margin: 0 0 14px;
+  }
+  .uvcard figure {
     margin: 0;
-    border: 1px solid #d7dde5;
+    border: 1px solid var(--hairline, #e6dfd8);
     border-radius: 8px;
     overflow: hidden;
   }
-  figcaption {
-    font-size: 0.8rem;
+  .uvcard figcaption {
+    font-size: 13px;
     font-weight: 600;
-    padding: 0.5rem 0.75rem;
-    background: #1c1917;
+    padding: 8px 12px;
+    background: var(--ink, #141413);
     color: #f4f6f8;
   }
-  figure img {
+  .uvcard img {
     display: block;
     width: 100%;
     aspect-ratio: 1;
     object-fit: contain;
     background: #ffffff;
   }
-  figure img[hidden] {
+  .uvcard img[hidden] {
     display: none;
   }
-  .placeholder {
-    font-size: 0.85rem;
-    color: #6b7684;
-    padding: 0.5rem 0.75rem;
+  .uvcard .placeholder {
+    font-size: 14px;
+    color: var(--muted, #6c6a64);
+    padding: 18px;
     margin: 0;
+    text-align: center;
+    background: var(--surface-soft, #f5f0e8);
   }
-  .download-row {
-    margin: 1rem 0 0;
-  }
-  #download-zip {
-    display: inline-block;
-    background: #c2410c;
-    color: #fff;
-    font-weight: 700;
-    text-decoration: none;
-    padding: 0.6rem 1.2rem;
-    border-radius: 8px;
-  }
-  #download-zip[hidden] {
+  .uvcard .placeholder[hidden] {
     display: none;
-  }
-  #result-error {
-    color: #9a1c1c;
-    font-size: 0.9rem;
   }
 </style>

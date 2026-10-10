@@ -10,88 +10,441 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width" />
     <title>Vultus - Comparador facial forense</title>
-    <style>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style is:global>
       :root {
         color-scheme: light;
+        --primary: #cc785c;
+        --primary-active: #a9583e;
+        --primary-disabled: #e6dfd8;
+        --ink: #141413;
+        --body: #3d3d3a;
+        --body-strong: #252523;
+        --muted: #6c6a64;
+        --muted-soft: #8e8b82;
+        --hairline: #e6dfd8;
+        --hairline-soft: #ebe6df;
+        --canvas: #faf9f5;
+        --surface-soft: #f5f0e8;
+        --surface-card: #efe9de;
+        --surface-cream-strong: #e8e0d2;
+        --surface-dark: #181715;
+        --surface-dark-elevated: #252320;
+        --surface-dark-soft: #1f1e1b;
+        --on-primary: #ffffff;
+        --on-dark: #faf9f5;
+        --on-dark-soft: #a09d96;
+        --amber: #e8a55a;
+        --success: #5db872;
+        --r-md: 8px;
+        --r-lg: 12px;
+        --r-xl: 16px;
+        --r-pill: 9999px;
       }
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
       body {
-        font-family: system-ui, -apple-system, sans-serif;
-        max-width: 1080px;
-        margin: 2rem auto;
-        padding: 0 1rem 3rem;
-        background: #eef1f4;
-        color: #1c1917;
-      }
-      form {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: 0.75rem;
-        background: #fff;
-        border: 1px solid #d7dde5;
-        border-radius: 10px;
-        padding: 1rem 1.25rem;
-      }
-      @media (max-width: 560px) {
-        form {
-          grid-template-columns: 1fr;
-        }
-      }
-      .input-panel {
-        display: grid;
-        gap: 0.5rem;
-        align-content: start;
-        border: 1px solid #d7dde5;
-        border-radius: 8px;
-        padding: 0.75rem;
-      }
-      .input-panel img {
-        display: block;
-        width: 100%;
-        aspect-ratio: 1;
-        object-fit: contain;
-        background: #ffffff;
-        border-radius: 6px;
-      }
-      .input-panel img[hidden] {
-        display: none;
-      }
-      .input-panel .placeholder {
-        font-size: 0.85rem;
-        color: #6b7684;
         margin: 0;
+        background: var(--canvas);
+        color: var(--body);
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 16px;
+        line-height: 1.55;
+        -webkit-font-smoothing: antialiased;
       }
-      form button {
-        grid-column: 1 / -1;
-        justify-self: start;
-        background: #1c1917;
-        color: #fff;
-        font-weight: 700;
-        border: 0;
-        border-radius: 8px;
-        padding: 0.6rem 1.4rem;
-        cursor: pointer;
+      h1, h2, h3 {
+        font-family: "Cormorant Garamond", Tiempos Headline, Garamond, "Times New Roman", serif;
+        font-weight: 500;
+        letter-spacing: -0.02em;
+        color: var(--ink);
+      }
+      a { color: var(--primary); }
+      .wrap { max-width: 1200px; margin: 0 auto; padding: 0 32px; }
+      /* top nav: derecha = estado + CTA ancla. */
+      .topnav {
+        position: sticky; top: 0; z-index: 50;
+        background: var(--canvas);
+        border-bottom: 1px solid var(--hairline);
+      }
+      .topnav-inner {
+        max-width: 1200px; margin: 0 auto; padding: 0 32px;
+        height: 64px; display: flex; align-items: center; gap: 28px;
+      }
+      h1.brand {
+        display: flex; align-items: center; gap: 10px;
+        font-family: Inter, sans-serif;
+        font-size: 17px; font-weight: 600; letter-spacing: -0.01em;
+        color: var(--ink); margin: 0;
+      }
+      h1.brand a { color: inherit; text-decoration: none; display: flex; align-items: center; gap: 10px; }
+      h1.brand svg { width: 22px; height: 22px; }
+      .navlinks { display: flex; gap: 22px; margin-left: 12px; }
+      .navlinks a { text-decoration: none; color: var(--ink); font-size: 14px; font-weight: 500; }
+      .navlinks a:hover { color: var(--primary-active); }
+      .nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+      .net-pill {
+        font-family: "JetBrains Mono", monospace; font-size: 12px;
+        color: var(--muted); border: 1px solid var(--hairline);
+        background: var(--surface-soft); border-radius: var(--r-pill);
+        padding: 6px 12px; white-space: nowrap;
+      }
+      .net-pill i {
+        display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+        background: var(--success); margin-right: 7px; vertical-align: 1px;
+      }
+      .btn {
+        font-family: Inter, sans-serif; font-size: 14px; font-weight: 500; line-height: 1;
+        border: 0; border-radius: var(--r-md); padding: 12px 20px; height: 40px;
+        cursor: pointer; display: inline-flex; align-items: center; gap: 8px;
+        text-decoration: none; transition: background 0.15s ease;
+      }
+      .btn-primary { background: var(--primary); color: var(--on-primary); }
+      .btn-primary:hover { background: var(--primary-active); }
+      .btn-secondary { background: var(--canvas); color: var(--ink); border: 1px solid var(--hairline); }
+      .btn-cream { background: var(--canvas); color: var(--ink); }
+      /* hero */
+      .hero { padding: 96px 0 72px; }
+      .hero-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; }
+      .eyebrow {
+        display: inline-flex; align-items: center; gap: 8px;
+        background: var(--surface-card); border-radius: var(--r-pill);
+        padding: 4px 12px; font-size: 13px; font-weight: 500; color: var(--ink);
+      }
+      .eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+      .hero h1.display { font-size: 64px; line-height: 1.05; letter-spacing: -1.5px; margin: 20px 0 16px; }
+      .hero h1.display em { font-style: normal; color: var(--primary); }
+      .lead { font-size: 18px; line-height: 1.5; color: var(--body-strong); max-width: 46ch; margin: 0 0 24px; }
+      .btnrow { display: flex; gap: 12px; flex-wrap: wrap; }
+      .micro { font-size: 13px; color: var(--muted); margin-top: 14px; }
+      .micro code {
+        font-family: "JetBrains Mono", monospace; font-size: 12.5px;
+        background: var(--surface-soft); padding: 2px 6px; border-radius: 4px;
+        border: 1px solid var(--hairline);
+      }
+      .hero-card {
+        background: var(--canvas); border: 1px solid var(--hairline);
+        border-radius: var(--r-xl); padding: 20px;
+      }
+      .hero-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; gap: 10px; }
+      .hero-card-head strong { font-size: 14px; font-family: Inter, sans-serif; color: var(--ink); }
+      .pill {
+        font-size: 12px; font-weight: 500; letter-spacing: 1.5px; text-transform: uppercase;
+        background: var(--primary); color: #fff; border-radius: var(--r-pill); padding: 4px 12px;
+        white-space: nowrap;
+      }
+      form#compare { margin: 0; }
+      .dropgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .drop {
+        border: 1.5px dashed var(--hairline); border-radius: var(--r-lg);
+        background: var(--surface-soft); min-height: 250px;
+        display: flex; flex-direction: column; overflow: hidden;
+        cursor: pointer; position: relative; transition: border-color 0.15s;
+      }
+      .drop:hover, .drop.over { border-color: var(--primary); }
+      .drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+      .drop .ph {
+        flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 8px; padding: 20px; text-align: center; color: var(--muted); font-size: 14px; margin: 0;
+      }
+      .drop .ph[hidden] { display: none; }
+      .drop .ph .ico {
+        width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--hairline);
+        display: flex; align-items: center; justify-content: center;
+        background: var(--canvas); font-size: 18px; color: var(--ink);
+      }
+      .drop img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: #fff; }
+      .drop img[hidden] { display: none; }
+      .drop footer {
+        padding: 10px 12px; font-size: 13px; font-weight: 500; color: var(--ink);
+        border-top: 1px solid var(--hairline-soft);
+        display: flex; justify-content: space-between; align-items: center; gap: 8px;
+        background: var(--canvas); font-family: Inter, sans-serif;
+      }
+      .drop footer span:last-child {
+        font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--muted); font-weight: 400;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%;
+      }
+      .hero-card-actions { display: flex; gap: 10px; margin-top: 14px; }
+      .hero-card-actions .btn { flex: 1; justify-content: center; height: 44px; }
+      /* strip */
+      .strip { border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); background: var(--surface-soft); }
+      .strip-inner {
+        max-width: 1200px; margin: 0 auto; padding: 14px 32px;
+        display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+        font-size: 13px; color: var(--muted);
+      }
+      .badge { font-size: 13px; font-weight: 500; background: var(--surface-card); color: var(--ink); border-radius: var(--r-pill); padding: 4px 12px; }
+      /* sections */
+      .section { padding: 96px 0; }
+      .sec-head { max-width: 720px; margin-bottom: 36px; }
+      .sec-head .kicker { font-size: 12px; font-weight: 500; letter-spacing: 1.5px; text-transform: uppercase; color: var(--primary); margin-bottom: 10px; }
+      .sec-head h2 { font-size: 48px; line-height: 1.1; letter-spacing: -1px; margin: 0 0 12px; }
+      .sec-head p { font-size: 16px; color: var(--body); margin: 0; }
+      .cards3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+      .fcard { background: var(--surface-card); border-radius: var(--r-lg); padding: 32px; }
+      .fcard .n { font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--primary-active); letter-spacing: 1px; margin-bottom: 12px; }
+      .fcard h3 { font-size: 28px; line-height: 1.2; margin: 0 0 10px; }
+      .fcard p { font-size: 15px; margin: 0 0 14px; }
+      .fcard a { font-size: 14px; font-weight: 500; text-decoration: none; }
+      /* dark band */
+      .darkband { background: var(--surface-dark); border-radius: var(--r-lg); padding: 32px; color: var(--on-dark); }
+      .darkband h2 { color: var(--on-dark); font-size: 36px; line-height: 1.15; letter-spacing: -0.5px; margin: 8px 0 10px; }
+      .darkband .kicker-dark { font-size: 12px; letter-spacing: 1.5px; color: var(--amber); font-weight: 600; }
+      .darkband .sub { color: var(--on-dark-soft); font-size: 15px; max-width: 62ch; margin: 0; }
+      .darkband .sub span { color: #ffd9c2; font-family: "JetBrains Mono", monospace; font-size: 13px; }
+      .darkgrid { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 16px; margin-top: 24px; }
+      .mock { background: var(--surface-dark-elevated); border: 1px solid #2e2c28; border-radius: var(--r-lg); padding: 20px; }
+      .codewin {
+        background: #100f0e; border: 1px solid #2e2c28; border-radius: var(--r-lg);
+        padding: 24px; font-family: "JetBrains Mono", monospace; font-size: 13.5px; line-height: 1.6;
+      }
+      .codewin .bar { display: flex; gap: 6px; margin-bottom: 14px; }
+      .codewin .bar span { width: 10px; height: 10px; border-radius: 50%; background: #3a372f; }
+      .codewin .bar span:first-child { background: var(--primary); }
+      #stage-text { color: #ffd9c2; min-height: 3.2em; white-space: pre-wrap; margin: 0; }
+      .progress { height: 8px; background: #2b2925; border-radius: 999px; overflow: hidden; margin: 12px 0; }
+      .progress i { display: block; height: 100%; width: 0%; background: var(--primary); border-radius: 999px; transition: width 0.4s ease; }
+      .kv { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--on-dark-soft); }
+      .download-row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+      .download-row a {
+        font-size: 13px; font-weight: 600; text-decoration: none;
+        padding: 10px 14px; border-radius: 8px;
+        background: var(--surface-dark-elevated); color: var(--on-dark); border: 1px solid #3a372f;
+        font-family: Inter, sans-serif;
+      }
+      #download-zip { background: var(--primary); border-color: var(--primary); color: #fff; }
+      #download-zip[hidden] { display: none; }
+      #result-error { color: #ff9a9a; font-size: 13px; min-height: 1.2em; margin: 10px 0 0; font-family: Inter, sans-serif; }
+      #result-error[hidden] { display: none; }
+      /* coral */
+      .coral {
+        background: var(--primary); color: #fff; border-radius: var(--r-lg);
+        padding: 64px; display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 32px; align-items: center;
+      }
+      .coral h2 { color: #fff; font-size: 36px; line-height: 1.15; margin: 0 0 10px; }
+      .coral p { color: #ffe9df; margin: 0; }
+      .coral-side { display: flex; flex-direction: column; gap: 10px; }
+      .coral-side .btn-cream { justify-content: center; }
+      .coral-side span { font-size: 13px; color: #ffe9df; text-align: center; }
+      /* footer */
+      footer.site { background: var(--surface-dark); color: var(--on-dark-soft); margin-top: 96px; padding: 64px 0 32px; font-size: 14px; }
+      .fgrid { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 32px; max-width: 1200px; margin: 0 auto; padding: 0 32px; }
+      .fgrid h5 { color: var(--on-dark); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 12px; font-family: Inter, sans-serif; }
+      .fgrid a { display: block; color: var(--on-dark-soft); text-decoration: none; margin: 6px 0; }
+      .fgrid a:hover { color: var(--on-dark); }
+      .fbrand { display: flex; align-items: center; gap: 10px; color: var(--on-dark); font-weight: 600; text-decoration: none; font-family: Inter, sans-serif; }
+      .copy {
+        max-width: 1200px; margin: 32px auto 0; padding: 16px 32px 0;
+        border-top: 1px solid #2b2925; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+        color: #7a7771; font-size: 13px;
+      }
+      @media (max-width: 960px) {
+        .hero-grid, .darkgrid, .coral { grid-template-columns: 1fr; }
+        .cards3 { grid-template-columns: 1fr 1fr; }
+        .hero h1.display { font-size: 42px; }
+        .sec-head h2 { font-size: 34px; }
+        .navlinks { display: none; }
+        .net-pill { display: none; }
+      }
+      @media (max-width: 640px) {
+        .cards3, .dropgrid { grid-template-columns: 1fr; }
+        .hero { padding: 48px 0; }
+        .section { padding: 48px 0; }
+        .wrap, .topnav-inner, .strip-inner { padding-left: 18px; padding-right: 18px; }
+        .coral { padding: 32px 24px; }
+        .fgrid { grid-template-columns: 1fr 1fr; }
       }
     </style>
   </head>
   <body data-api-url={apiUrl}>
-    <header>
-      <h1>Vultus - Comparador facial forense</h1>
+    <header class="topnav">
+      <div class="topnav-inner">
+        <h1 class="brand">
+          <a href="#comparar" aria-label="Vultus inicio">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2v20M2 12h20M4.9 4.9l14.2 14.2M19.1 4.9L4.9 19.1" stroke="#141413" stroke-width="2.4" stroke-linecap="round"/></svg>
+            Vultus
+          </a>
+        </h1>
+        <nav class="navlinks" aria-label="Secciones">
+          <a href="#metodo">Método</a><a href="#estudio">Estudio</a><a href="#uv">Espacio UV</a><a href="#entrega">Entrega</a>
+        </nav>
+        <div class="nav-right">
+          <span class="net-pill" title="Contrato + retención"><i></i>TTL 60s · contract v3</span>
+          <a class="btn btn-primary" href="#comparar">Comparar</a>
+        </div>
+      </div>
     </header>
-    <form id="compare">
-      <div class="input-panel">
-        <label>Imagen A <input type="file" name="image_a" accept="image/jpeg,image/png" required /></label>
-        <img data-testid="preview-a" alt="Vista previa de la imagen A" hidden />
-        <p class="placeholder">sin vista previa A</p>
+
+    <main>
+      <div class="wrap hero" id="comparar">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow"><span class="dot"></span> contract v3 · zip-8 · FLAME 5023</span>
+            <h1 class="display">Dos caras.<br />Un <em>espacio canónico.</em></h1>
+            <p class="lead">
+              Vultus normaliza dos retratos a UV 512 invariante a pose y expresión para apoyo visual
+              forense. Sin identificación biométrica. Sin persistencia: todo se olvida en 60&nbsp;s.
+            </p>
+            <div class="btnrow">
+              <a class="btn btn-primary" href="#intake">Comparar ahora</a>
+              <a class="btn btn-secondary" href="#estudio">Ver estudio ↓</a>
+            </div>
+            <p class="micro">
+              Wire <code>v2</code> · hitos <code>0.40 / 0.75 / 0.95 / 1.0</code> ·
+              <code>GET /health → contract_version 3</code>
+            </p>
+          </div>
+          <div class="hero-card" id="intake">
+            <div class="hero-card-head">
+              <strong>Intake — 2 fotos JPG/PNG ≤ 8 MiB</strong><span class="pill">TTL 60s</span>
+            </div>
+            <form id="compare">
+              <div class="dropgrid">
+                <label class="drop" id="drop-a">
+                  <input type="file" name="image_a" accept="image/jpeg,image/png" required />
+                  <p class="ph" data-ph-a>
+                    <span class="ico">＋</span>
+                    <span>Suelta cara A<br /><small>frontal, una sola cara</small></span>
+                  </p>
+                  <img data-testid="preview-a" alt="Vista previa de la imagen A" hidden />
+                  <footer><span>Cara A</span><span data-meta-a>JPG · PNG</span></footer>
+                </label>
+                <label class="drop" id="drop-b">
+                  <input type="file" name="image_b" accept="image/jpeg,image/png" required />
+                  <p class="ph" data-ph-b>
+                    <span class="ico">＋</span>
+                    <span>Suelta cara B<br /><small>misma luz ideal</small></span>
+                  </p>
+                  <img data-testid="preview-b" alt="Vista previa de la imagen B" hidden />
+                  <footer><span>Cara B</span><span data-meta-b>JPG · PNG</span></footer>
+                </label>
+              </div>
+              <div class="hero-card-actions">
+                <button class="btn btn-primary" type="submit">Comparar →</button>
+                <button class="btn btn-secondary" type="button" id="btn-demo">Cargar demo</button>
+              </div>
+            </form>
+          </div>
+        </div>
       </div>
-      <div class="input-panel">
-        <label>Imagen B <input type="file" name="image_b" accept="image/jpeg,image/png" required /></label>
-        <img data-testid="preview-b" alt="Vista previa de la imagen B" hidden />
-        <p class="placeholder">sin vista previa B</p>
+
+      <div class="strip">
+        <div class="strip-inner">
+          <span class="badge">UV 512 × 512</span>
+          <span class="badge">Mesh 5023 verts · 9976 tris</span>
+          <span class="badge">PBR piel + ojos</span>
+          <span>No heatmap · No slider opacidad · Renders frontales 512</span>
+        </div>
       </div>
-      <button type="submit">Comparar</button>
-    </form>
-    <UvViewers />
-    <ThreeViewer />
+
+      <section class="wrap section" id="metodo" aria-label="Método">
+        <div class="sec-head">
+          <div class="kicker">Método</div>
+          <h2>Del retrato al canon, sin atajos.</h2>
+          <p>
+            Cada cara deforma el template FLAME con identidad foto-derivada. Expresión neutra fija.
+            La comparación ocurre en UV, no en píxeles de pantalla.
+          </p>
+        </div>
+        <div class="cards3">
+          <div class="fcard">
+            <div class="n">01 — FIT</div>
+            <h3>Landmarks 478 → DECA</h3>
+            <p>MediaPipe + fit determinista ×2. 253 coefs + cámara 3×4. Deadline 10 s.</p>
+            <a href="#estudio">Ver etapa →</a>
+          </div>
+          <div class="fcard">
+            <div class="n">02 — TEXTURE</div>
+            <h3>Completion foto-derivada</h3>
+            <p>Cada texel deriva de la foto. Cero sentinel magenta, evidence ≥ 0.99.</p>
+            <a href="#uv">Ver UV →</a>
+          </div>
+          <div class="fcard">
+            <div class="n">03 — ASSEMBLE</div>
+            <h3>zip-8 canónico v3</h3>
+            <p>uv_a/b · mesh_a/b · pbr_a/b · render_a/b en orden. Sin heatmap.</p>
+            <a href="#entrega">Ver entrega →</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap" id="estudio" aria-label="Estudio 3D">
+        <div class="darkband">
+          <div class="kicker-dark">ESTUDIO BLANCO — PRODUCTO REAL</div>
+          <h2>El visor es el producto, no una ilustración.</h2>
+          <p class="sub">
+            Dos caras PBR en paralelo bajo las mismas luces de estudio. Fondo, sondas y piel
+            provienen del rig real.
+          </p>
+          <div class="darkgrid">
+            <div class="mock">
+              <ThreeViewer />
+            </div>
+            <div class="codewin" aria-label="Progreso del análisis">
+              <div class="bar" aria-hidden="true"><span></span><span></span><span></span></div>
+              <div class="kv"><span id="job-label">sin job</span><span>stateless</span></div>
+              <div class="progress" aria-hidden="true"><i id="bar"></i></div>
+              <p id="stage-text" role="status">sin job — sube A + B y pulsa Comparar.</p>
+              <progress id="job-progress" max="100" value="0" hidden>0%</progress>
+              <div class="kv">
+                <span>queued → fit → texture → assemble → done</span><span id="pct">0%</span>
+              </div>
+              <p class="download-row">
+                <a id="download-zip" hidden download="">Descargar zip</a>
+              </p>
+              <p id="result-error" role="alert" hidden></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap section" id="uv" aria-label="Espacio canónico">
+        <div class="sec-head">
+          <div class="kicker">Espacio canónico</div>
+          <h2>Donde ocurre la comparación.</h2>
+          <p>UV 512 × 512 × 3 · 786 432 bytes exactos. Piel total completada, ojos separados en EyePBR.</p>
+        </div>
+        <UvViewers />
+      </section>
+
+      <section class="wrap" id="entrega" aria-label="Entrega">
+        <div class="coral">
+          <div>
+            <h2>Apoyo visual forense. No identificación.</h2>
+            <p>
+              La piel completada alucina plausibilidad, no es medición (ADR-008). 3/4 degrada por
+              diseño. Incluye disclaimer + disclosure en cada entrega. El zip vive 60 s en servidor,
+              para siempre en tu memoria local.
+            </p>
+          </div>
+          <div class="coral-side">
+            <a class="btn btn-cream" id="cta-dl" href="#estudio" style="justify-content:center">Ver último resultado</a>
+            <span id="ttl-note">sin resultado aún</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site">
+      <div class="fgrid">
+        <div>
+          <a class="fbrand" href="#comparar">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2v20M2 12h20M4.9 4.9l14.2 14.2M19.1 4.9L4.9 19.1" stroke="#faf9f5" stroke-width="2.4" stroke-linecap="round"/></svg>
+            Vultus
+          </a>
+          <p style="max-width:32ch">Comparador visual forense en espacio canónico. Gateway TS + compute Python + Astro.</p>
+        </div>
+        <div><h5>Producto</h5><a href="#metodo">Metodología</a><a href="#uv">Espacio UV</a><a href="#estudio">Visor 3D</a></div>
+        <div><h5>Recursos</h5><a href="#metodo">Pipeline</a><a href="#estudio">Arquitectura</a></div>
+        <div><h5>Legal</h5><a href="#entrega">Disclaimer no-ID</a><a href="#entrega">Privacidad stateless</a></div>
+      </div>
+      <div class="copy"><span>© 2026 Vultus · cream #faf9f5 · coral #cc785c</span><span>contract v3 · TTL 60s</span></div>
+    </footer>
     <script>
       import {
         API_PATHS,
@@ -120,6 +473,11 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       const downloadEl = foundDownload instanceof HTMLAnchorElement ? foundDownload : null;
       const foundError = document.getElementById("result-error");
       const errorEl = foundError instanceof HTMLElement ? foundError : null;
+      const barEl = document.getElementById("bar");
+      const pctEl = document.getElementById("pct");
+      const jobLabelEl = document.getElementById("job-label");
+      const ttlNoteEl = document.getElementById("ttl-note");
+      const ctaDl = document.getElementById("cta-dl");
 
       type PreviewError =
         | { readonly kind: "MissingInput" }
@@ -130,6 +488,10 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
       function setStageText(msg: string): void {
         if (stageEl) stageEl.textContent = msg;
+      }
+
+      function setJobLabel(msg: string): void {
+        if (jobLabelEl) jobLabelEl.textContent = msg;
       }
 
       // Total: parse-once del input file a blob: URL. Nunca lanza por input
@@ -155,7 +517,13 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         previewUrls.set(imgEl, url);
         imgEl.src = url;
         imgEl.hidden = false;
-        imgEl.closest("div")?.querySelector(".placeholder")?.setAttribute("hidden", "");
+        const ph = imgEl.closest(".drop")?.querySelector(".ph");
+        if (ph instanceof HTMLElement) ph.hidden = true;
+        const meta = imgEl.closest(".drop")?.querySelector("[data-meta-a], [data-meta-b]");
+        if (meta instanceof HTMLElement) {
+          const name = file.name.length > 18 ? `${file.name.slice(0, 16)}…` : file.name;
+          meta.textContent = `${name} · ${(file.size / 1024).toFixed(0)} KB`;
+        }
         return { ok: true, value: undefined };
       }
 
@@ -166,7 +534,8 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         previewUrls.delete(imgEl);
         imgEl.hidden = true;
         imgEl.removeAttribute("src");
-        imgEl.closest("div")?.querySelector(".placeholder")?.removeAttribute("hidden");
+        const ph = imgEl.closest(".drop")?.querySelector(".ph");
+        if (ph instanceof HTMLElement) ph.hidden = false;
       }
 
       function clearPreviews(): void {
@@ -177,7 +546,10 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           if (!(found instanceof HTMLImageElement)) continue;
           found.hidden = true;
           found.removeAttribute("src");
-          found.closest("div")?.querySelector(".placeholder")?.removeAttribute("hidden");
+          const ph = found.closest(".drop")?.querySelector(".ph");
+          if (ph instanceof HTMLElement) ph.hidden = false;
+          const meta = found.closest(".drop")?.querySelector("[data-meta-a], [data-meta-b]");
+          if (meta instanceof HTMLElement) meta.textContent = "JPG · PNG";
         }
       }
 
@@ -192,10 +564,63 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           const parsed = updatePreview(inputRef, imgRef);
           if (!parsed.ok) clearSinglePreview(imgRef);
         });
+        const drop = inputRef.closest(".drop");
+        if (drop instanceof HTMLElement) {
+          for (const evt of ["dragover", "dragenter"]) {
+            drop.addEventListener(evt, (e) => {
+              e.preventDefault();
+              drop.classList.add("over");
+            });
+          }
+          for (const evt of ["dragleave", "drop"]) {
+            drop.addEventListener(evt, (e) => {
+              e.preventDefault();
+              drop.classList.remove("over");
+            });
+          }
+        }
       }
 
       bindPreview('input[name="image_a"]', '[data-testid="preview-a"]');
       bindPreview('input[name="image_b"]', '[data-testid="preview-b"]');
+
+      const demoBtn = document.getElementById("btn-demo");
+      if (demoBtn instanceof HTMLButtonElement) {
+        demoBtn.addEventListener("click", () => {
+          for (const [sel, c1, c2] of [
+            ['[data-testid="preview-a"]', "#cc785c", "#a9583e"],
+            ['[data-testid="preview-b"]', "#5db8a6", "#252320"],
+          ] as const) {
+            const found = document.querySelector(sel);
+            if (!(found instanceof HTMLImageElement)) continue;
+            found.src = makeDemoFace(c1, c2);
+            found.hidden = false;
+            const ph = found.closest(".drop")?.querySelector(".ph");
+            if (ph instanceof HTMLElement) ph.hidden = true;
+          }
+          setStageText("demo visual cargada — elige 2 archivos reales y pulsa Comparar.");
+        });
+      }
+
+      function makeDemoFace(c1: string, c2: string): string {
+        const c = document.createElement("canvas");
+        c.width = 512;
+        c.height = 512;
+        const x = c.getContext("2d");
+        if (!x) return "";
+        const g = x.createLinearGradient(0, 0, 512, 512);
+        g.addColorStop(0, c1);
+        g.addColorStop(1, c2);
+        x.fillStyle = g;
+        x.fillRect(0, 0, 512, 512);
+        x.fillStyle = "rgba(250,249,245,.16)";
+        for (let i = 0; i < 24; i++) {
+          x.beginPath();
+          x.arc((i * 97) % 512, (i * 57) % 512, 30 + ((i * 13) % 50), 0, 7);
+          x.fill();
+        }
+        return c.toDataURL();
+      }
 
       // Blob URL del zip en memoria: permite re-descarga local sin volver
       // al servidor (cumple stateless + TTL: tras 60s el servidor olvida).
@@ -213,14 +638,18 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       let gen = 0;
 
       function setProgress(pct: number): void {
-        if (!progressEl) return;
-        progressEl.value = pct;
-        progressEl.textContent = `${pct}%`;
+        if (progressEl) {
+          progressEl.value = pct;
+          progressEl.textContent = `${pct}%`;
+        }
+        if (barEl instanceof HTMLElement) barEl.style.width = `${pct}%`;
+        if (pctEl) pctEl.textContent = `${pct}%`;
       }
 
       function showStage(jobId: string, status: string, stage: string, progress: number): void {
         const pct = Math.round(progress * 100);
         setStageText(`job ${jobId}: ${statusMessage(status, stage, progress, jobId)}`);
+        setJobLabel(`job ${jobId} · ${stage}`);
         setProgress(pct);
       }
 
@@ -281,8 +710,13 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           img.hidden = true;
           img.removeAttribute("src");
         }
-        for (const p of document.querySelectorAll(".placeholder")) {
+        for (const p of document.querySelectorAll("[data-pl-uv-a], [data-pl-uv-b]")) {
           if (p instanceof HTMLElement) p.hidden = false;
+        }
+        if (ttlNoteEl) ttlNoteEl.textContent = "sin resultado aún";
+        if (ctaDl instanceof HTMLAnchorElement) {
+          ctaDl.textContent = "Ver último resultado";
+          ctaDl.setAttribute("href", "#estudio");
         }
       }
 
@@ -321,6 +755,12 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           downloadEl.textContent = `Descargar zip (result-${jobId}.zip)`;
           downloadEl.hidden = false;
         }
+        if (ttlNoteEl) ttlNoteEl.textContent = `último zip result-${jobId}.zip · expira en 60 s en servidor`;
+        if (ctaDl instanceof HTMLAnchorElement) {
+          ctaDl.href = zipUrl;
+          ctaDl.textContent = `Descargar result-${jobId}.zip`;
+          ctaDl.setAttribute("download", `result-${jobId}.zip`);
+        }
         const parsed = await tryExtractViewerBlobs(zipBlob);
         if (myGen !== gen) return;
         if (!parsed.ok) {
@@ -334,6 +774,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           new CustomEvent("vultus:meshes", { detail: { meshA, meshB, pbrA, pbrB } }),
         );
         setStageText(`job ${jobId}: listo. Zip guardado en memoria para re-descarga local.`);
+        setJobLabel(`job ${jobId} · done`);
         setProgress(100);
       }
 
@@ -433,6 +874,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           if (body.status === "done") {
             stopLive();
             setStageText(`job ${jobId}: listo. Descargando resultado...`);
+            setJobLabel(`job ${jobId} · done`);
             setProgress(100);
             void fetchResult(jobId, myGen);
           } else if (isTerminal(body.status)) {
@@ -491,6 +933,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         const myGen = ++gen;
         clearResult();
         setStageText("enviando...");
+        setJobLabel("enviando...");
         setProgress(0);
         const healthy = await checkContractHealth();
         if (!healthy.ok) return;
@@ -515,6 +958,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         }
         const jobId = parsed.value.jobId;
         setStageText(`job ${jobId}: en cola...`);
+        setJobLabel(`job ${jobId} · queued`);
         subscribe(jobId, myGen);
       }
     </script>

@@ -1,15 +1,17 @@
 ---
- // Isla 3D: visor estudio blanco con dos caras PBR (A + B en paralelo).
- // Sin SSR pesado: los canvas existen en HTML estatico; Three.js se importa
- // lazy solo en cliente (tras mount y tras done via evento `vultus:meshes`).
- // Fondo, luces y mensajes provienen del nucleo `three-rig.ts` (sin three).
+// Isla 3D: visor estudio blanco con dos caras PBR (A + B en paralelo).
+// Sin SSR pesado: los canvas existen en HTML estatico; Three.js se importa
+// lazy solo en cliente (tras mount y tras done via evento `vultus:meshes`).
+// Fondo, luces y mensajes provienen del nucleo `three-rig.ts` (sin three).
+// Presentacion dark (surface-dark-elevated) para vivir dentro del darkband.
 ---
 
-<section aria-label="Visor 3D estudio" class="panel">
-  <h2>Visor 3D (estudio blanco)</h2>
-  <div class="meshes">
-    <figure>
-      <figcaption>Cara A</figcaption>
+<div class="mock-inner">
+  <h4>Meshes A / B — giro lento frontal</h4>
+  <p class="hint">GLB conserva SkinPBR + EyePBR embebidos. Fallback procedural si llega sin material.</p>
+  <div class="viewers2">
+    <figure class="fig">
+      <figcaption>CARA A <i>mesh_a.glb</i></figcaption>
       <canvas
         data-testid="viewer-3d-a"
         width="480"
@@ -18,8 +20,8 @@
       >
       </canvas>
     </figure>
-    <figure>
-      <figcaption>Cara B</figcaption>
+    <figure class="fig">
+      <figcaption>CARA B <i>mesh_b.glb</i></figcaption>
       <canvas
         data-testid="viewer-3d-b"
         width="480"
@@ -34,16 +36,16 @@
     <a id="download-mesh-a" hidden download="mesh_a.glb">Descargar mesh A</a>
     <a id="download-mesh-b" hidden download="mesh_b.glb">Descargar mesh B</a>
   </p>
-</section>
+</div>
 
 <script>
   import {
     LIGHT_PROBES,
     SKIN_MATERIAL,
     STUDIO_BACKGROUND_HEX,
-    STUDIO_CAMERA_FOV,
     STUDIO_CANVAS_HEIGHT,
     STUDIO_CANVAS_WIDTH,
+    STUDIO_CAMERA_FOV,
     STUDIO_LIGHTS,
     checkLightProbes,
     checkStudioLights,
@@ -183,37 +185,53 @@
     });
   }
 
-  // Render neutro procedural por canvas: esfera achatada que gira.
-  // Garantiza canvas visible aunque el GLB minimo no traiga material estandar.
-  async function renderNeutral(canvas: HTMLCanvasElement | null): Promise<void> {
+  // Render neutro identico al PoC vultus-01: mock 2D oscuro (fondo de
+  // tarjeta, elipse crema + offset coral + filete claro). Espera
+  // presentacional; el 3D real (three.js + estudio blanco) solo entra
+  // con GLBs tras done. Sin three.js en este path.
+  function renderNeutral(canvas: HTMLCanvasElement | null): void {
     if (!canvas) return;
     disposeCanvas(canvas);
-    try {
-      const THREE = await import("three");
-      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-      renderer.setSize(STUDIO_CANVAS_WIDTH, STUDIO_CANVAS_HEIGHT, false);
-      getSlot(canvas).renderer = renderer;
-      const scene = new THREE.Scene();
-      applyStudio(THREE, scene);
-      const camera = makeCamera(THREE);
-      const geo = new THREE.SphereGeometry(1, 48, 32);
-      geo.scale(0.82, 1.05, 0.9);
-      const head = new THREE.Mesh(geo, skinMaterial(THREE));
-      head.name = "VultusFaceNeutral";
-      scene.add(head);
-      await applyProbes(THREE, scene, renderer);
-      let frames = 0;
-      const tick = () => {
-        head.rotation.y += 0.01;
-        renderer.render(scene, camera);
-        if (++frames < 240 && canvas.isConnected) {
-          getSlot(canvas).raf = requestAnimationFrame(tick);
-        }
-      };
-      tick();
-    } catch {
-      setStatus("visor 3D no disponible (WebGL/three)");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      setStatus("visor 3D no disponible (canvas 2D)");
+      return;
     }
+    const W = canvas.width || 480;
+    const H = canvas.height || 360;
+    const sx = W / 480;
+    const sy = H / 360;
+    const other = canvas === canvasB ? 1 : 0;
+    let t = 0;
+    const tick = () => {
+      t += 0.02;
+      const tt = t + other;
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "#1f1e1b";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#f5f0e8";
+      ctx.beginPath();
+      ctx.ellipse(
+        240 * sx,
+        180 * sy,
+        (95 + Math.sin(tt) * 6) * sx,
+        125 * sy,
+        Math.sin(tt * 2) * 0.15,
+        0,
+        7,
+      );
+      ctx.fill();
+      ctx.fillStyle = "rgba(204,120,92,.35)";
+      ctx.beginPath();
+      ctx.ellipse(240 * sx + Math.sin(t) * 30 * sx, 180 * sy, 95 * sx, 125 * sy, 0, 0, 7);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(250,249,245,.25)";
+      ctx.stroke();
+      if (canvas.isConnected) {
+        getSlot(canvas).raf = requestAnimationFrame(tick);
+      }
+    };
+    tick();
   }
 
   function trackUrl(url: string): void {
@@ -429,56 +447,63 @@
 </script>
 
 <style>
-  .panel {
-    background: #fff;
-    border: 1px solid #d7dde5;
-    border-radius: 10px;
-    padding: 1rem 1.25rem;
-    margin-top: 1.25rem;
+  .mock-inner h4 {
+    margin: 0 0 4px;
+    font-family: Inter, sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--on-dark, #faf9f5);
   }
-  .panel h2 {
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: #8a5a2b;
-    margin: 0 0 0.75rem;
+  .mock-inner .hint {
+    font-size: 13px;
+    color: var(--on-dark-soft, #a09d96);
+    margin: 0 0 14px;
   }
-  .meshes {
+  .viewers2 {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1rem;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
   }
-  @media (max-width: 760px) {
-    .meshes {
+  @media (max-width: 640px) {
+    .viewers2 {
       grid-template-columns: 1fr;
     }
   }
-  figure {
+  .fig {
     margin: 0;
-    border: 1px solid #d7dde5;
+    border: 1px solid #33302b;
     border-radius: 8px;
     overflow: hidden;
+    background: var(--surface-dark-soft, #1f1e1b);
   }
-  figcaption {
-    font-size: 0.8rem;
+  .fig figcaption {
+    font-size: 12px;
     font-weight: 600;
-    padding: 0.5rem 0.75rem;
-    background: #1c1917;
-    color: #f4f6f8;
+    padding: 8px 10px;
+    background: #100f0e;
+    color: var(--on-dark, #faf9f5);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
-  canvas[data-testid="viewer-3d-a"],
-  canvas[data-testid="viewer-3d-b"] {
+  .fig figcaption i {
+    font-style: normal;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    color: var(--on-dark-soft, #a09d96);
+    font-weight: 400;
+  }
+  .fig canvas {
     display: block;
     width: 100%;
     max-width: 480px;
     aspect-ratio: 4 / 3;
-    background: #ffffff;
-    border-radius: 0 0 8px 8px;
+    background: #1f1e1b;
   }
   #viewer-3d-status {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.85rem;
-    color: #46536a;
+    color: var(--on-dark-soft, #a09d96);
   }
   .download-row {
     display: flex;
@@ -487,9 +512,10 @@
   }
   .download-row a {
     display: inline-block;
-    background: #1c1917;
-    color: #fff;
-    font-weight: 700;
+    background: var(--surface-dark-elevated, #252320);
+    border: 1px solid #3a372f;
+    color: var(--on-dark, #faf9f5);
+    font-weight: 600;
     font-size: 0.85rem;
     text-decoration: none;
     padding: 0.5rem 1rem;

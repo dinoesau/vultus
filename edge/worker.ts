@@ -17,6 +17,10 @@
 import {
   CONTRACT_VERSION,
   MAX_IMAGE_BYTES,
+  RESULT_ZIP_NAME,
+  SWEEP_JOBS_PREFIX,
+  SWEEP_LIST_LIMIT,
+  SWEEP_MAX_PAGES,
   V3_FIGURE_ZIP,
   contractVersionToNumber,
   hasSupportedMagic,
@@ -26,6 +30,8 @@ import {
   parseStage,
   progressToNumber,
   resolveTtlSecs,
+  resultWindowSecs,
+  resultZipKey,
   ttlToNumber,
   type JobId,
   type Progress,
@@ -337,7 +343,7 @@ async function handleResult(id: JobId, env: Env): Promise<Response> {
   if (status.value.status !== "done") {
     return domainResponse({ kind: "NotDone" });
   }
-  const obj = await env.VULTUS_BUCKET.get(`jobs/${key}/result.zip`);
+  const obj = await env.VULTUS_BUCKET.get(resultZipKey(id));
   if (obj && obj.body) {
     return new Response(obj.body, {
       headers: {
@@ -430,6 +436,131 @@ async function handleEvents(id: JobId, req: Request, env: Env): Promise<Response
   return stub.fetch(req);
 }
 
+export interface SweepSummary {
+  readonly checked: number;
+  readonly deleted: number;
+  readonly kept: number;
+  readonly errors: number;
+  readonly windowSecs: number;
+}
+
+/** Extrae el JobId de `jobs/{uuid}/result.zip`. Solo ese sufijo; v3 y blobs nunca entran. */
+function parseSweepKey(key: string): Result<JobId, WorkerDomainError> {
+  const suffix = `/${RESULT_ZIP_NAME}`;
+  if (!key.startsWith(SWEEP_JOBS_PREFIX) || !key.endsWith(suffix)) {
+    return { ok: false, error: { kind: "InvalidJobId" } };
+  }
+  const parts = key.split("/");
+  if (parts.length !== 3) return { ok: false, error: { kind: "InvalidJobId" } };
+  const raw: unknown = parts[1];
+  return routeJobId(raw);
+}
+
+/**
+ * Borrador del cron 1/min (#134, decision A+B).
+ * Lista `jobs/` filtrando `result.zip`, pregunta al DO y borra si `expired`
+ * o si el DO ya purgo (404). `done/queued/processing/failed` se conservan:
+ * el fallo ya lo limpia Modal y el exito vive hasta su ventana. Nunca borra
+ * `figure-v3.zip` (retencion de dias). Idempotente, nunca lanza por key.
+ */
+export async function sweepExpiredResults(env: Env): Promise<SweepSummary> {
+  const { ttl, invalid, raw } = resolveTtlSecs(env.R2_TTL_SECONDS);
+  const windowSecs = resultWindowSecs(ttl);
+  if (invalid) {
+    console.error(
+      JSON.stringify({ msg: "invalid ttl", raw: String(raw), default: 60, route: "sweep", job_id: "none" }),
+    );
+  }
+  if (!env.VULTUS_BUCKET || !env.VULTUS_PROGRESS) {
+    console.error(
+      JSON.stringify({ msg: "sweep missing bindings", route: "sweep", window_secs: windowSecs }),
+    );
+    return { checked: 0, deleted: 0, kept: 0, errors: 1, windowSecs };
+  }
+  let checked = 0;
+  let deleted = 0;
+  let kept = 0;
+  let errors = 0;
+  let cursor: string | undefined;
+  for (let page = 0; page < SWEEP_MAX_PAGES; page += 1) {
+    let listed: R2ListResult;
+    try {
+      listed = await env.VULTUS_BUCKET.list({
+        prefix: SWEEP_JOBS_PREFIX,
+        limit: SWEEP_LIST_LIMIT,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+    } catch (e) {
+      console.error(JSON.stringify({ msg: "sweep list failed", route: "sweep", cause: String(e) }));
+      errors += 1;
+      break;
+    }
+    for (const obj of listed.objects) {
+      const key = obj.key;
+      if (!key.endsWith(`/${RESULT_ZIP_NAME}`)) continue;
+      checked += 1;
+      const parsed = parseSweepKey(key);
+      if (!parsed.ok) {
+        console.error(JSON.stringify({ msg: "sweep skip invalid key", route: "sweep", key }));
+        errors += 1;
+        continue;
+      }
+      const jobKey = jobIdToString(parsed.value);
+      let res: Response;
+      try {
+        const stub = env.VULTUS_PROGRESS.get(env.VULTUS_PROGRESS.idFromName(jobKey));
+        res = await stub.fetch("https://do/status");
+      } catch (e) {
+        console.error(
+          JSON.stringify({ msg: "sweep status failed", route: "sweep", job_id: jobKey, cause: String(e) }),
+        );
+        errors += 1;
+        continue;
+      }
+      if (res.status === 404) {
+        try {
+          await env.VULTUS_BUCKET.delete(key);
+          deleted += 1;
+          console.error(JSON.stringify({ msg: "sweep delete", route: "sweep", job_id: jobKey, key }));
+        } catch (e) {
+          console.error(
+            JSON.stringify({ msg: "sweep delete failed", route: "sweep", job_id: jobKey, key, cause: String(e) }),
+          );
+          errors += 1;
+        }
+        continue;
+      }
+      const status = await readDoStatus(res);
+      if (!status.ok) {
+        console.error(JSON.stringify({ msg: "sweep corrupt status", route: "sweep", job_id: jobKey }));
+        errors += 1;
+        continue;
+      }
+      if (status.value.status !== "expired") {
+        kept += 1;
+        continue;
+      }
+      try {
+        await env.VULTUS_BUCKET.delete(key);
+        deleted += 1;
+        console.error(JSON.stringify({ msg: "sweep delete", route: "sweep", job_id: jobKey, key }));
+      } catch (e) {
+        console.error(
+          JSON.stringify({ msg: "sweep delete failed", route: "sweep", job_id: jobKey, key, cause: String(e) }),
+        );
+        errors += 1;
+      }
+    }
+    if (!listed.truncated) break;
+    if (listed.cursor === undefined) break;
+    cursor = listed.cursor;
+  }
+  console.error(
+    JSON.stringify({ msg: "sweep done", route: "sweep", checked, deleted, kept, errors, window_secs: windowSecs }),
+  );
+  return { checked, deleted, kept, errors, windowSecs };
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -512,5 +643,13 @@ export default {
     }
 
     return domainResponse({ kind: "NotFound" });
+  },
+
+  async scheduled(_event: unknown, env: Env): Promise<void> {
+    try {
+      await sweepExpiredResults(env);
+    } catch (e) {
+      console.error(JSON.stringify({ msg: "sweep crashed", route: "sweep", cause: String(e) }));
+    }
   },
 };

@@ -20,6 +20,18 @@ export const RESULT_TTL_SECONDS = 60;
 export const TTL_MIN_SECS = 1;
 export const TTL_MAX_SECS = 3600;
 
+// Olvido total en R2 (#134, epic #132): el DO purga metadata a 2xTTL pero el
+// objeto queda. Un cron 1/min borra `jobs/{id}/result.zip` cuando el DO dice
+// `expired` o ya purgo (404). Nunca en primer GET: la ventana permite
+// reintento 10x1s y re-descarga. Sin `sleep` en Modal. Decisiones: A (borrar
+// en expired) + B (ventana desde env, sin exponer ttl en /status).
+export const RESULT_ZIP_NAME = "result.zip";
+export const RESULT_WINDOW_FACTOR = 2;
+export const SWEEP_CRON = "* * * * *";
+export const SWEEP_JOBS_PREFIX = "jobs/";
+export const SWEEP_LIST_LIMIT = 1000;
+export const SWEEP_MAX_PAGES = 10;
+
 export const STAGES = [
   "queued",
   "fit",
@@ -220,6 +232,11 @@ export function jobIdToString(id: JobId): string {
   return id;
 }
 
+/** Unica forma de construir la llave del zip: `jobs/{id}/result.zip`. Sin literales sueltos. */
+export function resultZipKey(id: JobId): string {
+  return `${SWEEP_JOBS_PREFIX}${jobIdToString(id)}/${RESULT_ZIP_NAME}`;
+}
+
 export function isJpeg(bytes: Uint8Array): boolean {
   return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
 }
@@ -277,6 +294,11 @@ export function resolveTtlSecs(raw: unknown): { ttl: TtlSecs; invalid: boolean; 
 
 export function ttlToNumber(ttl: TtlSecs): number {
   return ttl;
+}
+
+/** Ventana de olvido: 2xTTL desde env (decision B). El DO la aplica con alarmas; el sweeper solo la reporta. */
+export function resultWindowSecs(ttl: TtlSecs): number {
+  return ttlToNumber(ttl) * RESULT_WINDOW_FACTOR;
 }
 
 /** Fuente unica: parseProgress. isValid* delega aqui para no duplicar 0..1. */

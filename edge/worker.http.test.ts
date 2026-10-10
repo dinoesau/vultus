@@ -9,9 +9,17 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import devEntry from "./worker.dev";
-import worker from "./worker";
+import worker, { sweepExpiredResults } from "./worker";
 import { ProgressDO } from "./progress-do";
-import { STAGES, resolveTtlSecs, ttlToNumber } from "./contract";
+import {
+  RESULT_ZIP_NAME,
+  STAGES,
+  V3_FIGURE_ZIP,
+  resolveTtlSecs,
+  resultZipKey,
+  ttlToNumber,
+} from "./contract";
+import { parseJobId, jobIdToString } from "./contract";
 
 function png(): Uint8Array {
   return new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new Array(56).fill(0)]);
@@ -477,5 +485,262 @@ describe("gateway http en worker runtime", () => {
       errSpy.mockRestore();
       nowSpy.mockRestore();
     }
+  });
+});
+
+describe("sweeper cron #134 borra result.zip en expired o purga", () => {
+  const ZIP = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+
+  function fakeBucket(initialKeys: string[]) {
+    const store = new Map<string, Uint8Array>();
+    for (const k of initialKeys) store.set(k, ZIP);
+    return {
+      store,
+      put: async (key: string, value: Uint8Array) => {
+        store.set(key, value);
+      },
+      get: async (key: string) => {
+        const v = store.get(key);
+        if (v === undefined) return null;
+        return { body: v } as never;
+      },
+      delete: async (key: string) => {
+        store.delete(key);
+      },
+      list: async (opts?: { prefix?: string; limit?: number; cursor?: string }) => {
+        const prefix = opts?.prefix ?? "";
+        const limit = opts?.limit ?? 1000;
+        const start = opts?.cursor ? Number(opts.cursor) : 0;
+        const keys = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+        const slice = keys.slice(start, start + limit);
+        const next = start + slice.length;
+        const truncated = next < keys.length;
+        return {
+          objects: slice.map((key) => ({ key })),
+          truncated,
+          cursor: truncated ? String(next) : undefined,
+        } as never;
+      },
+    } as unknown as R2Bucket & { store: Map<string, Uint8Array> };
+  }
+
+  function fakeNs(
+    statusByJob: Record<string, string>,
+    opts?: { missing?: Set<string>; broken?: Set<string>; corrupt?: Set<string> },
+  ) {
+    return {
+      idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
+      get: (id: DurableObjectId) =>
+        ({
+          fetch: async () => {
+            const job = id.toString();
+            if (opts?.missing?.has(job)) {
+              return new Response(JSON.stringify({ detail: "not found" }), { status: 404 });
+            }
+            if (opts?.broken?.has(job)) throw new Error("do down");
+            if (opts?.corrupt?.has(job)) return new Response("no-json", { status: 200 });
+            return Response.json({ job_id: job, status: statusByJob[job] ?? "done" });
+          },
+        }) as unknown as DurableObjectStub,
+    } as unknown as DurableObjectNamespace;
+  }
+
+  function keyOf(job: string): string {
+    const parsed = parseJobId(job);
+    if (!parsed.ok) throw new Error("uuid fixture roto");
+    return resultZipKey(parsed.value);
+  }
+
+  it("conserva done/queued/failed, borra expired y purgado, nunca v3 ni uuid roto", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const done = crypto.randomUUID();
+      const expired = crypto.randomUUID();
+      const purged = crypto.randomUUID();
+      const queued = crypto.randomUUID();
+      const failed = crypto.randomUUID();
+      const bucket = fakeBucket([
+        keyOf(done),
+        keyOf(expired),
+        keyOf(purged),
+        keyOf(queued),
+        keyOf(failed),
+        `jobs/${expired}/${V3_FIGURE_ZIP}`,
+        `jobs/${done}/a`,
+        "jobs/not-a-uuid/result.zip",
+      ]);
+      const ns = fakeNs(
+        { [done]: "done", [expired]: "expired", [queued]: "queued", [failed]: "failed" },
+        { missing: new Set([purged]) },
+      );
+      const summary = await sweepExpiredResults({
+        VULTUS_BUCKET: bucket,
+        VULTUS_PROGRESS: ns,
+        R2_TTL_SECONDS: "60",
+      } as never);
+      expect(summary.windowSecs).toBe(120);
+      expect(summary.checked).toBe(6);
+      expect(summary.deleted).toBe(2);
+      expect(summary.kept).toBe(3);
+      expect(summary.errors).toBe(1);
+      expect(await bucket.get(keyOf(done))).not.toBe(null);
+      expect(await bucket.get(keyOf(queued))).not.toBe(null);
+      expect(await bucket.get(keyOf(failed))).not.toBe(null);
+      expect(await bucket.get(keyOf(expired))).toBe(null);
+      expect(await bucket.get(keyOf(purged))).toBe(null);
+      expect(await bucket.get(`jobs/${expired}/${V3_FIGURE_ZIP}`)).not.toBe(null);
+      expect(await bucket.get(`jobs/${done}/a`)).not.toBe(null);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("sin bindings no lanza y reporta un error", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const summary = await sweepExpiredResults({} as never);
+      expect(summary.checked).toBe(0);
+      expect(summary.deleted).toBe(0);
+      expect(summary.errors).toBe(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("fallo de transporte del DO conserva sin borrar", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const flaky = crypto.randomUUID();
+      const done = crypto.randomUUID();
+      const bucket = fakeBucket([keyOf(flaky), keyOf(done)]);
+      const ns = fakeNs({ [done]: "done" }, { broken: new Set([flaky]) });
+      const summary = await sweepExpiredResults({
+        VULTUS_BUCKET: bucket,
+        VULTUS_PROGRESS: ns,
+        R2_TTL_SECONDS: "60",
+      } as never);
+      expect(summary.deleted).toBe(0);
+      expect(summary.kept).toBe(1);
+      expect(summary.errors).toBe(1);
+      expect(await bucket.get(keyOf(flaky))).not.toBe(null);
+      expect(await bucket.get(keyOf(done))).not.toBe(null);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("status corrupto conserva sin borrar", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const weird = crypto.randomUUID();
+      const bucket = fakeBucket([keyOf(weird)]);
+      const ns = fakeNs({}, { corrupt: new Set([weird]) });
+      const summary = await sweepExpiredResults({
+        VULTUS_BUCKET: bucket,
+        VULTUS_PROGRESS: ns,
+        R2_TTL_SECONDS: "60",
+      } as never);
+      expect(summary.deleted).toBe(0);
+      expect(summary.kept).toBe(0);
+      expect(summary.errors).toBe(1);
+      expect(await bucket.get(keyOf(weird))).not.toBe(null);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("pagina el listado jobs/ hasta agotar cursor", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const e1 = crypto.randomUUID();
+      const e2 = crypto.randomUUID();
+      const d1 = crypto.randomUUID();
+      const store = new Map<string, Uint8Array>([
+        [keyOf(e1), ZIP],
+        [keyOf(e2), ZIP],
+        [keyOf(d1), ZIP],
+      ]);
+      let calls = 0;
+      const snapshot = [...store.keys()].filter((k) => k.startsWith("jobs/")).sort();
+      const bucket = {
+        put: async (key: string, value: Uint8Array) => {
+          store.set(key, value);
+        },
+        get: async (key: string) => {
+          const v = store.get(key);
+          if (v === undefined) return null;
+          return { body: v } as never;
+        },
+        delete: async (key: string) => {
+          store.delete(key);
+        },
+        list: async (opts?: { prefix?: string; cursor?: string }) => {
+          calls += 1;
+          // Snapshot como R2 real con cursor por marcador: borrar lo ya
+          // listado no mueve la pagina siguiente.
+          if (opts?.cursor === undefined) {
+            return { objects: snapshot.slice(0, 2).map((key) => ({ key })), truncated: true, cursor: "1" } as never;
+          }
+          return { objects: snapshot.slice(2).map((key) => ({ key })), truncated: false } as never;
+        },
+      } as unknown as R2Bucket & { store: Map<string, Uint8Array> };
+      const ns = fakeNs({ [e1]: "expired", [e2]: "expired", [d1]: "done" });
+      const summary = await sweepExpiredResults({
+        VULTUS_BUCKET: bucket,
+        VULTUS_PROGRESS: ns,
+        R2_TTL_SECONDS: "60",
+      } as never);
+      expect(calls).toBe(2);
+      expect(summary.checked).toBe(3);
+      expect(summary.deleted).toBe(2);
+      expect(summary.kept).toBe(1);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("expone scheduled y conserva done real en el runtime emulado", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(typeof (worker as unknown as { scheduled?: unknown }).scheduled).toBe("function");
+      const te = env as unknown as {
+        VULTUS_BUCKET: R2Bucket;
+        VULTUS_PROGRESS: DurableObjectNamespace;
+      };
+      const job = crypto.randomUUID();
+      const stub = te.VULTUS_PROGRESS.get(te.VULTUS_PROGRESS.idFromName(job));
+      const init = await stub.fetch(`https://do/init?job_id=${job}&ttl_secs=60`);
+      expect(init.status).toBe(200);
+      const progressed = await stub.fetch(
+        new Request("https://do/progress", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "done" }),
+        }),
+      );
+      expect(progressed.status).toBe(200);
+      const parsed = parseJobId(job);
+      if (!parsed.ok) throw new Error("uuid fresco invalido");
+      await te.VULTUS_BUCKET.put(resultZipKey(parsed.value), ZIP);
+      const summary = await sweepExpiredResults({
+        VULTUS_BUCKET: te.VULTUS_BUCKET,
+        VULTUS_PROGRESS: te.VULTUS_PROGRESS,
+        R2_TTL_SECONDS: "60",
+      } as never);
+      expect(summary.kept).toBeGreaterThanOrEqual(1);
+      expect(summary.deleted).toBe(0);
+      expect(await te.VULTUS_BUCKET.get(resultZipKey(parsed.value))).not.toBe(null);
+      expect(jobIdToString(parsed.value)).toBe(job);
+      await te.VULTUS_BUCKET.delete(resultZipKey(parsed.value));
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("resultZipKey usa el nombre canonico result.zip", () => {
+    expect(RESULT_ZIP_NAME).toBe("result.zip");
+    const parsed = parseJobId("11111111-1111-4111-8111-111111111111");
+    if (!parsed.ok) throw new Error("uuid golden invalido");
+    expect(resultZipKey(parsed.value)).toBe("jobs/11111111-1111-4111-8111-111111111111/result.zip");
   });
 });

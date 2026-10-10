@@ -1,4 +1,4 @@
-# Demo images (issue #122)
+# Demo images
 
 Pair for one-click "Load demo": same identity, different session/lighting.
 

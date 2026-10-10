@@ -128,6 +128,8 @@ REAL_MODE = os.environ.get("VULTUS_REAL_ML", "auto").lower()
 ZIP_MESH_A = "mesh_a.glb"
 ZIP_MESH_B = "mesh_b.glb"
 GLB_MAGIC = b"glTF"
+# Nombre del objeto resultado bajo jobs/{id}/ (espejo de edge/worker.ts).
+RESULT_ZIP_NAME = "result.zip"
 
 try:
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
@@ -638,18 +640,14 @@ def _fetch_r2_bytes(bucket: str, key: "R2Key", job_id: str = "unknown") -> "Resu
     return parsed
 
 
-def _delete_r2_inputs(bucket: str, r2_a: "R2Key", r2_b: "R2Key", job_id: str = "unknown") -> int:
-    """Borde R2: borra inputs a|b tras PUT result.zip + report done. Best-effort.
+def _delete_r2_keys(bucket: str, keys: tuple[str, ...], job_id: str = "unknown") -> int:
+    """Borde R2: borra las keys dadas. Best-effort, nunca lanza.
 
-    Claves ya probadas (R2Key via .as_str(), sin revalidar). Nunca lanza:
-    un fallo de borrado se loguea con kind y se continua con la otra key;
-    el job ya esta done (zip recuperable) y tumbarlo seria Shooting the Messenger.
-    Sin bytes en logs: solo job_id, key (jobs/{id}/a|b) y kind.
-    Retorna delete_inputs_ms para el log `job done`.
-    No llamar antes del assemble ni si el PUT fallo (conserva a|b para reintento).
+    Cada fallo se loguea con kind y se continua con la siguiente key.
+    Sin bytes en logs: solo job_id, key y kind.
+    Retorna el tiempo total en ms para el log del job.
     """
     t0 = time.perf_counter()
-    keys = (r2_a.as_str(), r2_b.as_str())
     try:
         r2 = _r2_client()
     except Exception as exc:
@@ -661,6 +659,26 @@ def _delete_r2_inputs(bucket: str, r2_a: "R2Key", r2_b: "R2Key", job_id: str = "
         except Exception as exc:
             logger.warning("delete input failed job=%s key=%s kind=%s", job_id, key_str, type(exc).__name__)
     return int((time.perf_counter() - t0) * 1000)
+
+
+def _delete_r2_inputs(bucket: str, r2_a: "R2Key", r2_b: "R2Key", job_id: str = "unknown") -> int:
+    """Borra inputs a|b tras PUT result.zip ok. Best-effort, nunca lanza.
+
+    Claves ya probadas (R2Key via .as_str(), sin revalidar). El zip se
+    conserva: es el output que sirve GET /result hasta su purga (#134).
+    """
+    return _delete_r2_keys(bucket, (r2_a.as_str(), r2_b.as_str()), job_id)
+
+
+def _delete_r2_related(bucket: str, r2_a: "R2Key", r2_b: "R2Key", job_id: str = "unknown") -> int:
+    """Borra todo lo del job en R2: a|b mas result.zip. Best-effort, nunca lanza.
+
+    Via de fallo: sin reintento, sin conservar nada. El put es atomico,
+    asi que tras un PUT fallido el zip normalmente no existe y su borrado
+    es un no-op idempotente que cubre restos de intentos previos.
+    """
+    keys = (r2_a.as_str(), r2_b.as_str(), f"jobs/{job_id}/{RESULT_ZIP_NAME}")
+    return _delete_r2_keys(bucket, keys, job_id)
 
 
 
@@ -1164,8 +1182,8 @@ def _parse_queue_body(msg: object) -> "Result[QueueJob, DomainError]":
     return _parse_envelope(msg)
 
 
-def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
-    """Orquestador produccion: fetch R2, cadenas A/B en paralelo, join, zip a R2, progreso vivo.
+def _run_job_pipeline(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
+    """Pipeline produccion: fetch R2, cadenas A/B en paralelo, join, zip a R2, progreso vivo.
 
     Borde: r2_a/r2_b ya probados (R2Key); imagenes via _fetch_r2_bytes ->
     Result[ImageBytes]; landmarks via parse_landmarks; fit via parse_fit_result;
@@ -1224,6 +1242,7 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
     logger.info("job start job=%s a=%s b=%s", job_id, r2_a.as_str(), r2_b.as_str())
     if not _job_alive(job_id):
         logger.info("job ya terminal antes de empezar job=%s, se omite", job_id)
+        _delete_r2_related(bucket, r2_a, r2_b, job_id)
         return
     _report_progress(job_id, PROGRESS_FIT, "fit")
     fetched_a = _fetch_r2_bytes(bucket, r2_a, job_id)
@@ -1426,7 +1445,7 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
     )
     zip_bytes = _zip6R(bundle)
     _r2_client().put_object(
-        Bucket=bucket, Key=f"jobs/{job_id}/result.zip", Body=zip_bytes, ContentType="application/zip"
+        Bucket=bucket, Key=f"jobs/{job_id}/{RESULT_ZIP_NAME}", Body=zip_bytes, ContentType="application/zip"
     )
     _report_progress(job_id, PROGRESS_DONE, "done")
     delete_inputs_ms = _delete_r2_inputs(bucket, r2_a, r2_b, job_id)
@@ -1438,6 +1457,22 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
         dt,
         delete_inputs_ms,
     )
+
+
+def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
+    """Orquestador produccion con olvido garantizado: exito o fallo, sin huerfanos.
+
+    Exito: el pipeline borra a|b y conserva result.zip para GET /result.
+    Fallo (incluido PUT fallido o job expirado a mitad): borra a|b mas
+    result.zip via _delete_r2_related y propaga, sin reintento ni conservas.
+    Limpieza best-effort, nunca enmascara el error original.
+    """
+    bucket = _r2_bucket()
+    try:
+        _run_job_pipeline(job_id, r2_a, r2_b)
+    except Exception:
+        _delete_r2_related(bucket, r2_a, r2_b, job_id)
+        raise
 
 
 def queue_pull_consumer():

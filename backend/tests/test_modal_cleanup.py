@@ -1,10 +1,11 @@
-"""#133: borrar inputs a|b tras PUT result.zip exitoso en Modal.
+"""#133: borrar inputs a|b tras PUT result.zip en Modal, exito o fallo.
 
 Seams bajo prueba (acordados en plan):
-- (a) `_run_job_from_r2` finalizacion (PUT -> report done -> delete).
-- (b) `_r2_client().delete_object` via `_delete_r2_inputs`.
+- (a) `_run_job_from_r2` orquestador (pipeline + olvido garantizado).
+- (b) `_r2_client().delete_object` via `_delete_r2_inputs` / `_delete_r2_related`.
 
-Criterios Given-When-Then del issue como slices verticales.
+Semantica: sin conservas para reintento. Exito borra a|b y conserva el
+zip; cualquier fallo borra a|b mas result.zip y propaga, sin reintento.
 """
 
 from __future__ import annotations
@@ -160,8 +161,8 @@ def test_delete_inputs_after_put_ok_gives_404(monkeypatch, caplog) -> None:
         fake.get_object("vultus-jobs", f"jobs/{job_id}/b")
 
 
-def test_put_failure_preserves_inputs(monkeypatch) -> None:
-    """Given PUT falla, When reintenta, Then a|b se conservan (sin delete)."""
+def test_put_failure_deletes_everything_without_retry(monkeypatch) -> None:
+    """Given PUT falla, Then a|b y result.zip se borran y el error propaga, sin reintento."""
     job_id = str(uuid.uuid4())
     r2_a, r2_b = _proven_keys(job_id)
     fake = FakeR2()
@@ -174,11 +175,66 @@ def test_put_failure_preserves_inputs(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="put failed"):
         modal_app._run_job_from_r2(job_id, r2_a, r2_b)
 
-    assert f"jobs/{job_id}/a" in fake.store
-    assert f"jobs/{job_id}/b" in fake.store
+    assert f"jobs/{job_id}/a" not in fake.store
+    assert f"jobs/{job_id}/b" not in fake.store
     assert f"jobs/{job_id}/result.zip" not in fake.store
     deletes = [c for c in fake.calls if c[0] == "delete"]
-    assert deletes == []
+    assert len(deletes) == 3
+
+
+def test_pipeline_failure_before_put_deletes_inputs(monkeypatch) -> None:
+    """Fallo previo al PUT (fit) tampoco deja huerfanos: a|b fuera, sin zip."""
+    from backend.domain import Err as _Err
+    from backend.domain import FitFailed as _FitFailed
+    from backend.domain import MlDecode as _MlDecode
+
+    job_id = str(uuid.uuid4())
+    r2_a, r2_b = _proven_keys(job_id)
+    fake = FakeR2()
+    fake.store[f"jobs/{job_id}/a"] = _stub_image()
+    fake.store[f"jobs/{job_id}/b"] = _stub_image()
+    progress_calls: list[tuple[str, float, str]] = []
+    _install_run_stubs(monkeypatch, fake, progress_calls)
+    monkeypatch.setattr(
+        modal_app,
+        "fit_infer",
+        lambda _jid, _img, _lm: _Err(_FitFailed(detail=_MlDecode(details="boom"))),
+    )
+
+    with pytest.raises(RuntimeError):
+        modal_app._run_job_from_r2(job_id, r2_a, r2_b)
+
+    assert f"jobs/{job_id}/a" not in fake.store
+    assert f"jobs/{job_id}/b" not in fake.store
+    assert f"jobs/{job_id}/result.zip" not in fake.store
+
+
+def test_failure_clears_stale_result_zip(monkeypatch) -> None:
+    """Todo lo relacionado: un zip previo del job tambien se purga en fallo."""
+    from backend.domain import Err as _Err2
+    from backend.domain import FitFailed as _FitFailed2
+    from backend.domain import MlDecode as _MlDecode2
+
+    job_id = str(uuid.uuid4())
+    r2_a, r2_b = _proven_keys(job_id)
+    fake = FakeR2()
+    fake.store[f"jobs/{job_id}/a"] = _stub_image()
+    fake.store[f"jobs/{job_id}/b"] = _stub_image()
+    fake.store[f"jobs/{job_id}/result.zip"] = b"PK\x03\x04stale"
+    progress_calls: list[tuple[str, float, str]] = []
+    _install_run_stubs(monkeypatch, fake, progress_calls)
+    monkeypatch.setattr(
+        modal_app,
+        "fit_infer",
+        lambda _jid, _img, _lm: _Err2(_FitFailed2(detail=_MlDecode2(details="boom"))),
+    )
+
+    with pytest.raises(RuntimeError):
+        modal_app._run_job_from_r2(job_id, r2_a, r2_b)
+
+    assert f"jobs/{job_id}/a" not in fake.store
+    assert f"jobs/{job_id}/b" not in fake.store
+    assert f"jobs/{job_id}/result.zip" not in fake.store
 
 
 def test_done_log_includes_delete_ms_without_bytes(monkeypatch, caplog) -> None:
@@ -281,3 +337,22 @@ def test_delete_helper_returns_ms_and_deletes_both(monkeypatch) -> None:
     assert ms >= 0
     assert r2_a.as_str() not in fake.store
     assert r2_b.as_str() not in fake.store
+
+
+def test_delete_related_removes_inputs_and_zip(monkeypatch) -> None:
+    """Via de fallo: helper borra a|b mas result.zip sin lanzar."""
+    job_id = str(uuid.uuid4())
+    r2_a, r2_b = _proven_keys(job_id)
+    fake = FakeR2()
+    fake.store[r2_a.as_str()] = b"a-bytes"
+    fake.store[r2_b.as_str()] = b"b-bytes"
+    fake.store[f"jobs/{job_id}/result.zip"] = b"PK\x03\x04stale"
+    monkeypatch.setattr(modal_app, "_r2_client", lambda: fake)
+
+    ms = modal_app._delete_r2_related("vultus-jobs", r2_a, r2_b, job_id)
+
+    assert isinstance(ms, int)
+    assert ms >= 0
+    assert r2_a.as_str() not in fake.store
+    assert r2_b.as_str() not in fake.store
+    assert f"jobs/{job_id}/result.zip" not in fake.store

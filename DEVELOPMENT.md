@@ -1,249 +1,197 @@
-# DEVELOPMENT - Guía de Desarrollo
+# DEVELOPMENT — Guía de desarrollo
 
-> Estado objetivo sin Rust: un solo compose sin toolchain Rust y un solo gateway.
-> Comandos nuevos: `pip install -r backend/requirements-api.txt`, `mypy --strict backend/domain.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py`,
-> `ruff check backend/`, `pytest backend/tests -q`, `npx vitest run edge/contract.test.ts`,
-> `npx vitest run --config vitest.pool.config.ts` (desde `frontend/`).
+> Fuente de verdad: `docker-compose.yml` (servicios) · `pyproject.toml` (mypy/ruff) · `.github/workflows/ci.yml` (gates) · `edge/*` + `backend/*` (código).
+> Sin toolchain Rust. Solo Python + Node + Docker. Gateway único TS.
+
+![stack](https://img.shields.io/badge/stack-python%20%2B%20node%20%2B%20docker-blue) ![mypy](https://img.shields.io/badge/mypy-strict-green) ![ruff](https://img.shields.io/badge/ruff-py310-green)
 
 ## 1. Requisitos
 
-Sin toolchain Rust. Solo Python + Node + Docker.
-Instala `Docker` 24+ y `Docker Compose` v2.
-Para GPU instala `nvidia-container-toolkit` y verifica con `nvidia-smi`.
-Node 22+ para frontend Astro (Astro 7 exige 20.19+ o 22.12+).
-Python 3.12+ para runner local y sidecar ML (`backend/local_runner.py`, `backend/modal_app.py`, `Dockerfile.runner`, `Dockerfile.gpu`).
-Node 22+ para el gateway (Worker `edge/worker.ts` + entrada dev `edge/worker.dev.ts`).
-Historico: antes API Python FastAPI y Rust Axum (ver ADRs), borrados en plan-single-gateway-ts.
+| Herramienta | Versión | Para qué |
+|---|---|---|
+| Docker + Compose v2 | 24+ | stack local (`api/runner/ml-sidecar/frontend`) |
+| Python | 3.12+ local · 3.10 en Modal (piso real, `domain.py:20-26`) | runner, orquestador, assemble, tests |
+| Node | 22+ | gateway Worker + frontend Astro 7 |
+| `nvidia-container-toolkit` | solo GPU local | `ml-sidecar` con runtime nvidia (bloque `deploy` comentado por defecto) |
+
+Histórico: API Python FastAPI y Rust Axum borrados (ver ADRs). No instalar Rust.
 
 ## 2. Setup Python
 
 ```bash
 pip install -r backend/requirements-api.txt
-mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/flame_fit.py backend/flame_texture.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py backend/gnm_assemble.py
+mypy --strict --explicit-package-bases --namespace-packages \
+  backend/domain.py backend/flame_fit.py backend/flame_texture.py \
+  backend/gnm.py backend/pipeline_local.py backend/local_runner.py backend/gnm_assemble.py
 ruff check backend/
 pytest backend/tests -q
 ```
 
-Gateway en `http://localhost:8000` (`/health` con `gateway:"worker"`, `POST /v1/compare` -> `202 {job_id, status:"queued"}`, `GET /v1/jobs/{id}` -> `200 {job_id, status}`).
-Mismo handler que prod, servido local via `wrangler dev -c wrangler.dev.toml`.
-Sidecar ML local en `:8081` vía `modal_app.sidecar`.
+- `requirements-api.txt` (6 líneas, sin pinear): `httpx, Pillow, numpy, pytest, mypy, ruff` — compute/ML local + dev.
+- `requirements.txt` (35 líneas): GPU Modal (`fastapi`, `uvicorn`, `httpx==0.28.1`, `numpy==1.26.4`, `mediapipe==0.10.14`, torch vía cu126).
+- `requirements.lock` (2030 líneas, con hashes, `torch==2.13.0`) + `requirements-constraints.txt` (anchor para regen con `uv 0.12.19`).
+- `pyproject.toml`: `mypy strict = true`, `ruff target py310` (el piso Modal; sin esto ruff marca `UP036` en el bloque compat), `extend-select ["SLF"]`, ignores para `modal_app.py` (`BLE001,F401,TRY004,SLF001` — baseline preexistente) y `tests/*` (`SLF001` — white-box por diseño).
+
+Gateway local en `http://localhost:8000` (`/health` con `gateway:"worker"`, `POST /v1/compare → 202`, `GET /v1/jobs/{id} → 200`). Misma entrada que prod, servida vía `wrangler dev -c wrangler.dev.toml`. Sidecar ML local en `:8081`:
 
 ```bash
 python3 -c "import sys; sys.path.insert(0,'.'); import backend.modal_app; import uvicorn; uvicorn.run(backend.modal_app.sidecar, port=8081)"
 ```
 
-`ML_SIDECAR_URL=http://localhost:8081` lo consume `MlSidecarClient(BaseUrl)`.
-`BaseUrl` exige `http(s)://` y recorta `/` final.
+`ML_SIDECAR_URL=http://localhost:8081` lo consume `MlSidecarClient(BaseUrl)` (`http(s)://`, recorta `/`).
 
-## 3. Estructura backend
+## 3. Estructura real
 
 ```
 backend/
-├── requirements-api.txt   # deps compute/ML local (httpx/Pillow/numpy + pytest/mypy/ruff)
-├── requirements.txt       # deps Modal GPU (torch cu126, mediapipe, DECA/FFHQ-UV)
-├── requirements.lock      # pins asesarios con hashes (torch 2.13.0, gate estatico en fast)
-├── requirements-constraints.txt  # anchor torch==2.13.0 para regen del lock
-├── Dockerfile.wrangler    # gateway worker local (misma entrada dev que prod)
-├── Dockerfile.runner      # runner local (webhook + pipeline contra sidecar)
-├── Dockerfile.gpu         # sidecar Python ML (torch, paridad local; Modal usa su receta)
-├── domain.py              # tipos probados ML + Result + errores (sin mitad gateway)
-├── flame_fit.py           # fit DECA feed-forward determinista, Result total (doble + real)
-├── flame_texture.py       # completion FFHQ-UV sin gris, Result total (doble + real)
-├── gnm.py                 # uv_to_png + build_result_zip zip-6 CPU compartido (sin heatmap)
-├── gnm_head.py            # cabeza GNM legacy (solo hasta cutover, sin caller productivo)
-├── gnm_texture.py         # bake gris legacy: falla ruidoso sin pesos (sin caller productivo)
-├── gnm_assemble.py        # FLAME 5023 + piel/ojos + PBR + GLB + zip-6
-├── pipeline_local.py      # orquestador local con sink (report/complete/fail) + timeouts
-├── local_runner.py        # webhook de queue, blobs por rutas dev, sink HTTP
-├── modal_app.py           # sidecar ML: MediaPipe/fit/textura + POST /ml/* + consumer queue
-└── tests/                 # test_domain/pipeline/gnm(_fit|_texture|_assemble)/modal_compat/env_drift/bridge_parity/deploy_pins
-```
+├── domain.py            # tipos probados + Result + errores (dueño local; contrato en edge/contract.ts)
+├── pipeline_local.py    # orquestador run_pair + wire v2 + MlSidecarClient + sink report/complete/fail
+├── local_runner.py      # webhook :8001 + HttpProgressSink + DeadLetter + serve_forever
+├── gnm_assemble.py      # FLAME 5023 + piel/ojos + PBR + GLB + NECK open (VERT_COUNT=5023)
+├── gnm.py               # uv_to_png + build_result_zip zip-8 CPU (sin heatmap)
+├── gnm_fit.py / gnm_head.py / gnm_texture.py  # legacy hasta cutover, sin caller productivo
+├── flame_fit.py         # fit DECA feed-forward determinista (doble + real)
+├── flame_texture.py     # completion FFHQ-UV sin gris (doble + real, EVIDENCE_MIN=0.99)
+├── deep3d.py            # ReconNet ResNet50 + encode_fit253 + reconstruct_dense (solo decisión)
+├── dpr.py               # LightNet SH9 (DPR_SH=9, 250 keys) + fallback gray-world
+├── texgan.py            # completion neuronal enmascarada (init w_avg)
+├── face_parsing.py / render_preview.py / shell_secrets.py
+├── modal_app.py         # sidecar /ml/* + workers + queue_pull_consumer + v3_figure_worker (1668 líneas)
+├── v3_contract.py / v3_dense.py / v3_texture.py / v3_pose.py /
+│   v3_light.py / v3_bundle.py / v3_worker.py   # track denso paralelo, sin tocar forense
+└── tests/               # 32 módulos: domain, pipeline, gnm*, modal_compat, env_drift,
+                         # bridge_parity, deploy_pins, texture_confidence, v3_*_real, bordes parse_*
 
-```
 edge/
-├── contract.ts            # fuente unica del contrato HTTP (brands, Result, hitos)
-├── worker.ts              # gateway prod (fino: valida + R2 + queue + DO)
-├── worker.dev.ts          # entrada dev: envuelve prod + 2 rutas dev + consumer
-├── progress-do.ts         # Durable Object de progreso (TTL + WS vivo)
-├── worker.http.test.ts    # suite pool: port 1:1 del contrato HTTP en runtime
-└── contract.test.ts       # unit del contrato
+├── contract.ts          # FUENTE ÚNICA HTTP (brands, Result, hitos, ZIP_MANIFEST zip-8, V3_*, CONTRACT_VERSION=3)
+├── worker.ts            # gateway prod (7 rutas + OPTIONS 204 + CORS)
+├── worker.dev.ts        # entrada dev: envuelve prod + GET /dev/blobs + PUT /dev/results + consumer webhook
+├── progress-do.ts       # ProgressDO (init/progress/status + WS 500ms×120 + alarm 2 fases)
+├── assert.ts / globals.d.ts / tsconfig.json
+├── contract.test.ts / contract.v3.test.ts       # unit contrato
+└── worker.http.test.ts  # suite pool runtime real
+
+frontend/src/
+├── pages/index.astro              # form A/B + script POST→WS→GET (522 líneas)
+└── components/
+    ├── compare-client.ts          # API_PATHS, RESULT_FILES zip-8, CONTRACT_VERSION=3, tryExtractViewerBlobs
+    ├── three-rig.ts               # constantes estudio blanco (sin import three)
+    ├── three-rig.test.ts
+    ├── ThreeViewer.astro          # 2 canvas + sondas + RoomEnvironment
+    └── UvViewers.astro            # progreso + UV A/B + download
 ```
 
-`domain.py` expone `ImageBytes`, `JobId`, `Progress`, `Stage`,
-`Landmarks` 478, `GnmCoeffs` 253, `CameraParams` 12, `UvRegion` 1-5, `FitResult`,
-`CompleteUv` (legacy wire) / `RenderedImage` / `EyeTexture` (`UV_LEN`), `VersionMismatch`,
-`BaseUrl`, `CompareResult` (sin heatmap), `ContractVersion`, `ZIP_NAMES` (zip-6).
-El ciclo de vida del job (queue, status, TTL) vive solo en `edge/`; Python no lo duplica.
-`torch/mediapipe` solo vía `modal_app.py` + `flame_*` (lazy); `diffusers` pineado pero sin imports (candidato a retirar).
+> No existen `backend/store.py` ni `backend/app.py` (docs viejos los citaban): el ciclo vive solo en `edge/`, Python no lo duplica.
 
-## 4. Docker (solo dev local, no CI ni prod)
+## 4. Docker — solo dev local, nunca CI ni prod
 
-Docker es solo para paridad local.
-No se usa en CI ni en prod.
-Cloudflare (Workers + Pages) y Modal no ejecutan imágenes Docker.
-Modal solo reusa `backend/Dockerfile.gpu` como receta de build vía `modal.Image.from_dockerfile`.
+Cloudflare y Modal no ejecutan estas imágenes; Modal solo reusa `Dockerfile.gpu` como receta vía `from_dockerfile`.
 
-### 4.1 Full stack local
+| Servicio | Puerto | Imagen | Env clave |
+|---|---|---|---|
+| `api` | 8000 | `Dockerfile.wrangler` | `R2_TTL_SECONDS=60`, `RUNNER_WEBHOOK_URL=http://runner:8001/hooks/queue` |
+| `runner` | 8001 | `Dockerfile.runner` | `GATEWAY_URL=http://api:8000`, `ML_SIDECAR_URL=http://ml-sidecar:8081`, `tmpfs /tmp` |
+| `ml-sidecar` | 8081 | `Dockerfile.gpu` | `ML_PORT=8081`, `tmpfs /tmp`, bloque GPU comentado |
+| `frontend` | 4321 | `frontend/Dockerfile` | `VITE_API_URL=http://localhost:8000` |
 
 ```bash
-docker compose up --build
+docker compose up --build            # full stack CPU-verde
+docker compose build api && docker compose up -d api   # rebuild rápido
+# GPU local: descomenta deploy en docker-compose.yml:79-85 y re-up (T4, concurrency=1 en modal_app.py)
 ```
 
-Levanta `api` (worker runtime, misma entrada que prod) en 8000, `runner` en 8001, `ml-sidecar` en 8081 y `frontend` en 4321.
-`/tmp` está montado como `tmpfs` en runner y sidecar para stateless.
-En prod este stack se reemplaza por `Cloudflare Workers + Queues + R2 + Modal` con el mismo handler.
-El estado del worker dev persiste en el volumen `wrangler-state` (efimero en tests).
+Volumen `wrangler-state` (efímero en tests). Healthchecks: `api /health`, `runner /health`, `ml-sidecar /docs`.
 
-### 4.2 Workers GPU local
+### Edge en Cloudflare (prod)
 
 ```bash
-docker compose --profile gpu up --build
-```
-
-Usa `Dockerfile.gpu` con `nvidia/cuda:12.6-runtime`.
-Verifica `docker exec vultus-worker-gpu nvidia-smi`.
-En prod los workers GPU corren en `Modal` (`modal deploy backend/modal_app.py`) con `T4 16GB`, `cold start 1-2s`, `$30/mes free`.
-
-### 4.3 Workers GPU en Modal (prod)
-
-```bash
-modal deploy backend/modal_app.py   # despliega MediaPipe/fit/textura/assemble en Modal
-modal app logs vultus-workers        # logs GPU
-```
-
-Modal escala `0 -> 100` GPUs, paga por segundo. Ver `ARCHITECTURE.md` ADR-004.
-Receta pineada: imagen base por digest + `requirements.lock` asesorio con hashes (`torch==2.13.0`, gate estatico en fast) + `pytorch3d` por SHA desde source.
-El deploy real (con build log) corre en el release tag via CD, nunca desde rama dev.
-Aviso: hay un solo environment (`main`) y el consumer corre con schedule cada 5s:
-`modal serve` robaria jobs de la queue prod y `modal deploy` actualiza prod directo. No hay staging Modal.
-
-### 4.4 Edge en Cloudflare (prod)
-
-```bash
-npx wrangler dev -c wrangler.dev.toml  # Workers API + Queues + R2 + DO local
-npx --yes wrangler@4 deploy --env production  # Worker prod (CD lo hace solo)
+npx wrangler dev -c wrangler.dev.toml                 # local: R2/Queue/DO emulados
+npx --yes wrangler@4 deploy --env production          # prod (el CD lo hace solo)
 API_URL=https://api.vultus.esau.com.mx bash scripts/smoke-prod.sh
 ```
 
-CD en `.github/workflows/cd.yml`: push a `production` despliega Worker `--env preview` (staging, sin GPU); solo el tag `v*.*.*` sobre la punta de `production` despliega Worker `--env production` + Pages `vultus`, humo edge, luego `modal deploy`, humo final y crea el GitHub Release.
-`main` es integracion y solo corre CI.
-Preview usa `--env preview` con bucket y queue aislados, sin dominio custom.
-Config en `wrangler.toml`. Queues `10k ops/día free`, R2 `10GB free`, Pages free.
+`wrangler.toml` (prod): `main=edge/worker.ts`, queue `vultus-jobs`, R2 `vultus-jobs`, DO `ProgressDO`, `R2_TTL_SECONDS=60`, `ALLOW_DEV_ROUTES=0`, ruta `api.vultus.esau.com.mx`. `wrangler.dev.toml`: `main=edge/worker.dev.ts`, R2 `vultus-jobs-dev`, consumer `max_batch_size=1`, `ALLOW_DEV_ROUTES=1`, `RUNNER_WEBHOOK_URL=http://runner:8001/hooks/queue`.
 
-### 4.5 Rebuild rápido local
+### GPU en Modal (prod)
 
 ```bash
-docker compose build api
-docker compose up -d api
+modal deploy backend/modal_app.py    # MediaPipe/fit/textura/assemble + consumer
+modal app logs vultus-workers
 ```
+
+Escala `0→100`, T4 16 GB, cold 1-2 s, `$30/mes free`. Receta pineada: base por digest + lock con hashes + `pytorch3d@978cd99` desde source. Deploy real con build log solo en release tag. **Nunca `modal serve`** (roba queue prod por el schedule 5 s; un solo environment `main`, sin staging Modal).
 
 ## 5. Frontend Astro
 
 ```bash
-cd frontend
-npm install
-npm run dev
+cd frontend && npm install && npm run dev      # :4321
+npm run build && npm run preview               # static (Pages prod)
+npm run test:e2e                               # Playwright :4321 + API real
 ```
 
-Frontend en `http://localhost:4321`.
-Build con `npm run build` y preview con `npm run preview`.
-Islas React en `src/components`.
+Astro 7 `output: static`, `site: https://vultus.esau.com.mx`. Deps: `astro ^7`, `jszip ^3.10`, `three 0.160.1` pineado exacto; dev `vitest ^2`, `@cloudflare/vitest-pool-workers`, `@playwright/test`, `typescript ^5.6`.
 
 ## 6. Queues y workers
 
-El contrato es el sink estrecho en `backend/pipeline_local.py` (`report`, `complete`, `fail`):
-
-- **Local/dev/test:** el runner (`backend/local_runner.py`) recibe el mensaje dev por webhook, trae los blobs por las rutas dev del gateway, corre `run_pair` contra el sidecar y reporta por HTTP. Los tests inyectan el sink en memoria.
-- **Prod:** los workers GPU consumen vía `HTTP Pull Consumer`, reportan progreso al mismo seam `POST /v1/jobs/{id}/progress` y escriben `result.zip` a R2. El progreso va por `Durable Objects WS` con `Stage` enum.
-
-El pipeline no conoce la infra; solo el sink (`InMemorySink` vs `HttpProgressSink`) decide.
+Contrato = sink estrecho `report/complete/fail` (`pipeline_local.py:82`). El pipeline no conoce la infra; solo el sink decide (`InMemorySink` vs `HttpProgressSink`). Presupuesto dentro de TTL (`PipelineConfig`): `landmarks 5 s + fit 10 s + texture 30 s ≤ total 60 s`; `MlSidecarClient` timeout 35 s; caras A/B en paralelo `ThreadPoolExecutor(2)`; `deadline = start + total` → `fail total timeout`.
 
 ## 7. Testing
 
-### 7.1 Backend
-
 ```bash
 pytest backend/tests -q
-pytest backend/tests/test_pipeline.py -q
-pytest backend/tests/test_domain.py -q
-pytest backend/tests/test_gnm.py -q
+pytest backend/tests/test_pipeline.py backend/tests/test_domain.py backend/tests/test_gnm.py -q
+cd frontend && npx vitest run ../edge/contract.test.ts --root ..
+cd frontend && npx vitest run --config vitest.pool.config.ts
 ```
+
+| Capa | Qué exige |
+|---|---|
+| Seam 1 (pool runtime) | `202 queued`, `400` imagen/faltante/uuid, `404` desconocido, `409` pre-done, `health gateway:"worker"`, WS snapshot + handshake `404`, backdoor dev `404` con vars prod |
+| Seam 2 (sink memoria) | `report` ordenado `fit/texture/assemble`, `complete` guarda, `fail` marca |
+| Seam 3 (golden `UV_LEN=786432`) | fit v2 + `GLB magic` FLAME 5023 + `SkinPBR/EyePBR` sin emisivo, eye slice 1092, cero sentinel, `Landmarks` 478 rechaza stubs |
+| Goldens | literales a mano (`Progress`, `JobId`, zip-8, sentinel/evidence, coefs). Esperado nunca recomputado. No mockees el pipeline interno. |
+
+Gates reales (pesos nunca commiteados, LFW congelado por sha256, sin JPEGs en repo):
 
 ```bash
-cd frontend
-npx vitest run ../edge/contract.test.ts --root ..
-npx vitest run --config vitest.pool.config.ts
+DECA_DIR=weights/deca FLAME_ASSETS_DIR=weights/flame FFHQ_UV_DIR=weights/ffhq-uv \
+TOPO_DIR=weights/topo_assets VULTUS_REAL_ML=1 python3 scripts/e2e-flame-real.py
+# margen d(A,A)=0<d(A,B)<d(A,C) + SSIM misma>distinta + landmarks reales (en dobles falla por diseño)
+
+MODAL_VOLUME=... R2_BUCKET=... bash scripts/modal-weights-sync.sh --check   # puente + cutover + backup
+python3 scripts/render_diag.py --photo <jpg> --out <png>                     # diag foto+UV+GLB
+python3 scripts/extract_flame_template.py --check                            # template real (falla loud sin pkl+OBJ)
+cd frontend && npm run test:e2e                                              # Playwright: 2 PNG → queued → done, UV+3D visibles
+bash scripts/smoke-fase0.sh                                                  # health + frontend + POST 202 + GET queued
 ```
 
-La suite es una sola: contrato TS (fuente unica) + pool HTTP en runtime worker + ML/compute Python.
-Seam 1 con suite pool real (`202 {job_id, status queued}`, `400` imagen / faltante / uuid, `404` desconocido, `409` pre-done, `health` con `gateway:"worker"`) mas WS real (snapshot `queued`, handshake falla en desconocido) y negativo del backdoor dev (`404` con vars prod).
-Seam 2 con sink en memoria (`report` ordenado `fit/texture/assemble`, `complete` guarda, `fail` marca).
-Seam 3 con golden `UV_LEN = 786432` (fit v2 + `GLB magic` FLAME 5023 + `SkinPBR`/`EyePBR` sin emisivo, eye slice 1092, cero sentinel) + `Landmarks` 478 rechaza stubs.
-Goldens literales a mano para `Progress`, `JobId`, zip-6, sentinel/evidence y coefs.
-No mockees el pipeline interno.
-Valor esperado es literal golden, no recomputado.
-Regenerar bin: `python3 scripts/extract_gnm_template.py --check` (sin `--check` escribe el bin).
-Gate real: `DECA_DIR=... FLAME_ASSETS_DIR=... FFHQ_UV_DIR=... VULTUS_REAL_ML=1 LANDMARKS_REAL=1 python3 scripts/e2e-flame-real.py` (margen estricto + SSIM misma>distinta, landmarks MediaPipe reales, fotos congeladas por sha256; en dobles margen/SSIM fallan por diseno).
-Bridge gate: `MODAL_VOLUME=... R2_BUCKET=... bash scripts/modal-weights-sync.sh --check` (puente 5/5 + cutover + backup por contenido; `volume rm gnm` solo tras cutover de codigo + backup verificada).
-Goldens LFW congelados por sha256.
-Diag FLAME (foto + UV atlas + GLB): `python3 scripts/render_diag.py --photo <jpg> --out <png>`.
-Template real: `python3 scripts/extract_flame_template.py --check` (falla loud sin pkl+OBJ).
-E2E verde exige puente local: `DECA_DIR=weights/deca FLAME_ASSETS_DIR=weights/flame FFHQ_UV_DIR=weights/ffhq-uv TOPO_DIR=weights/topo_assets VULTUS_REAL_ML=1 python3 scripts/e2e-flame-real.py` (pesos en `weights/` nunca se commitean).
-No commitear JPEGs LFW.
+## 8. Pesos y bridge (resumen operativo)
 
-### 7.2 Frontend E2E
-
-```bash
-cd frontend
-npm run test:e2e
-```
-
-Playwright contra `http://localhost:4321` con API real vía `docker compose`.
-`e2e/compare.spec.ts` sube 2 PNG mínimos vía `setInputFiles` y espera `job ... queued`.
-E2E stack en CI: `docker compose up -d` + `bash scripts/smoke-fase0.sh` (health + frontend + `POST 202` + `GET status queued`).
-
-### 7.3 Stateless check
-
-```bash
-pytest backend/tests/test_pipeline.py -q
-```
-
-Verifica `tmpfs` vacío tras cada par (`job_dir` no existe) y TTL canónico en el DO (`ttl_secs == 60` en `/health`).
-
-## 8. GPU sin hardware local
-
-Si no tienes GPU local, corre `pytest backend/tests -q` (CPU puro con dobles deterministas).
-En CI los workers GPU corren solo en runner con GPU o se skippean.
-En prod usa `Modal` para fit/textura GPU sin hardware local y consume tus `$30/mes free` (~50h T4).
-El lock (`requirements.lock`, torch 2.13.0) es asesorio, sin gate en CI; el gate es `test_deploy_pins` en fast. Si el lock driftea, regen manual con uv 0.12.19: `uv pip compile --python-version 3.10 --python-platform x86_64-unknown-linux-gnu --generate-hashes -c backend/requirements-constraints.txt -o backend/requirements.lock backend/requirements.txt`.
+Volumen Modal `vultus-weights` (`/weights/{flame,deca,ffhq-uv,gnm,mediapipe}`), `SYNC_VERSION=4`. Canónicos: `face_landmarker.task`, `deca_model.tar`, `flame2023_Open.pkl`, `FLAME_w_HIFI3D_UV.obj + eye_ball_tex.png`, `texgan_ffhq_uv.pth`, `epoch_latest.pth`, `unwrap_1024_info.mat + hifi3dpp_mean_face.obj`, `flame_template.bin + flame_hifi_transfer.npz + flame68_embed.npz`. Envs `WEIGHTS_ROOT|WEIGHTS_DIR`, `TEXGAN/DEEP3D/TOPO/DPR_DIR`, `VULTUS_REAL_ML`, `MODAL_VOLUME`, `FLAME_CUTOVER=1`, `BACKUP_TAG`. Orden: `puente-up → cutover → backup (gnm→gnm.bak-<tag>, manifiesto sha256) → rm por archivo (V1 sin -r)`. Detalle en `PIPELINE.md §7`.
 
 ## 9. Lint y formato
 
 ```bash
 mypy --strict --explicit-package-bases --namespace-packages backend/domain.py backend/flame_fit.py backend/flame_texture.py backend/gnm.py backend/pipeline_local.py backend/local_runner.py backend/gnm_assemble.py
 ruff check backend/
-pytest backend/tests -q
+ruff check backend/modal_app.py   # si lo tocas (baseline con ignores, ver §2)
+cd frontend && npm run lint && npm run format
 ```
-
-Sidecar Python con `ruff check backend/modal_app.py` si lo tocas.
-Frontend con `npm run lint` y `npm run format`.
 
 ## 10. Flujo de trabajo
 
-Crea rama desde `main`.
-Implementa un vertical slice `1 test RED -> 1 implementación GREEN` por seam.
-No mezcles refactor en el loop.
-Commitea `Cargo.toml` y `Cargo.lock` juntos.
-Abre PR y verifica `docker compose up` + `pytest backend/tests -q` pasan E2E.
+Rama desde `main` → vertical slice `1 test RED → 1 implementación GREEN` por seam → sin refactors mezclados → PR con `docker compose up` + `pytest backend/tests -q` + pool suite en verde. `main` = integración (solo CI). `production` + tag `v*.*.*` = release (CD despliega edge `--env preview` en push a production, y edge prod + Pages + Modal + Release solo en tag). Detalle en `PIPELINE.md §8`.
 
 ## 11. Troubleshooting
 
-`docker build` falla: reintenta `docker compose build api runner` (gateway worker + runner Python).
-`redis connection refused`: doc vieja, ya no aplica. Nunca hubo `Redis`: el estado vive en el DO/R2 (prod) o emulado (dev). Verifica `/health` y `ttl_secs`.
-`wrangler deploy` falla (prod): verifica `wrangler.toml` bindings de Queues/R2 y `CLOUDFLARE_API_TOKEN`.
-`modal deploy` falla: verifica `modal token` y receta pineada (digest base + lock + pytorch3d SHA desde source en `modal_app.py`, nunca `==` de PyPI para nvdiffrast); el build real con logs corre en el release tag, nunca `serve` (roba queue prod por el schedule).
-`CUDA out of memory` (local o Modal): baja `concurrency_limit` a 1 en `texture_worker` / `fit_worker` (`modal_app.py`).
-`Ml::Decode` en `landmarks/fit/texture`: verifica `FitRequest`/`TextureRequest` y `UV_LEN`.
-`WS no conecta`: verifica `VITE_API_URL` en `frontend/.env` y `Durable Objects` binding en `wrangler.toml` (prod) o `wrangler.dev.toml` (local).
-`Queues 128KB exceeded`: no encoles bytes, el worker solo manda `{job_id, r2_keys jobs/{id}/a|b}`.
-`Pool suite aislada falla en WS`: corre con la config commiteada (`isolatedStorage:false`), el DO retiene storage con timers vivos.
+| Síntoma | Causa real / fix |
+|---|---|
+| `docker build` falla | `docker compose build api runner` (gateway + runner) y reintenta |
+| `redis connection refused` | doc vieja: nunca hubo Redis; estado en DO/R2 (prod) o emulado (dev); verifica `/health` + `ttl_secs` |
+| `wrangler deploy` falla | bindings Queues/R2 en `wrangler.toml` + `CLOUDFLARE_API_TOKEN` |
+| `modal deploy` falla | `modal token` + receta pineada (digest + lock + pytorch3d SHA; nvdiffrast nunca `==` PyPI); build real en tag, nunca `serve` |
+| `CUDA OOM` | `concurrency_limit → 1` en `texture_worker/fit_worker` (`modal_app.py`) |
+| `Ml::Decode` | `FitRequest/TextureRequest` v2 + `UV_LEN`; v1 = `VersionMismatch 400` por diseño |
+| `WS no conecta` | `VITE_API_URL` + binding DO (`wrangler.toml` prod / `wrangler.dev.toml` local) |
+| `Queues 128KB exceeded` | nunca encoles bytes: solo `{job_id, r2_keys jobs/{id}/a\|b}` |
+| pool WS flaky | corre con `vitest.pool.config.ts` commiteada (`isolatedStorage:false`; DO retiene storage con timers vivos) |

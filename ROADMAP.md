@@ -1,240 +1,135 @@
-# ROADMAP - Vultus Comparador Visual Forense
+# ROADMAP — Comparador visual forense
 
-> Estado objetivo sin Rust: un solo PR atomico que borra `backend/crates`, `Cargo.*`, `Dockerfile` Rust.
-> Comandos nuevos: `docker compose up --build -d`, `bash scripts/smoke-fase0.sh`, `npm run test:e2e --prefix frontend`.
+> Fuente de verdad: código + `ARCHITECTURE.md` (ADRs) + `.github/workflows/cd.yml` (release).
+> Estado: vía forense **v3 zip-8 viva** (FLAME 5023, TTL 60) + track v3 denso en paralelo. Sin Rust, sin API Python, sin Redis.
+
+![status](https://img.shields.io/badge/vía%20forense-viva%20v3-green) ![track-v3](https://img.shields.io/badge/track%20v3-en%20paralelo-blue) ![coste](https://img.shields.io/badge/coste-%245%20%2B%20%2430%20free-orange)
 
 ## 1. Resumen
 
-Vultus es un comparador visual forense en espacio canónico.
-Normaliza 2 caras a un espacio UV y permite comparación pixel a pixel invariante a pose y expresión.
-El sistema es stateless por diseño.
-No persistimos imágenes ni resultados tras la entrega al cliente.
-Toda la inferencia es asíncrona vía queues y workers.
+Vultus compara 2 caras en espacio UV canónico: cada foto → `mesh 3D → unwrap → UV 512` → comparación pixel a pixel invariante a pose y expresión. Stateless por diseño: sin Postgres ni S3 persistente, sin re-descarga desde servidor (el cliente guarda el zip en memoria). Inferencia async vía Queues + workers.
 
-## 2. Vision - Por que UV en espacio canónico
+## 2. Visión — por qué UV canónico
 
-La comparación directa en espacio imagen con overlay y transparencia falla con diferencias de pose mayores a 15 grados y con distorsión de perspectiva.
-Vultus compara en espacio UV canónico.
-Cada foto se convierte en `mesh 3D -> unwrap -> UV 512x512`.
-Esto permite heatmap de diferencia por región, normalización de iluminación y zoom sin distorsión.
-La textura UV es la fuente de verdad para métricas antropométricas, no la foto original.
+Overlay directo en espacio imagen falla con pose > 15° y distorsión de perspectiva. En UV canónico la textura es la fuente de verdad para métricas antropométricas, no la foto. La completion es visual y honesta (cero sentinel, `evidence ≥ 0.99`) con disclosure pericial: plausibilidad, no medición (ADR-008).
 
-## 3. Arquitectura
+## 3. Arquitectura viva
 
-### 3.1 Diagrama general stateless
-
-> **Infra elegida: Cloudflare + Modal** (ADR-004). Edge serverless para API/queue/storage, GPU serverless para visión.
+> Infra: **Cloudflare + Modal** (ADR-004). Edge serverless + GPU serverless.
 
 ```mermaid
 graph TB
-    U[Usuario] --> FE[Astro - Cloudflare Pages]
-    FE -- POST multipart 2 jpgs --> CF[Cloudflare Worker - API Gateway]
-    CF -- PutObject R2 + enqueue pointer --> Q[Cloudflare Queues 10k ops/día free]
-    CF -- upload R2 presigned --> R2[R2 Bucket TTL 60s lifecycle]
-    Q -- HTTP Pull Consumer --> MO[Modal GPU Workers<br/>MediaPipe 478 + FLAME + FreeUV (GNM en Fase 2)<br/>$30/mes free, 1-2s cold start]
-    MO -- result bytes --> R2
-    MO -- progress --> DO[Durable Objects WS]
-    R2 -- StreamingResponse zip --> CF
-    CF -- WS progress 0.0-1.0 --> FE
-    FE --> DL[Descarga directa UV_A UV_B heatmap (mesh y PDF en Fases 2-3)]
-    R2 -. lifecycle 60s + tmpfs wipe .-> X[Olvido total]
-    Q -. 24h retención free .-> X
+    U[Usuario] --> FE[Astro Pages static]
+    FE -- POST multipart --> CF[Worker API gateway]
+    CF -- PutObject + enqueue pointer --> Q[Queues 10k ops/día free]
+    CF -- TTL 60 + DO WS --> DO[ProgressDO]
+    Q -- pull consumer --> MO[Modal GPU<br/>MediaPipe + DECA + FFHQ-UV<br/>$30 free · cold 1-2s]
+    MO -- result.zip --> R2[R2 TTL 60s lifecycle]
+    R2 -- StreamingResponse zip-8 --> CF
+    CF -- WS 0.40/0.75/0.95/1.0 --> FE
+    FE --> DL[zip-8: UV + mesh + PBR + renders<br/>+ visor estudio blanco]
+    R2 -. olvido .-> X[tmpfs wipe + DEL + purga 2xTTL]
+    MO -. track paralelo .-> V3[v3 denso 20481/1024<br/>figure-v3.zip · días]
 ```
 
-### 3.2 Principio stateless
+Stateless: worker solo `/tmp` tmpfs; resultado `jobs/{id}/result.zip` 60 s; mensaje Queues retención 24 h pero TTL lógico 60 vía alarm; dev `Store` emulado en memoria. Tras la descarga el cliente es dueño; el servidor no recuerda nada (GDPR friendly).
 
-No hay Postgres ni S3 persistente.
-El worker escribe solo a `/tmp` en `tmpfs` (Docker local o Modal container).
-En prod el resultado vive en `R2` `job_id/result.zip` solo 60 segundos (lifecycle rule) y el mensaje en `Cloudflare Queues` con retención 24h (free) pero `TTL lógico 60s` vía Durable Object alarm + `R2 EXPIRE`.
-En dev se usa `Store` en memoria con `TTL 60s` (`MemoryQueue` local, `R2PointerQueue` para paridad prod) vía adapter.
-Sin `Redis` en código: `docker-compose.yml` no levanta `redis` desde ADR-005.
-Tras la descarga el cliente es dueño de los archivos.
-El servidor no recuerda nada.
-Esto simplifica infra, reduce coste y es GDPR friendly.
+Flujo de un job: `POST /v1/compare → 202 + job_id` → `WS /events` → Modal `MediaPipe → FLAME → FFHQ-UV → assemble` → `R2 result.zip` → `GET /result` StreamingResponse → `lifecycle 60 s` + `unlink /tmp`. En dev idéntico pero con `R2/Queue/DO` emulados + webhook al runner `:8001` + sidecar `:8081`. Si se cierra la pestaña, expira y se reintenta.
 
-### 3.3 Flujo de un job
+## 4. Stack real
 
-El cliente sube 2 imágenes vía `POST /v1/compare` en `Cloudflare Pages -> Worker`.
-El Worker valida, hace `R2 PutObject` con las 2 imágenes y encola solo `{job_id, r2_keys}` en `Cloudflare Queues` (Queues limita a 128KB por mensaje, no caben bytes). Retorna `202 + job_id` inmediato.
-El frontend se suscribe a `WS /v1/jobs/{id}/events` vía `Durable Objects`.
-Los workers en `Modal` consumen vía `HTTP Pull Consumer`, procesan `MediaPipe -> FLAME -> FreeUV` y retornan bytes a `R2` con `lifecycle 60s`.
-El bake GNM es identidad hasta Fase 2, por eso el zip vivo trae solo `uv_a.png, uv_b.png, heatmap.png`.
-El Worker hace `await R2 GetObject(job_id/result.zip)` y responde con `StreamingResponse` zip en memoria.
-`R2 lifecycle` hace `EXPIRE 60s` y el worker Modal hace `unlink` de `/tmp`.
-En dev local el flujo es idéntico pero `MemoryQueue` / `R2PointerQueue` en memoria sustituye a `Queues + R2` vía el mismo `core.queue` adapter (sin `Redis ARQ`; ver ADR-005).
-Si el usuario cierra la pestaña antes de descargar, el resultado expira y debe reintentar.
+| Capa | Qué hay (código) |
+|---|---|
+| Gateway | TS Worker único (`edge/worker.ts` prod + `worker.dev.ts` dev + `contract.ts` fuente + `progress-do.ts`) |
+| Compute local | Python (`domain.py`, `pipeline_local.py`, `local_runner.py`, `gnm_assemble.py`, `gnm.py`, `flame_fit/deep3d/dpr/texgan`) |
+| GPU prod | `modal_app.py` (`/ml/*` + `fit/texture/mediapipe/v3_figure workers` + pull consumer) |
+| Frontend | Astro 7 static + `compare-client.ts` + `UvViewers` + `ThreeViewer/three-rig` + `three 0.160.1` + `jszip` |
+| Infra | `wrangler.toml` (prod) + `wrangler.dev.toml` (dev) + `docker-compose.yml` (4 servicios dev) + `modal` + `Pages` |
+| Calidad | `mypy --strict` + `ruff py310` + `pytest` (32 módulos) + `vitest` unit + pool runtime + Playwright + smokes + gates reales |
 
-## 4. Stack Tecnico
+Validación en bordes con `parse_* → Result`; queue con `R2 pointer` (`{job_id, r2_keys}`); CPU infallible (`UV_LEN`); ML vía `MlSidecarClient(BaseUrl)` + wire v2. Python nunca duplica el ciclo (vive en `edge/`).
 
-### 4.1 Backend híbrido Rust + Python ML
-
-Python gestionado con `pip` en `backend/` (`domain.py`, `store.py`, `gnm.py`, `pipeline_local.py`, `app.py` + `pytest/mypy/ruff` dev).
-Framework `FastAPI + asyncio` para Seam 1 (`400/404/409/500`, `TestClient`, `CompareResponse` / `JobResponse`).
-Queue con `Store` compartido en `backend/store.py` (`MemoryQueue` local/test con `stored_lens`, `R2PointerQueue` prod con `Some(R2Keys)`, `EnqueueCommand`, `Stage` enum, `progress` / `set_progress`).
-Validación en bordes con `parse_image_bytes`, `parse_job_id(trim)`, `parse_progress` + `zero`, `R2Key` / `R2Keys`, `TtlSecs` `1..=3600` default 60, estados `Queued/Processing/Done/Failed/Expired`, `Invariant` (500).
-CPU: `vultus-workers-cpu` infallible (`compute_heatmap(&CompleteUv, &CompleteUv) -> Heatmap`, `bake_bfm_to_gnm(&FlawUv) -> CompleteUv`, sin dep `image`, `UV_LEN = 786432`).
-ML GPU: sidecar Python en `backend/modal_app.py` con inferencia real (`MediaPipe Tasks Vision`, `DECA para FLAME`, `FreeUV` con `SD1.5 + CLIP`), N workers por modelo más `HTTP Pull Consumer` desde `Cloudflare Queues` con patrón `R2 pointer`, `gnm_bake_worker` deprecated (bake real en Fase 2) tras `POST /ml/landmarks|flame|freeuv`, consumido por `MlSidecarClient::new(BaseUrl)` tipado (`-> Landmarks 478 JSON`, `-> FlawUv`, `-> CompleteUv` vía `FlamePayload u32 BE`). Rust nunca importa `torch`.
-
-### 4.2 Frontend
-
-Astro static con islas mínimas y visor UV plano.
-El visor 3D con Three.js llega en Fase 2.
-Estilos CSS propios del proyecto.
-Comunicación `REST + WebSocket` contra el gateway edge en TypeScript.
-
-### 4.3 Infra
-
-**Prod elegida: Cloudflare + Modal.**
-
-- **Cloudflare Pages** para Astro frontend (static, free ilimitado).
-- **Cloudflare Workers** para API Gateway (`POST /v1/compare`, `WS` vía Durable Objects) - `100k req/día free`, `Paid $5/mes` para `>10ms CPU`.
-- **Cloudflare Queues** para `enqueue` (`10k ops/día free`, `24h retención free`) - reemplaza la queue local en prod vía adapter (`MemoryQueue` local vs `Queues+R2` prod).
-- **Cloudflare R2** para storage temporal `job_id/result.zip` con `lifecycle 60s` - `10GB-mes + 1M Class A + 10M Class B free`, egress free - reemplaza los bytes en memoria (`stored_lens`) en prod.
-- **Cloudflare Turnstile + WAF** para rate limiting y DDoS free.
-- **Modal** para workers GPU (`FreeUV SD1.5 12GB`, `FLAME`) - `T4 $0.59/h`, `Starter $30/mes free` (~9.300 compares/mes gratis), cold start 1-2s, `HTTP Pull Consumer` desde Queues, `tmpfs` en container.
-- **Docker Compose** solo para dev local: `api`, `ml-sidecar`, `frontend` con paridad de contratos (`MemoryQueue` local / `R2PointerQueue` paridad prod, sin `redis`).
-- `Dockerfile` multi-stage Rust para el binario `vultus-api`.
-- `Dockerfile.gpu` basado en `nvidia/cuda:12.6-runtime` para workers GPU locales.
-- `modal_app.py` para deploy GPU en Modal, `wrangler.toml` para deploy edge en Cloudflare.
-- Sin `postgres` ni `minio` persistente por stateless.
-- CI con `GitHub Actions + buildx + GHCR` + `wrangler deploy` + `modal deploy`.
-
-## 5. Estructura de Proyecto
+## 5. Estructura
 
 ```
 vultus/
-├── ROADMAP.md
-├── CONTEXT.md
-├── README.md
-├── wrangler.toml              # Cloudflare Workers + Queues + R2 + Durable Objects (prod)
-├── backend/
-│   ├── requirements-api.txt   # deps Python API local
-│   ├── modal_app.py           # Modal GPU workers: MediaPipe/FLAME/FreeUV reales + pull consumer de Queues + sidecar /ml/*
-│   ├── Dockerfile.api
-│   ├── Dockerfile.gpu
-│   ├── domain.py              # tipos probados + Result
-│   ├── store.py               # cola TTL60 + reloj inyectable
-│   ├── gnm.py                 # bake + heatmap + GLB + zip CPU
-│   ├── pipeline_local.py      # orquestador paralelo + timeouts
-│   ├── app.py                 # API FastAPI (Seam 1)
-│   └── tests/                 # 29 tests Python
-└── frontend/
-    ├── astro.config.mjs       # -> Cloudflare Pages en prod
-    ├── src/
-    └── e2e/
+├── ARCHITECTURE.md / CONTEXT.md / DESIGN.md / DEVELOPMENT.md / PIPELINE.md / ROADMAP.md
+├── wrangler.toml / wrangler.dev.toml / docker-compose.yml / pyproject.toml
+├── edge/            # contract + worker + worker.dev + progress-do + tests pool
+├── backend/         # domain + pipeline_local + local_runner + gnm_assemble + gnm +
+│                    # flame_fit/texture + deep3d/dpr/texgan + modal_app + v3_* + tests/
+├── frontend/        # Astro Pages + compare-client + UvViewers + ThreeViewer/three-rig + e2e/
+├── scripts/         # e2e-flame-real / e2e-v3-figure / modal-weights-sync + --check /
+│                    # smoke-fase0/1/2/prod/slo + extract_* --check + render_diag
+└── .github/workflows/ # ci.yml (fast + docker-cpu + docker-gpu) + cd.yml (tag → edge → modal → release)
 ```
 
 ## 6. Fases
 
-### Fase 0 - Infra base (1 semana)
+### Fase 0 — Infra base ✅ HECHA
 
-Objetivo: `Python + Docker + Async` corriendo end-to-end con job dummy stateless con paridad Cloudflare.
-Tasks: crear `requirements-api.txt` con `fastapi/pytest/mypy`, `Dockerfile.api` multi-stage, `docker-compose.yml` con `api/ml-sidecar/frontend` para dev local (sin `redis`; `MemoryQueue` en memoria), configurar `Store` (`MemoryQueue` local/test + `R2PointerQueue` prod) con `POST /v1/compare` (`202 {job_id, status queued}`) y `GET /v1/jobs/{id}` (`200 {job_id, status}`) y `WS /v1/jobs/{id}/events` vía Durable Objects, implementar `wrangler.toml` y healthchecks.
-Done: `pytest backend/tests -q` pasa (29 tests: dominio + cola + API + pipeline + CPU), `docker compose up` levanta todo en local, `wrangler dev` levanta edge, un job fake se encola (`MemoryQueue` local o `R2PointerQueue` en prod con `Some(R2Keys)`), es consumido, retorna longitudes vía `stored_lens` y expira a los 60s (`TtlSecs`) sin dejar archivos en `/tmp`.
+Gateway único TS + DO TTL 60 + R2/Queue emulados + runner webhook + sidecar + Pages. Done: `pytest` + pool suite + `docker compose up` + `wrangler dev` + job que se encola, se consume, retorna zip-8 y expira sin dejar `/tmp`.
 
-### Fase 1 - MVP UV canónico (3 semanas) - HECHA (PR #17, 2026-09-06)
+### Fase 1 — MVP UV canónico ✅ HECHA
 
-Objetivo: comparación en UV canónico sin GNM.
-Tasks: Worker MediaPipe 478 en CPU, Worker FLAME fitting con `DECA`, Worker FreeUV con `SD1.5 + CLIP`, orquestación `landmarks -> FLAME -> unwrap incompleto -> FreeUV -> UV completo 512x512`, API `POST /v1/compare` con 2 imágenes, frontend visor `UV_A | UV_B | heatmap diff` con slider de opacidad y normalización de pose.
-El bake GNM quedó como identidad y el zip vivo trae `uv_a.png, uv_b.png, heatmap.png`.
-Done: desplegado vivo en `https://vultus.pages.dev/` con gateway edge más `HTTP Pull Consumer` en Modal y patrón `R2 pointer`.
-Evals en verde: sidecar con 478 puntos finitos y UV de 786432 bytes reales, smoke prod ~16.7s, e2e prod 3/3, `pytest` mas `mypy` mas `ruff` verdes.
-Pendiente de Fase 1 original: validación de 10 pares con pose 0-30 grados, solo se congeló el par dorado frontal.
+MediaPipe 478 + fit DECA feed-forward + textura FFHQ-UV con piel total + assemble FLAME + visores UV + 3D estudio blanco. Done: vuelta completa < 20 s en warm, `e2e-flame-real` CHECK 0-7 en verde con pesos reales, smoke prod `health gateway:"worker" + ttl 60 + 202 + status`.
 
-### Fase 2 - GNM Render 3D (2 semanas)
+### Fase 2 — Render 3D fotorrealista ✅ HECHA (zip-8)
 
-Objetivo: modelo 3D fotorrealista con textura UV horneada.
-Tasks: integrar `google/GNM` `gnm/shape` como renderer, construir transferencia baricéntrica precomputada `BFM -> GNM`, Worker GNM bake `UV_BFM -> GNM`, visor Three.js 3D sincronizado con UV plano.
-Done: misma comparación UV pero con visor 3D con ojos dientes y lengua, control de expresión neutra, textura sin costuras.
+GLB personalizado por cara (FLAME 5023, ojos propios, `SkinPBR/EyePBR` sin emisivo, `NORMAL` suave, cuello abierto) + PBR + **renders frontales 512** (`render_a/b.png`, ADR-012) + visor Three.js sincronizado con sondas cromo/grafito + `RoomEnvironment`. Done: `smoke-fase2` asserts `glTF, TEXCOORD_0, SkinPBR, EyePBR, pbrMetallicRoughness, sin emisivo, 5023 verts, PNG embebido, mesh_a ≠ mesh_b`.
 
-### Fase 3 - Metricas forenses (1 semana)
+### Fase 3 — Métricas forenses 🔶 PARCIAL
 
-Objetivo: medición antropométrica sobre UV canónico.
-Tasks: definir subset de 68 landmarks forenses, calcular distancias normalizadas por distancia interpupilar en UV, generar PDF report con disclaimer de no identificación automática, incluir imágenes originales, UVs, heatmap y tabla de métricas.
-Done: `GET /v1/jobs/{id}/result` incluye `report.pdf` con métricas, valores verificados contra literales golden medidos manualmente.
+Hecho: subset 68 forense + distancias normalizadas por interpupilar en UV + determinismo ×2 + margen de identidad + SSIM. Falta: `report.pdf` con disclaimer + tabla (el zip-8 lleva UV/mesh/PBR/renders; el PDF sigue pendiente).
 
-### Fase 4 - Hardening (1 semana)
+### Fase 4 — Hardening 🔶 PARCIAL
 
-Objetivo: calidad y seguridad.
-Tasks: rate limiting, validación de tipos de imagen y tamaño, borrado seguro verificado, tests E2E con Playwright, CI lint y typecheck, manejo de errores con `Result`.
-Done: `docker compose -f docker-compose.prod.yml up` pasa E2E completo, ningún archivo persiste tras 65s, logs no contienen imágenes.
+Hecho: rate limiting vía Turnstile/WAF (config), validación 8 MiB + magic, borrado verificado (`tmpfs` + lifecycle + purga), Playwright E2E, CI lint+typecheck, errores `Result` + `{"detail"…}`. Falta: activar Turnstile/WAF en prod + observabilidad completa (`Analytics + OpenTelemetry + Sentry`) + guardrails de borrado a 24 h si se usa TTL extendido.
 
-### Fase 5 - Produccion (1.5 semanas) - PARCIAL (path vivo en PR #17, falta hardening y observabilidad)
+### Fase 5 — Producción 🔶 PARCIAL
 
-Objetivo: deploy reproducible y observable en Cloudflare + Modal.
-Hecho en PR #17: `wrangler deploy` para `Cloudflare Pages (Astro) + Workers API + Queues + R2 + Durable Objects`, `modal deploy` para `Workers GPU` (`MediaPipe/FLAME/FreeUV`) con `HTTP Pull Consumer` desde `Cloudflare Queues`, `R2 lifecycle` más `TTL lógico 60s` vía `alarm`, `tmpfs` para `/tmp`, smoke tests contra URL prod.
-Vivo hoy: frontend en `https://vultus.pages.dev/`, API en `api.vultus.esau.com.mx`, vuelta completa menor a 20s en warm.
-Pendiente: `wrangler deploy` y `modal deploy` en CI (`buildx + GHCR` es solo local), observabilidad `Cloudflare Analytics + OpenTelemetry + Grafana + Sentry` para queue lag y VRAM, guardrails de borrado a 24h si se usa TTL extendido, `Turnstile + WAF` activos, dominio final `https://vultus.com/compare`.
-Coste estimado **$5/mes (Cloudflare Workers Paid) + $0 GPU hasta 9.300 compares/mes (Modal $30 free)** y luego `$0.0032` por compare T4.
+Hecho: CD `production → preview`, tag `v*.*.* → edge prod + Pages + Modal + Release`; frontend `vultus.esau.com.mx`, API `api.vultus.esau.com.mx`; smokes edge + E2E. Falta: dominio final `vultus.com/compare`, observabilidad, cutover de pesos GNM (puente → cutover → backup → rm, nunca antes). Coste: **$5/mes Workers Paid + $0 GPU hasta ~9.300 compares (Modal $30 free)**, luego `$0.0032/compare` T4.
 
-## 7. Deployment - Opciones evaluadas
+### Track v3 — Figura densa 🔵 EN PARALELO (no bloquea forense)
 
-**Opción elegida: Cloudflare + Modal (híbrida serverless)**
+`v3_dense/pose/texture/light/bundle/worker + contract` + `GET /v3/jobs/{id}/figure` + worker GPU de minutos en cola separada. Objetivo paper: malla densa texturizada neutral + 3 re-iluminaciones con esferas en 3 sujetos FFHQ, lado a lado, reproyección, TV 1024, margen de identidad, determinismo ×2. Regla: forense congelada (tests de freeze); v3 solo se promueve con migración por seams y versión mayor.
 
-`Astro en Cloudflare Pages + Workers API + Queues + R2 + Durable Objects + Workers GPU en Modal via HTTP Pull Consumer`.
-Ventaja: edge global con 0 egress (R2), queue serverless, GPU pago por segundo, cold start Modal 1-2s vs 5-10s de Fly/RunPod, stateless con R2 lifecycle 60s.
-Coste: **$5/mes Workers Paid + $0 GPU hasta 9k compares (Modal $30 free/mes)**, luego `$0.0032/compare` T4. Pages/Queues/R2 free tiers cubren free tier completo.
+## 7. Deployment
 
-Opción B VPS soberano (alternativa GDPR): `Hetzner CCX con GPU + Dokploy o Coolify` todo en un host con `docker compose`.
-Ventaja: datos no salen de tu servidor, ideal para GDPR forense estricto.
-Coste: 40-90 usd mes fijo.
+**Elegida: Cloudflare + Modal (híbrida serverless).** Pages + Workers + Queues + R2 + DO + GPU por segundo. Fría 1-2 s vs 5-10 s Fly/RunPod; R2 egress free; stateless abarata todo (sin storage persistente).
 
-Opción C cloud nativo: `GCP Cloud Run + Cloud Run GPU L4 + Memorystore + Cloud SQL`.
-Ventaja: autoescala real y compliance EU completo.
-Coste: 80-200 usd mes.
+| Opción | Coste | Veredicto |
+|---|---|---|
+| Cloudflare + Modal | $5 + $0 hasta 9k compares, luego $0.0032 | ✅ elegida |
+| VPS soberano (Hetzner + Dokploy) | $40-90 fijo | alternativa GDPR estricta |
+| GCP Cloud Run GPU | $80-200 | compliance EU, cara |
+| Vercel + Fly + Upstash | $25-60 + egress | ❌ descartada |
 
-Opción previa descartada: `Vercel + Fly.io + Upstash Redis` - más cara ($25-60 fijo) y con egress, reemplazada por Cloudflare free tier.
+CD (`.github/workflows/cd.yml`): push `production` → edge `--env preview` (staging sin GPU); tag `v*.*.*` en punta de `production` → edge prod + Pages + humo edge + `modal deploy` + humo final + `gh release`. `main` = integración (solo CI). Sin staging Modal (un environment `main`).
 
-Default del roadmap: **Cloudflare + Modal** con B como alternativa GDPR.
-El principio stateless + R2 lifecycle hace que cualquier opción sea más barata al no pagar storage persistente.
+## 8. TDD — Seams y reglas vivas
 
-## 8. TDD - Seams y reglas
+- **Seam 1 HTTP:** `POST /v1/compare (202)` · `GET /v1/jobs/{id} (200/400/404)` · `GET …/result (zip-8/404/409)` · `POST …/progress` · `WS …/events` · `GET /v3/…/figure` · `GET /health (gateway:"worker", ttl 60, contract 3)`. Pool suite en runtime real + WS + backdoor dev `404`.
+- **Seam 2 Sink:** `report(Progress, Stage) / complete / fail`. `MemorySink` vs `HttpProgressSink`; `Stage` enum, `Progress 0..1`, `TtlSecs 1..3600`.
+- **Seam 3 Worker:** `&ImageBytes + &Landmarks(478) → FitResult(253+cámara, wire v2) → RenderedImage(UV_LEN) + EyeTexture`. Golden `UV_LEN=786432`, `GLB magic`, cero sentinel, eye 1092. No son seams: partición piel/ojo, `displaced_positions`, PBR internos.
+- **Anti-patrones:** no mockear colaboradores internos; no recomputar esperado; no horizontal slicing antes de API; mock solo en boundaries (queue, tiempo, tmpfs, sidecar); DI para `MlSidecarClient` y sink; sin `Vec<u8>/&str` sueltos; sin `unwrap` en request path.
+- **Slices:** `1 seam, 1 test RED, 1 implementación GREEN`. Ej. `test_frontal_face_produces_512_uv` con `parse(vec![…; UV_LEN])`; stateless verifica `tmpfs` vacío + `expired` visible; goldens literales (`Progress`, `JobId`, zip-8, sentinel, coefs).
 
-### 8.1 Seams acordados
+## 9. Riesgos
 
-Seam 1 HTTP API: `POST /v1/compare` (`202 {job_id, status queued}`), `GET /v1/jobs/{id}` (`200 {job_id, status}`, `400` uuid, `404` desconocido), `WS /v1/jobs/{id}/events`.
-`AppState(Arc<dyn Queue>)`, `AppError -> 400|404|500 {"detail":...}`, 11 tests `TestServer` + 2 config.
-Seam 2 Queue Contract: `enqueue(EnqueueCommand) -> EnqueuedJob`, `status`, `progress -> (Progress, Stage)`, `set_progress(Progress, Stage)`, `stored_lens`.
-`MemoryQueue` (`None`) vs `R2PointerQueue` (`Some jobs/{id}/a|b`) con `Store` compartido.
-`Stage::{Queued, Landmarks, Flame, Freeuv, Bake, Done}`, `Progress 0.0..=1.0`, `TtlSecs 1..=3600` default 60.
-Seam 3 Worker Contract: `&ImageBytes -> Landmarks (478 JSON) -> FlawUv (UV_LEN) -> CompleteUv (UV_LEN) -> Heatmap (UV_LEN)` vía `MlSidecarClient(BaseUrl)` + `FlamePayload u32 BE`.
-`compute_heatmap` / `bake_bfm_to_gnm` infallibles.
-No son seams: `fit_flame`, `bake` interno, `project_uv`.
-Se testean indirectamente vía Seam 3.
+| Riesgo | Estado / mitigación |
+|---|---|
+| Textura 12 GB VRAM, 8-15 s/cara | Modal serverless + `concurrency=1`; cache efímera opcional desactivada por defecto |
+| GNM sin encoder imagen→params | resuelto: FLAME extrae, GNM no renderiza (assemble propio); densa rechazada ADR-009 |
+| BFM ≠ GNM en topología | resuelto: transferencia IDW `flame_hifi_transfer.npz` + embed `flame68_embed.npz` |
+| Sin storage no hay re-descarga | frontend guarda zip en memoria + re-descarga local |
+| Pose 3/4 rompe afín frontal | por diseño (ADR-010): no se promete; v3 exige yaw ≤ 15° ruidoso |
+| `modal serve` roba prod | prohibido; deploy solo en tag; schedule 5 s documentado |
 
-### 8.2 Anti-patrones a evitar
+## 10. Próximos pasos
 
-No mockear colaboradores internos.
-No recomputar esperado con la misma pipeline.
-No hacer horizontal slicing de todos los modelos antes de tener API.
-Mock solo en boundaries externos: queue (`MemoryQueue` vs `R2PointerQueue`), tiempo (`TtlSecs`), filesystem efímero, sidecar (`BaseUrl`).
-Usar inyección de dependencias para `MlSidecarClient` y `Queue` (`AppState::new(impl Queue)`).
-No soltar `Vec<u8>` ni `&str` en seams: usa `EnqueueCommand`, `Stage`, `Landmarks`, `FlawUv` / `CompleteUv` / `Heatmap`, `R2Key`.
-Sin `unwrap` en request path: usa `Result` + `domain_to_status` con cuerpo `{"detail":...}`.
-
-### 8.3 Vertical slices
-
-Cada fase avanza como `1 seam, 1 test RED, 1 implementación mínima GREEN`.
-Ejemplo Fase 0: `test_create_job_returns_202` + `test_create_then_status_is_queued` + `test_r2_pointer_queue_serves_same_seam` en Seam 1 antes de worker real.
-Ejemplo Fase 1: `test_frontal_face_produces_512_uv` en Seam 3 con `CompleteUv::parse(vec![...; UV_LEN])` y `assert heat.as_bytes()[..2] == [6,10]`.
-Ejemplo stateless: `test_memory_queue_keeps_bytes_and_tracks_progress` verifica `stored_lens == (64,64)` y `progress (zero, Queued) -> (0.4, Flame)`; `test_unknown_job_is_not_found` verifica `NotFound`.
-Goldens literales a mano: `Progress`, `TtlSecs`, `R2Key`, heatmap `[6,10]`, bake texel0 `[10,176,7]`.
-
-## 9. Riesgos y mitigaciones
-
-FreeUV requiere 12GB VRAM y 8-15s por cara.
-Mitigación: serverless GPU con cache efímera opcional `hash(image) -> UV` si el cliente acepta retención de 60s.
-GNM no trae encoder `imagen -> params`.
-Mitigación: usar FLAME para extracción y GNM solo como renderer vía bake.
-FreeUV espera topología BFM no GNM.
-Mitigación: transferencia baricéntrica precomputada.
-Sin storage no hay re-descarga.
-Mitigación: frontend guarda zip en memoria y ofrece re-descarga local sin llamar al servidor.
-
-## 10. Proximos pasos
-
-Fase 0 y Fase 1 hechas, con deploy vivo parcial en PR #17.
-Siguiente: Fase 2 GNM con bake real `BFM -> GNM`, `mesh.glb` en el zip y visor 3D.
-Después: Fase 3 con métricas y `report.pdf`.
-Después: Fase 4 con hardening (`Turnstile + WAF`, rate limiting, borrado verificado).
-Cierre: resto de Fase 5 con observabilidad completa y dominio final.
+1. Cierre Fase 3: `report.pdf` en el zip o como derivado (sin romper zip-8: nombre nuevo + versión mayor o endpoint aparte).
+2. Cierre Fase 4: Turnstile/WAF on + `Analytics/OpenTelemetry/Sentry` + SLO `p95 < 20 s` en CI.
+3. Cierre Fase 5: dominio final + cutover GNM (puente → cutover → backup → rm) + retirar `diffusers` y `gnm_*` legacy.
+4. Track v3: figura densa en 3 sujetos FFHQ (criterio paper) sin tocar forense; cutover solo con migración por seams.
+5. Deuda docs: ninguna tras este commit — los 6 docs espejan el código (`contract.ts`, `domain.py`, `compose`, `wrangler*`, `three-rig.ts`, `compare-client.ts`).

@@ -39,7 +39,7 @@ test("compare upload 2 PNG returns queued job", async ({ page }) => {
   });
 });
 
-test("intake images stay visible after Compare and are replaceable (#124)", async ({
+test("intake images stay visible after Compare and are replaceable", async ({
   page,
 }) => {
   const png = Buffer.concat([

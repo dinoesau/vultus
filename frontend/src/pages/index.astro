@@ -583,7 +583,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       type LoadDemoError = DemoPresentableError;
 
       // Limpia solo el canal de error demo sin tocar previews ni stage:
-      // el fallo demo no debe romper el estado previo de comparación (#123).
+      // el fallo demo no debe romper el estado previo de comparación.
       function clearDemoError(): void {
         if (foundError instanceof HTMLElement) {
           foundError.hidden = true;
@@ -613,7 +613,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       // Orden atómico: TODOS los nodos se verifican antes de mutar nada, así
       // un fallo no deja mitad demo / mitad usuario (P0-2).
       // Ante Err se pinta "Could not load demo. Try again" en #result-error
-      // sin tocar stage-text ni previews previos (#123 C3). Nunca lanza:
+      // sin tocar stage-text ni previews previos. Nunca lanza:
       // cada paso es total, por eso el `void` del listener es seguro.
       // Sin AbortController: el guard hace imposible la invocación
       // concurrente, el abort era código muerto con rama que trababa el botón.
@@ -745,7 +745,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       }
 
       // Limpia solo salidas del job (zip + UV + 3D + errores). El intake
-      // (preview-a/b) persiste tras Compare por #124: el usuario ve lo
+      // (preview-a/b) persiste tras Compare: el usuario ve lo
       // enviado mientras el resultado carga y puede reemplazar sin reload.
       function clearResultOutputs(): void {
         if (zipUrl) URL.revokeObjectURL(zipUrl);

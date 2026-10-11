@@ -196,8 +196,8 @@ describe("demo-loader: blobsToFiles listos para FormData", () => {  it("JPEG da 
   });
 });
 
-describe("demo-loader: demoLoadErrorMessage literal único (#123)", () => {
-  it("el literal es el exigible por el issue", () => {
+describe("demo-loader: demoLoadErrorMessage literal único", () => {
+  it("el literal es el mensaje visible exigible", () => {
     expect(DEMO_LOAD_ERROR_MESSAGE).toBe("Could not load demo. Try again");
   });
 

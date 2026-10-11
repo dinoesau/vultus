@@ -193,7 +193,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       #uvi.uvi--job .uvi-scan { opacity: 1; animation: uvi-scan 0.6s steps(1, end) infinite; }
       #uvi.uvi--job .uvi-body { animation-duration: 0.25s; }
       #uvi.uvi--job .uvi-frame-a, #uvi.uvi--job .uvi-frame-b { animation-duration: 0.25s; }
-      #uvi-text { margin: 4px 0 0; font-size: 12px; color: var(--muted); min-height: 1em; }
+      #uvi-text { margin: 4px 0 0; font-family: "JetBrains Mono", monospace; font-size: 13px; color: var(--muted); min-height: 1em; }
       #uvi-text:empty { display: none; }
       @keyframes uvi-march { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
       @keyframes uvi-led { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.35; } }
@@ -405,7 +405,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
                     <rect class="uvi-scan" x="7" y="8" width="2" height="1" fill="#cc785c" />
                   </g>
                 </svg>
-                <p id="uvi-text"></p>
+                <p id="uvi-text" role="status" aria-live="polite"></p>
               </div>
               <p class="micro" id="demo-credit">Fotos demo: Pete Souza · A dominio público · B CC-BY 3.0</p>
             </form>
@@ -555,6 +555,11 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       } from "../components/demo-loader.ts";
       import type { DemoDomError, DemoPresentableError } from "../components/demo-loader.ts";
       import { hideUvi, parseUviElement, showUvi } from "../components/uvi.ts";
+      import {
+        startPhraseRotation,
+        stopPhraseRotation,
+      } from "../components/uvi-phrases.ts";
+      import type { PhraseHandle } from "../components/uvi-phrases.ts";
 
       const api = document.body.dataset.apiUrl ?? "http://localhost:8000";
       const foundForm = document.getElementById("compare");
@@ -785,14 +790,53 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
       // Uvi (156): helpers totales sin literales. parseUviElement clasifica
       // el Err; ante nodo ausente no se rompe stage-text (canal intacto).
+      // Frases (157): el handle vive aquí, atado a `gen`. uviShow arranca la
+      // rotación solo si no hay una viva de la misma gen (así loadDemo no
+      // resetea las frases de un job en curso); ante gen nueva el timer
+      // viejo se detiene antes de arrancar (sin fugas). uviHide detiene y
+      // limpia el texto: todo terminal (done/failed/demo-fail) pasa por aquí.
+      // stopLive NO toca frases: Uvi sigue visible durante la descarga del
+      // zip y debe seguir rotando en el HQ largo. Sin animación extra en el
+      // texto (reduced-motion: las frases son texto, siguen rotando).
+      let phraseHandle: PhraseHandle | null = null;
+      let phraseGen = 0;
+
+      function stopUviPhrases(): void {
+        if (phraseHandle) {
+          stopPhraseRotation(phraseHandle);
+          phraseHandle = null;
+        }
+        const text = document.getElementById("uvi-text");
+        if (text instanceof HTMLElement) text.textContent = "";
+      }
+
+      function startUviPhrases(myGen: number): void {
+        const text = document.getElementById("uvi-text");
+        if (!(text instanceof HTMLElement)) return;
+        if (phraseHandle && phraseGen !== myGen) {
+          stopPhraseRotation(phraseHandle);
+          phraseHandle = null;
+        }
+        if (phraseHandle) return;
+        const started = startPhraseRotation((phrase) => {
+          if (myGen === gen) text.textContent = phrase;
+        });
+        if (started.ok) {
+          phraseHandle = started.value;
+          phraseGen = myGen;
+        }
+      }
+
       function uviShow(mode: "demo" | "job"): void {
         const parsed = parseUviElement(document);
         if (parsed.ok) showUvi(parsed.value, mode);
+        startUviPhrases(gen);
       }
 
       function uviHide(): void {
         const parsed = parseUviElement(document);
         if (parsed.ok) hideUvi(parsed.value);
+        stopUviPhrases();
       }
 
       // Job vivo = gen emitida y sin settle. loadDemo lo usa para no pisar

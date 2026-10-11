@@ -170,13 +170,17 @@ describe("uvi: AC3 reduced-motion estatico + AC4 cero imagen", () => {
     expect(src.includes("margin") && src.includes("auto")).toBe(true);
   });
 
-  it("contenedor vacio para frases (siguiente worker) sin logica de rotacion", () => {
+  it("contenedor de frases cableado a rotacion (Story-157: live region unica)", () => {
     const src = readIndex();
     expect(src.includes('id="uvi-text"')).toBe(true);
-    expect(src.includes("uvi-phrase")).toBe(false);
-    // uvi-text solo en CSS (#uvi-text x2) + el <p> vacio: ningun JS lo
-    // referencia, asi que no hay timer ni rotacion cableada.
-    expect(src.split("uvi-text").length - 1).toBe(3);
-    expect(src.includes('getElementById("uvi-text")')).toBe(false);
+    // El <p> es la live region: un solo nodo aria-live en el bloque Uvi.
+    const pAt = src.indexOf('id="uvi-text"');
+    const tag = src.slice(pAt - 160, pAt + 60);
+    expect(tag.includes('role="status"')).toBe(true);
+    expect(tag.includes('aria-live="polite"')).toBe(true);
+    // El JS lo referencia via getElementById (render + clear en uviHide).
+    expect(src.includes('getElementById("uvi-text")')).toBe(true);
+    // La rotacion vive en el seam uvi-phrases.ts (start/stop), no inline.
+    expect(src.includes("uvi-phrases.ts")).toBe(true);
   });
 });

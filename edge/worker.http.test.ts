@@ -744,3 +744,176 @@ describe("sweeper cron borra result.zip en expired o purga", () => {
     expect(resultZipKey(parsed.value)).toBe("jobs/11111111-1111-4111-8111-111111111111/result.zip");
   });
 });
+
+describe("paridad dev anti-basura deja R2 vacio", () => {
+  const ZIP = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]);
+
+  function devBucket() {
+    const store = new Map<string, Uint8Array>();
+    return {
+      store,
+      put: async (key: string, value: Uint8Array) => {
+        store.set(key, value);
+      },
+      get: async (key: string) => {
+        const v = store.get(key);
+        if (v === undefined) return null;
+        return { body: v } as never;
+      },
+      delete: async (key: string) => {
+        store.delete(key);
+      },
+      list: async (opts?: { prefix?: string }) => {
+        const prefix = opts?.prefix ?? "";
+        const keys = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
+        return { objects: keys.map((key) => ({ key })), truncated: false } as never;
+      },
+    } as unknown as R2Bucket & { store: Map<string, Uint8Array> };
+  }
+
+  function devNs(
+    statusByJob: Record<string, string>,
+    opts?: { missing?: Set<string> },
+  ) {
+    return {
+      idFromName: (name: string) => ({ toString: () => name }) as unknown as DurableObjectId,
+      get: (id: DurableObjectId) =>
+        ({
+          fetch: async (input: RequestInfo | URL) => {
+            const job = id.toString();
+            if (opts?.missing?.has(job)) {
+              return new Response(JSON.stringify({ detail: "not found" }), { status: 404 });
+            }
+            const raw = typeof input === "string" ? input : (input as Request).url;
+            if (raw.includes("/status")) {
+              return Response.json({ job_id: job, status: statusByJob[job] ?? "done" });
+            }
+            return Response.json({ detail: "not found" }, { status: 404 });
+          },
+        }) as unknown as DurableObjectStub,
+    } as unknown as DurableObjectNamespace;
+  }
+
+  function devEnv(bucket: R2Bucket, ns: DurableObjectNamespace) {
+    return {
+      VULTUS_BUCKET: bucket,
+      VULTUS_PROGRESS: ns,
+      ALLOW_DEV_ROUTES: "1",
+    } as never;
+  }
+
+  it("PUT dev borra a|b y conserva zip con log delete_inputs_ms", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const job = crypto.randomUUID();
+      const bucket = devBucket();
+      bucket.store.set(`jobs/${job}/a`, PNG);
+      bucket.store.set(`jobs/${job}/b`, PNG);
+      const ns = devNs({ [job]: "done" });
+      const res = await devEntry.fetch(
+        new Request(`https://gateway/dev/results/${job}`, { method: "PUT", body: ZIP }),
+        devEnv(bucket, ns),
+      );
+      expect(res.status).toBe(200);
+      const parsed = parseJobId(job);
+      if (!parsed.ok) throw new Error("uuid fresco invalido");
+      expect(await bucket.get(resultZipKey(parsed.value))).not.toBe(null);
+      expect(await bucket.get(`jobs/${job}/a`)).toBe(null);
+      expect(await bucket.get(`jobs/${job}/b`)).toBe(null);
+      const logged = errSpy.mock.calls.some(
+        ([msg]) =>
+          typeof msg === "string" &&
+          (msg as string).includes(job) &&
+          (msg as string).includes("delete_inputs_ms"),
+      );
+      expect(logged).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("PUT dev con bundle invalido da 400 y conserva a|b", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const job = crypto.randomUUID();
+      const bucket = devBucket();
+      bucket.store.set(`jobs/${job}/a`, PNG);
+      bucket.store.set(`jobs/${job}/b`, PNG);
+      const ns = devNs({ [job]: "done" });
+      const res = await devEntry.fetch(
+        new Request(`https://gateway/dev/results/${job}`, {
+          method: "PUT",
+          body: new Uint8Array([0x00, 0x01]),
+        }),
+        devEnv(bucket, ns),
+      );
+      expect(res.status).toBe(400);
+      expect(await bucket.get(`jobs/${job}/a`)).not.toBe(null);
+      expect(await bucket.get(`jobs/${job}/b`)).not.toBe(null);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("GET blobs da 404 tras PUT-delete aunque DO siga done", async () => {
+    const job = crypto.randomUUID();
+    const bucket = devBucket();
+    bucket.store.set(`jobs/${job}/a`, PNG);
+    bucket.store.set(`jobs/${job}/b`, PNG);
+    const ns = devNs({ [job]: "done" });
+    const put = await devEntry.fetch(
+      new Request(`https://gateway/dev/results/${job}`, { method: "PUT", body: ZIP }),
+      devEnv(bucket, ns),
+    );
+    expect(put.status).toBe(200);
+    for (const slot of ["a", "b"]) {
+      const got = await devEntry.fetch(
+        new Request(`https://gateway/dev/blobs/${job}/${slot}`),
+        devEnv(bucket, ns),
+      );
+      expect(got.status).toBe(404);
+    }
+  });
+
+  it("GET blobs da 404 en expired aunque el objeto siga en R2", async () => {
+    const job = crypto.randomUUID();
+    const bucket = devBucket();
+    bucket.store.set(`jobs/${job}/a`, PNG);
+    const ns = devNs({ [job]: "expired" });
+    const got = await devEntry.fetch(
+      new Request(`https://gateway/dev/blobs/${job}/a`),
+      devEnv(bucket, ns),
+    );
+    expect(got.status).toBe(404);
+    expect(await bucket.get(`jobs/${job}/a`)).not.toBe(null);
+  });
+
+  it("GET blobs da 404 en purga aunque el objeto siga en R2", async () => {
+    const job = crypto.randomUUID();
+    const bucket = devBucket();
+    bucket.store.set(`jobs/${job}/a`, PNG);
+    const ns = devNs({}, { missing: new Set([job]) });
+    const got = await devEntry.fetch(
+      new Request(`https://gateway/dev/blobs/${job}/a`),
+      devEnv(bucket, ns),
+    );
+    expect(got.status).toBe(404);
+  });
+
+  it("GET blobs da 200 en done con objeto presente", async () => {
+    const job = crypto.randomUUID();
+    const bucket = devBucket();
+    bucket.store.set(`jobs/${job}/a`, PNG);
+    const ns = devNs({ [job]: "done" });
+    const got = await devEntry.fetch(
+      new Request(`https://gateway/dev/blobs/${job}/a`),
+      devEnv(bucket, ns),
+    );
+    expect(got.status).toBe(200);
+  });
+
+  it("expone scheduled dev para el cron de purga", () => {
+    expect(typeof (devEntry as unknown as { scheduled?: unknown }).scheduled).toBe("function");
+  });
+});

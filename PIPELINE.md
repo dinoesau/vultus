@@ -152,7 +152,7 @@ Tras `WS done`, el Worker hace `R2 GetObject(result.zip)` → `StreamingResponse
 
 ### 5.8 Limpieza stateless
 
-`unlink /tmp/{job}/*` siempre (éxito o fallo) + `cleanup_job_dir`. Local: DO TTL 60 + purga 2×TTL. Prod: borrado lógico 60s (DO + Python DEL) + lifecycle red 1 día (`scripts/r2-lifecycle-apply.sh --apply`, verificado por `scripts/smoke-r2-lifecycle.sh`). Logs con `job_id + duration_ms`, sin bytes. Verificación: tests exigen `tmpfs` vacío + DO expone `expired` visible antes de purgar.
+`unlink /tmp/{job}/*` siempre (éxito o fallo) + `cleanup_job_dir`. Local: DO TTL 60 + purga 2×TTL + PUT-delete a|b + sweep result.zip + asserts R2 vacio. Prod: borrado lógico 60s (DO + Python DEL) + lifecycle red 1 día (`scripts/r2-lifecycle-apply.sh --apply`, verificado por `scripts/smoke-r2-lifecycle.sh`). Logs con `job_id + duration_ms + delete_inputs_ms`, sin bytes. Verificación: tests exigen `tmpfs` vacío + R2 emulado sin `a|b` + DO expone `expired` visible antes de purgar.
 
 ## 6. Contratos de datos
 

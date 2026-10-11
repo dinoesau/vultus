@@ -2,7 +2,7 @@
 set -euo pipefail
 # Smoke Fase 1 + deploy vivo (zip-6 PNGs): API + frontend + pipeline done + zip canonico.
 # Patron: scripts/smoke-fase0.sh. Rapido por defecto (<70s por job); expiracion real
-# solo con SMOKE_TTL_TEST=1 (65s, afirma expired + result 404).
+# solo con SMOKE_TTL_TEST=1 (~150s: 1xTTL expired + 2xTTL purga+sweep, afirma inputs 404 + result 404).
 # Expiracion logica sin espera larga esta cubierta por tests ManualClock TTL1.
 # Prod vivo: API_URL=https://api.vultus.esau.com.mx FRONT_URL=https://vultus.esau.com.mx bash scripts/smoke-fase1.sh
 # Par dorado real fuera de VC: GOLDEN_A/GOLDEN_B con JPEG LFW (ver frontend/e2e/fixtures/README.md).
@@ -203,9 +203,24 @@ with urlopen(f"{api}/v1/jobs/{job_id}") as r:
     assert payload["status"] == "done", payload
 print("status aun done en ventana ok")
 
-# Test opt-in de expiracion real: espera TTL 60s + margen y afirma expired + 404.
+# Paridad dev anti-basura: tras done los inputs ya no listan (PUT-delete a|b).
+# Solo en dev (localhost): prod no expone /dev/blobs.
+is_dev = "localhost" in api or "127.0.0.1" in api
+if is_dev:
+    for slot in ("a", "b"):
+        try:
+            urlopen(f"{api}/dev/blobs/{job_id}/{slot}")
+            raise SystemExit(f"input {slot} debio dar 404 tras done")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404, e.code
+    print("inputs 404 tras done ok (dev R2 sin a|b)")
+else:
+    print("inputs dev omitidos en prod (sin /dev/blobs)")
+
+# Test opt-in de expiracion real: 1xTTL expired (409) + 2xTTL purga+sweep (404).
+# Tras purga se afirma status purgado + inputs 404 + result 404, no solo status.
 if os.environ.get("SMOKE_TTL_TEST") == "1":
-    print("SMOKE_TTL_TEST=1: esperando 65s para expiracion real...")
+    print("SMOKE_TTL_TEST=1: esperando 65s para expiracion 1xTTL...")
     time.sleep(65)
     with urlopen(f"{api}/v1/jobs/{job_id}") as r:
         payload = json.loads(r.read().decode())
@@ -213,10 +228,48 @@ if os.environ.get("SMOKE_TTL_TEST") == "1":
     print("expired tras TTL ok")
     try:
         urlopen(f"{api}/v1/jobs/{job_id}/result")
-        raise SystemExit("result debio dar 404 tras expired")
+        raise SystemExit("result debio dar 409 tras expired (ventana 1xTTL)")
+    except urllib.error.HTTPError as e:
+        assert e.code == 409, e.code
+        print("result 409 tras expired ok (aun sin purgar)")
+    print("esperando purga 2xTTL + sweep (hasta 120s)...")
+    purged = False
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        try:
+            with urlopen(f"{api}/v1/jobs/{job_id}") as r:
+                payload = json.loads(r.read().decode())
+                if payload.get("status") not in ("expired", "done", "queued", "processing"):
+                    purged = True
+                    break
+        except urllib.error.HTTPError as e:
+            assert e.code == 404, e.code
+            purged = True
+            break
+        try:
+            urlopen(f"{api}/v1/jobs/{job_id}/result")
+        except urllib.error.HTTPError as e:
+            assert e.code in (404, 409), e.code
+            if e.code == 404:
+                purged = True
+                break
+        time.sleep(5)
+    assert purged, "job no llego a purga 2xTTL + sweep"
+    print("purga 2xTTL ok")
+    try:
+        urlopen(f"{api}/v1/jobs/{job_id}/result")
+        raise SystemExit("result debio dar 404 tras purga+sweep")
     except urllib.error.HTTPError as e:
         assert e.code == 404, e.code
-        print("result 404 tras expired ok")
+        print("result 404 tras purga+sweep ok")
+    if is_dev:
+        for slot in ("a", "b"):
+            try:
+                urlopen(f"{api}/dev/blobs/{job_id}/{slot}")
+                raise SystemExit(f"input {slot} debio dar 404 tras purga")
+            except urllib.error.HTTPError as e:
+                assert e.code == 404, e.code
+        print("inputs 404 tras purga ok (dev R2 vacio)")
 else:
     print("expiracion cubierta por tests ManualClock TTL1 (SMOKE_TTL_TEST=1 para real)")
 

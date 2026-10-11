@@ -119,6 +119,23 @@ def default_config() -> PipelineConfig:
     return PipelineConfig()
 
 
+@dataclass(frozen=True, slots=True)
+class HqPipelineConfig(PipelineConfig):
+    """Presupuesto HQ (via de minutos, sin TTL 60).
+
+    Solo la textura crece (TexGAN largo a 1024 nativa, ~3 min en T4);
+    landmarks y fit conservan el presupuesto forense. El dispatch en
+    `run_pair` elige `texture_hq` por tipo (`isinstance`), nunca por flag.
+    """
+
+    texture_timeout_secs: float = 900.0
+    total_timeout_secs: float = 3600.0
+
+
+def hq_config() -> HqPipelineConfig:
+    return HqPipelineConfig()
+
+
 # --- Contrato wire /ml/fit y /ml/texture (S8 lo espeja en modal_app) ---
 #
 # Fit request v2: VERSION u8 (VERSION_V2) + u32 BE len + landmarks_json + image.
@@ -250,8 +267,25 @@ class MlSidecarClient:
     def texture(
         self, job_id: JobId, image: ImageBytes, fit: FitResult, landmarks: Landmarks
     ) -> Ok[CompleteUv] | Err[DomainError]:
+        return self._texture_post("/ml/texture", job_id, image, fit, landmarks)
+
+    def texture_hq(
+        self, job_id: JobId, image: ImageBytes, fit: FitResult, landmarks: Landmarks
+    ) -> Ok[CompleteUv] | Err[DomainError]:
+        """Textura HQ (worker de minutos): mismo wire v2, otra ruta server.
+
+        El payload es identico al forense (`encode_texture_request`); el
+        servidor hornea con `bake_hq` (pinhole + parsing/DPR obligatorios +
+        TexGAN largo). Nunca cae al forense en silencio: 4xx/5xx viajan
+        como `MlFailed` igual que en `texture`.
+        """
+        return self._texture_post("/ml/texture-hq", job_id, image, fit, landmarks)
+
+    def _texture_post(
+        self, path: str, job_id: JobId, image: ImageBytes, fit: FitResult, landmarks: Landmarks
+    ) -> Ok[CompleteUv] | Err[DomainError]:
         payload = encode_texture_request(image, fit, landmarks)
-        result = self._post("/ml/texture", job_id, payload)
+        result = self._post(path, job_id, payload)
         if isinstance(result, Err):
             return result
         parsed = parse_complete_uv(result.value)
@@ -372,8 +406,11 @@ def run_pair(
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool_tx:
-            fut_tx_a = pool_tx.submit(ml.texture, job_id, image_a, fit_a, landmarks_a)
-            fut_tx_b = pool_tx.submit(ml.texture, job_id, image_b, fit_b, landmarks_b)
+            # Dispatch por tipo de config: HQ usa texture_hq (bake_hq server),
+            # forense usa texture. Sin flags ni getattr: el tipo lo decide.
+            texture_fn = ml.texture_hq if isinstance(config, HqPipelineConfig) else ml.texture
+            fut_tx_a = pool_tx.submit(texture_fn, job_id, image_a, fit_a, landmarks_a)
+            fut_tx_b = pool_tx.submit(texture_fn, job_id, image_b, fit_b, landmarks_b)
             try:
                 ra_tx = fut_tx_a.result(timeout=config.texture_timeout_secs + 30.0)
                 rb_tx = fut_tx_b.result(timeout=config.texture_timeout_secs + 30.0)

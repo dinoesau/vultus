@@ -219,3 +219,54 @@ def test_texgan_strict_load_real_checkpoint() -> None:
     assert uv_a.shape == (1, 3, 1024, 1024)
     assert bool(((uv_a >= 0.0) & (uv_a <= 1.0)).all())
     assert torch.equal(uv_a, uv_b)
+
+
+def test_hq_fit_steps_default_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.texgan import HQ_TEXGAN_STEPS, hq_fit_steps
+
+    monkeypatch.delenv("HQ_TEXGAN_STEPS", raising=False)
+    assert hq_fit_steps() == HQ_TEXGAN_STEPS == 300
+    monkeypatch.setenv("HQ_TEXGAN_STEPS", "50")
+    assert hq_fit_steps() == 50
+    monkeypatch.setenv("HQ_TEXGAN_STEPS", "0")
+    assert hq_fit_steps() == 1
+    monkeypatch.setenv("HQ_TEXGAN_STEPS", "9999")
+    assert hq_fit_steps() == 600
+    monkeypatch.setenv("HQ_TEXGAN_STEPS", "basura")
+    assert hq_fit_steps() == 300
+
+
+def test_forensic_fit_steps_default_intact(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.texgan import TEXGAN_FIT_STEPS, fit_steps
+
+    monkeypatch.delenv("TEXGAN_FIT_STEPS", raising=False)
+    assert fit_steps() == TEXGAN_FIT_STEPS == 25
+
+
+def test_neural_completion_1024_total_without_backend() -> None:
+    import numpy as np
+
+    from backend.texgan import neural_completion_1024
+
+    sampled = np.full((1024, 1024, 3), 150.0, dtype=np.float64)
+    valid = np.zeros((1024, 1024), dtype=bool)
+    valid[100:900, 100:900] = True
+    # steps < 1 es None sin tocar torch ni pesos.
+    assert neural_completion_1024(sampled, valid, 0) is None
+    assert neural_completion_1024(sampled, valid, -5) is None
+    # Sin validos es None (nunca divide entre cero en el fit).
+    assert neural_completion_1024(sampled, np.zeros((1024, 1024), dtype=bool), 3) is None
+    # Formas inconsistentes son None antes de tocar torch, nunca raise.
+    import numpy as _np
+
+    assert (
+        neural_completion_1024(
+            _np.zeros((10, 10, 3), dtype=_np.float64), _np.zeros((8, 8), dtype=bool), 3
+        )
+        is None
+    )
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        # Sin torch el backend falta: None loud via caller.
+        assert neural_completion_1024(sampled, valid, 3) is None

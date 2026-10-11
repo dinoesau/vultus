@@ -361,6 +361,44 @@ def _impl_texture(
     return _Ok2(result.value.as_bytes())
 
 
+def _impl_texture_hq(
+    image: "ImageBytes", fit: "FitResult", landmarks: "Landmarks", texgan_steps: "int | None" = None
+) -> "Result[bytes, DomainError]":
+    """Nucleo textura HQ (worker de minutos) sobre tipos probados -> UV_LEN bytes.
+
+    Mismo wire v2 que `_impl_texture` (el payload es identico); el horneado
+    usa `bake_hq`: pinhole cuando gana al afine, parsing/DPR obligatorios
+    (Err loud, jamas gray-world ni unwrap sin mascara) y completion TexGAN
+    larga a 1024 nativa sin relleno plano. `texgan_steps` solo existe para
+    tests (None = `hq_fit_steps`, default 300). Retorna Result, nunca lanza
+    por outcomes de dominio. JobId queda en shell (str).
+    """
+    try:
+        from backend.domain import Err as _Err3
+        from backend.domain import MlDecode as _MlDecode3
+        from backend.domain import MlFailed as _MlFailed3
+        from backend.domain import Ok as _Ok3
+        from backend.flame_texture import _real_texture_available as _flame_tex_real3
+        from backend.flame_texture import bake_hq
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _Err3  # type: ignore[no-redef]
+        from domain import MlDecode as _MlDecode3  # type: ignore[no-redef]
+        from domain import MlFailed as _MlFailed3  # type: ignore[no-redef]
+        from domain import Ok as _Ok3  # type: ignore[no-redef]
+        from flame_texture import (  # type: ignore[no-redef]
+            _real_texture_available as _flame_tex_real3,
+        )
+        from flame_texture import bake_hq  # type: ignore[no-redef]
+    if _use_real() and not _flame_tex_real3():
+        logger.warning("hq flame texture required but FFHQ-UV weights missing (FFHQ_UV_DIR vacio)")
+        return _Err3(_MlFailed3(detail=_MlDecode3(details="real flame texture required but ffhq-uv weights missing")))
+    result = bake_hq(image, fit, landmarks, texgan_steps=texgan_steps)
+    if isinstance(result, _Err3):
+        logger.warning("bake hq failed err=%s", result.error)
+        return result
+    return _Ok3(result.value.as_bytes())
+
+
 try:
     import modal
 
@@ -468,6 +506,10 @@ LANDMARKS_TIMEOUT_SECS = 5
 FIT_TIMEOUT_SECS = 10
 TEXTURE_TIMEOUT_SECS = 30
 TOTAL_TIMEOUT_SECS = 60
+# Via HQ (worker de minutos, sin TTL 60): solo la textura crece (TexGAN
+# largo a 1024 nativa); landmarks y fit conservan el presupuesto forense.
+HQ_TEXTURE_TIMEOUT_SECS = 900
+HQ_TOTAL_TIMEOUT_SECS = 3600
 # Visibilidad del mensaje en cola: cubre la cadena fria (~90-120s) para que
 # un job frio no se reentregue y se procese duplicado. Espejo del consumer
 # HTTP pull de la cola (visibility_timeout_ms 180000, batch 2, retries 2).
@@ -732,14 +774,15 @@ def _texture_branch_str() -> str:
         texgan = float(_tex_stats.get("texgan", 0.0))
         dpr = float(_tex_stats.get("dpr", 0.0))
         pose_tex = float(_tex_stats.get("pose_tex", 0.0))
+        persp = float(_tex_stats.get("persp", 0.0))
         conf = float(_tex_stats.get("conf_mean", 0.0))
         tv = float(_tex_stats.get("tv", 0.0))
         latent = float(_tex_stats.get("latent_ms", 0.0))
     except Exception:
-        return "parsing=0 texgan=0 dpr=0 pose_tex=0 conf=0.000 tv=0.000 latent_ms=0"
+        return "parsing=0 texgan=0 dpr=0 pose_tex=0 persp=0 conf=0.000 tv=0.000 latent_ms=0"
     return (
         f"parsing={parsing:.0f} texgan={texgan:.0f} dpr={dpr:.0f} pose_tex={pose_tex:.0f} "
-        f"conf={conf:.3f} tv={tv:.3f} latent_ms={latent:.0f}"
+        f"persp={persp:.0f} conf={conf:.3f} tv={tv:.3f} latent_ms={latent:.0f}"
     )
 
 
@@ -811,27 +854,31 @@ def fit_infer(
 
 
 def texture_infer(
-    job_id: str, image: "ImageBytes", fit: "FitResult", landmarks: "Landmarks"
+    job_id: str, image: "ImageBytes", fit: "FitResult", landmarks: "Landmarks", hq: bool = False
 ) -> "Result[bytes, DomainError]":
     """Nucleo textura GNM sobre tipos probados -> albedo UV_LEN.
 
     Borde: (image, fit, landmarks) ya probados via decode_texture_request
-    en el handler o via cadena probada en el worker. Retorna Result, nunca
-    lanza por outcomes de dominio. JobId queda en shell (str).
+    en el handler o via cadena probada en el worker. `hq=True` hornea con
+    `bake_hq` (via de minutos); default forense intacto. Retorna Result,
+    nunca lanza por outcomes de dominio. JobId queda en shell (str).
     """
     try:
         from backend.domain import Err as _ErrTI
     except ImportError:  # pragma: no cover - paridad ruta plana en imagen
         from domain import Err as _ErrTI  # type: ignore[no-redef]
     t0 = time.perf_counter()
-    result = _impl_texture(image, fit, landmarks)
+    impl = _impl_texture_hq if hq else _impl_texture
+    label = "texture-hq" if hq else "texture"
+    result = impl(image, fit, landmarks)
     dt = int((time.perf_counter() - t0) * 1000)
     branch = _texture_branch_str()
     if isinstance(result, _ErrTI):
-        logger.info("texture err job=%s duration_ms=%d %s", job_id, dt, branch)
+        logger.info("%s err job=%s duration_ms=%d %s", label, job_id, dt, branch)
         return result
     logger.info(
-        "texture ok job=%s out_len=%d duration_ms=%d %s",
+        "%s ok job=%s out_len=%d duration_ms=%d %s",
+        label,
         job_id,
         len(result.value),
         dt,
@@ -974,6 +1021,66 @@ if HAVE_MODAL:
     )(texture_worker)
 
 
+def texture_worker_hq(job_id: str, image: "ImageBytes", fit: "FitResult", landmarks: "Landmarks"):
+    """
+    Worker textura HQ - bake_hq sin gris (GPU, via de minutos).
+    Entrada: tipos probados (ImageBytes, FitResult, Landmarks).
+    Salida: albedo UV_LEN bytes con pinhole + parsing/DPR obligatorios +
+    sintesis TexGAN larga a 1024 nativa. 1 input por container (anti-OOM).
+    Sin fallback al forense: el fallo es ruidoso (ValueError 400 /
+    RuntimeError 500 via el caller).
+    """
+    try:
+        from backend.domain import Err as _ErrTH
+        from backend.domain import Ok as _OkTH
+        from backend.domain import domain_to_message as _msgTH
+        from backend.domain import domain_to_status as _statusTH
+    except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+        from domain import Err as _ErrTH  # type: ignore[no-redef]
+        from domain import Ok as _OkTH  # type: ignore[no-redef]
+        from domain import domain_to_message as _msgTH  # type: ignore[no-redef]
+        from domain import domain_to_status as _statusTH  # type: ignore[no-redef]
+    inferred = texture_infer(job_id, image, fit, landmarks, hq=True)
+    if isinstance(inferred, _ErrTH):
+        msg = _msgTH(inferred.error)
+        if _statusTH(inferred.error) == 400:
+            raise ValueError(msg)
+        raise RuntimeError(msg)
+    if not isinstance(inferred, _OkTH):
+        raise RuntimeError("texture hq infer failed")
+    return inferred.value
+
+
+if HAVE_MODAL:
+    texture_worker_hq = app.function(
+        image=image,
+        gpu="T4",
+        cpu=2,
+        memory=16384,
+        volumes={WEIGHTS_ROOT: weights},
+        secrets=[modal.Secret.from_name("vultus-cloudflare")],
+        max_containers=2,  # A/B en paralelo en 2 GPUs; 1 input por GPU (anti-OOM)
+        timeout=900,  # Via de minutos sin TTL 60: TexGAN largo a 1024 (~3 min).
+        min_containers=0,
+        # Mismo puente que texture_worker mas pasos largos explicitos.
+        env={
+            "GNM_ASSETS_DIR": GNM_ASSETS_DIR,
+            "VULTUS_REAL_ML": "1",
+            "FFHQ_UV_DIR": FFHQ_UV_DIR,
+            "DECA_DIR": DECA_DIR,
+            "FLAME_ASSETS_DIR": FLAME_ASSETS_DIR,
+            "TEXGAN_DIR": TEXGAN_DIR,
+            "DEEP3D_DIR": DEEP3D_DIR,
+            "TOPO_DIR": TOPO_DIR,
+            "PARSING_DIR": PARSING_DIR,
+            "DPR_DIR": DPR_DIR,
+            "HQ_TEXGAN_STEPS": "300",
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        },
+
+    )(texture_worker_hq)
+
+
 def v3_figure_worker(job_id: str, r2_key: "R2Key") -> bytes:
     """Worker v3 figura - cadena densa completa en GPU de minutos (sin TTL 60).
 
@@ -1104,6 +1211,20 @@ if HAVE_MODAL:
     )(mediapipe_worker)
 
 
+def _queue_visibility_timeout_secs() -> int:
+    """Visibilidad del pull por env (default 180s, 12-factor III).
+
+    Despliegues con HQ deben fijar `QUEUE_VISIBILITY_TIMEOUT_SECS=3600`:
+    un job HQ de minutos se reentregaria a los 180s y se procesaria
+    duplicado. Sin env, el forense 60s queda intacto.
+    """
+    try:
+        raw = int(_env("QUEUE_VISIBILITY_TIMEOUT_SECS") or str(QUEUE_VISIBILITY_TIMEOUT_SECS))
+    except ValueError:
+        return QUEUE_VISIBILITY_TIMEOUT_SECS
+    return max(60, raw)
+
+
 def _cf_pull_messages(batch_size: int = 1):
     """Pull de Cloudflare Queues via REST. Retorna lista de dicts con id/lease_id/body."""
     import httpx
@@ -1120,7 +1241,7 @@ def _cf_pull_messages(batch_size: int = 1):
         r = httpx.post(
             url,
             headers={"Authorization": f"Bearer {token_value}", "Content-Type": "application/json"},
-            json={"visibility_timeout_ms": QUEUE_VISIBILITY_TIMEOUT_SECS * 1000, "batch_size": batch_size},
+            json={"visibility_timeout_ms": _queue_visibility_timeout_secs() * 1000, "batch_size": batch_size},
             timeout=10.0,
         )
     except Exception as e:
@@ -1182,7 +1303,7 @@ def _parse_queue_body(msg: object) -> "Result[QueueJob, DomainError]":
     return _parse_envelope(msg)
 
 
-def _run_job_pipeline(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
+def _run_job_pipeline(job_id: str, r2_a: "R2Key", r2_b: "R2Key", hq: bool = False) -> None:
     """Pipeline produccion: fetch R2, cadenas A/B en paralelo, join, zip a R2, progreso vivo.
 
     Borde: r2_a/r2_b ya probados (R2Key); imagenes via _fetch_r2_bytes ->
@@ -1190,7 +1311,9 @@ def _run_job_pipeline(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
     uv via parse_complete_uv. Zip-8 via ZipBundle/build_result_zip sin heatmap
     (ADR-008) + renders frontales (ADR-012). PBR skin-duplicate via resolve_pbr_pngs (ambos modos duplican
     el albedo: placeholder honesto sin mapas reales; ojos en GLB 2
-    primitivas; TODO mapas reales futuros). JobId queda en shell (str).
+    primitivas; TODO mapas reales futuros). `hq=True` usa texture_worker_hq
+    (bake_hq, timeouts de minutos); default forense intacto. JobId queda en
+    shell (str).
     """
     import concurrent.futures
 
@@ -1239,7 +1362,7 @@ def _run_job_pipeline(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
 
     t0 = time.perf_counter()
     bucket = _r2_bucket()
-    logger.info("job start job=%s a=%s b=%s", job_id, r2_a.as_str(), r2_b.as_str())
+    logger.info("job start job=%s a=%s b=%s hq=%s", job_id, r2_a.as_str(), r2_b.as_str(), hq)
     if not _job_alive(job_id):
         logger.info("job ya terminal antes de empezar job=%s, se omite", job_id)
         _delete_r2_related(bucket, r2_a, r2_b, job_id)
@@ -1318,17 +1441,19 @@ def _run_job_pipeline(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
     _report_progress(job_id, PROGRESS_TEXTURE, "texture")
 
     if _is_modal_function(texture_worker):
+        tx_timeout = (HQ_TEXTURE_TIMEOUT_SECS if hq else TEXTURE_TIMEOUT_SECS) + 30
+        remote = texture_worker_hq.remote if (hq and _is_modal_function(texture_worker_hq)) else texture_worker.remote
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(texture_worker.remote, job_id, img_a, ra_fit.value, lm_a)
-            fut_b = ex.submit(texture_worker.remote, job_id, img_b, rb_fit.value, lm_b)
-            uv_raw_a = fut_a.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
-            uv_raw_b = fut_b.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
+            fut_a = ex.submit(remote, job_id, img_a, ra_fit.value, lm_a)
+            fut_b = ex.submit(remote, job_id, img_b, rb_fit.value, lm_b)
+            uv_raw_a = fut_a.result(timeout=tx_timeout)
+            uv_raw_b = fut_b.result(timeout=tx_timeout)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            fut_a = ex.submit(texture_infer, job_id, img_a, ra_fit.value, lm_a)
-            fut_b = ex.submit(texture_infer, job_id, img_b, rb_fit.value, lm_b)
-            tex_res_a = fut_a.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
-            tex_res_b = fut_b.result(timeout=TEXTURE_TIMEOUT_SECS + 30)
+            fut_a = ex.submit(texture_infer, job_id, img_a, ra_fit.value, lm_a, hq)
+            fut_b = ex.submit(texture_infer, job_id, img_b, rb_fit.value, lm_b, hq)
+            tex_res_a = fut_a.result(timeout=(HQ_TEXTURE_TIMEOUT_SECS if hq else TEXTURE_TIMEOUT_SECS) + 30)
+            tex_res_b = fut_b.result(timeout=(HQ_TEXTURE_TIMEOUT_SECS if hq else TEXTURE_TIMEOUT_SECS) + 30)
         if isinstance(tex_res_a, _ErrR):
             _raise_for_domain(tex_res_a.error, "texture a failed")
         if isinstance(tex_res_b, _ErrR):
@@ -1459,7 +1584,7 @@ def _run_job_pipeline(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
     )
 
 
-def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
+def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key", hq: bool = False) -> None:
     """Orquestador produccion con olvido garantizado: exito o fallo, sin huerfanos.
 
     Exito: el pipeline borra a|b y conserva result.zip para GET /result.
@@ -1469,7 +1594,7 @@ def _run_job_from_r2(job_id: str, r2_a: "R2Key", r2_b: "R2Key") -> None:
     """
     bucket = _r2_bucket()
     try:
-        _run_job_pipeline(job_id, r2_a, r2_b)
+        _run_job_pipeline(job_id, r2_a, r2_b, hq)
     except Exception:
         _delete_r2_related(bucket, r2_a, r2_b, job_id)
         raise
@@ -1510,12 +1635,18 @@ def queue_pull_consumer():
         r2_a = job.r2_a
         r2_b = job.r2_b
         try:
+            from backend.domain import QUALITY_HQ as _QUALITY_HQ
+        except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+            _QUALITY_HQ = "hq"  # type: ignore[no-redef]
+        hq = job.quality.as_str() == _QUALITY_HQ
+        try:
             # Deadline total = TTL: la primera llamada paga cold+carga, el resto warm.
-            deadline = TOTAL_TIMEOUT_SECS
+            # HQ usa el presupuesto de minutos (sin TTL 60).
+            deadline = HQ_TOTAL_TIMEOUT_SECS if hq else TOTAL_TIMEOUT_SECS
             import concurrent.futures as _cf
 
             with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(_run_job_from_r2, job_id, r2_a, r2_b)
+                fut = ex.submit(_run_job_from_r2, job_id, r2_a, r2_b, hq)
                 fut.result(timeout=deadline)
         except _ExpiredAbort as e:
             logger.info("job abortado por expiracion job=%s (%s)", job_id if "job_id" in locals() else "unknown", e)
@@ -1670,6 +1801,37 @@ try:
             )
         image, fit, landmarks = decoded.value
         return await _run_impl(job_id, "texture", _impl_texture, image, fit, landmarks)
+
+    @sidecar.post("/ml/texture-hq")
+    async def http_texture_hq(request: Request):
+        """Textura HQ (mismo wire v2 que /ml/texture, horneado bake_hq).
+
+        Ruta delgada: delega a _impl_texture_hq (dobles o bake_hq real segun
+        pesos+env). El ML pesado corre en hilo para no bloquear el loop.
+        """
+        try:
+            from backend.domain import Err as _ErrTexHq
+            from backend.domain import domain_to_message as _msgTexHq
+            from backend.domain import domain_to_status as _statusTexHq
+            from backend.pipeline_local import decode_texture_request as _decode_tex_hq
+        except ImportError:  # pragma: no cover - paridad ruta plana en imagen
+            from domain import Err as _ErrTexHq  # type: ignore[no-redef]
+            from domain import domain_to_message as _msgTexHq  # type: ignore[no-redef]
+            from domain import (
+                domain_to_status as _statusTexHq,  # type: ignore[no-redef]
+            )
+            from pipeline_local import (  # type: ignore[no-redef]
+                decode_texture_request as _decode_tex_hq,
+            )
+        payload = await request.body()
+        job_id = request.headers.get("X-Job-Id", "unknown")
+        decoded = _decode_tex_hq(payload)
+        if isinstance(decoded, _ErrTexHq):
+            return JSONResponse(
+                status_code=_statusTexHq(decoded.error), content={"detail": _msgTexHq(decoded.error)}
+            )
+        image, fit, landmarks = decoded.value
+        return await _run_impl(job_id, "texture-hq", _impl_texture_hq, image, fit, landmarks)
 
 except ImportError:  # Entorno sin fastapi: solo dobles vía _impl_* (tests unitarios)
     sidecar = None  # type: ignore

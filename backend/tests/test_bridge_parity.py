@@ -11,6 +11,8 @@ import os
 import re
 
 from backend.deep3d import TRANSFER_NAME
+from backend.dpr import DPR_T7_NAME
+from backend.face_parsing import PARSING_PTH_NAME
 from backend.flame_fit import DECA_TAR_NAME, FLAME_PKL_NAMES
 from backend.flame_texture import (
     EYE_MAP_NAME,
@@ -39,6 +41,8 @@ EXPECTED_BRIDGE_FILES = frozenset(
         "flame/flame_template.bin",
         "flame/flame_hifi_transfer.npz",
         "flame/flame68_embed.npz",
+        "checkpoints/parsing_model/79999_iter.pth",
+        "checkpoints/dpr_model/trained_model_03.t7",
     }
 )
 EXPECTED_FLAME_PKL_ALTS = frozenset(
@@ -74,4 +78,6 @@ def test_bridge_parity_with_python_consts() -> None:
     assert f"flame/{FLAME_TEMPLATE_NAME}" in bridge
     assert f"flame/{TRANSFER_NAME}" in bridge
     assert f"flame/{FLAME68_NAME}" in bridge
+    assert f"checkpoints/parsing_model/{PARSING_PTH_NAME}" in bridge
+    assert f"checkpoints/dpr_model/{DPR_T7_NAME}" in bridge
     assert frozenset(alts) == frozenset(f"flame/{name}" for name in FLAME_PKL_NAMES)

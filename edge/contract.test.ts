@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   CONTRACT_VERSION,
   GNM_ISLANDS,
+  HQ_TTL_SECS,
   MAX_IMAGE_BYTES,
   PROGRESS_ASSEMBLE,
   PROGRESS_DONE,
   PROGRESS_FIT,
   PROGRESS_TEXTURE,
+  QUALITY_HQ,
+  QUALITY_STANDARD,
   RESULT_TTL_SECONDS,
   STAGES,
   STATUSES,
@@ -16,6 +19,7 @@ import {
   checkContractVersion,
   contractVersionToNumber,
   hasSupportedMagic,
+  isHqQuality,
   isJobStatus,
   isUuid,
   isValidProgress,
@@ -25,9 +29,11 @@ import {
   parseJobId,
   parseJobStatus,
   parseProgress,
+  parseQuality,
   parseStage,
   parseTtlSecs,
   progressToNumber,
+  qualityToString,
   ttlToNumber,
 } from "./contract";
 
@@ -187,5 +193,51 @@ describe("contrato edge como fuente de verdad", () => {
     } else {
       expect.unreachable("parseContractVersion(1) debe ser Ok");
     }
+  });
+
+  it("quality brand: ausente es standard, hq opt-in, ajeno es Err sin lanzar", () => {
+    expect(QUALITY_STANDARD).toBe("standard");
+    expect(QUALITY_HQ).toBe("hq");
+    expect(HQ_TTL_SECS).toBe(1800);
+    expect(parseTtlSecs(HQ_TTL_SECS).ok).toBe(true);
+    const missing = parseQuality(undefined);
+    expect(missing.ok).toBe(true);
+    if (missing.ok) {
+      expect(qualityToString(missing.value)).toBe("standard");
+      expect(isHqQuality(missing.value)).toBe(false);
+    }
+    expect(parseQuality(null).ok).toBe(true);
+    const hq = parseQuality("hq");
+    expect(hq.ok).toBe(true);
+    if (hq.ok) {
+      expect(qualityToString(hq.value)).toBe("hq");
+      expect(isHqQuality(hq.value)).toBe(true);
+    }
+    const upper = parseQuality(" HQ ");
+    expect(upper.ok).toBe(true);
+    if (upper.ok) expect(isHqQuality(upper.value)).toBe(true);
+    const std = parseQuality("standard");
+    expect(std.ok).toBe(true);
+    if (std.ok) expect(isHqQuality(std.value)).toBe(false);
+    expect(parseQuality("ultra")).toEqual({ ok: false, error: { kind: "InvalidQuality" } });
+    expect(parseQuality("")).toEqual({ ok: false, error: { kind: "InvalidQuality" } });
+    expect(parseQuality(42)).toEqual({ ok: false, error: { kind: "InvalidQuality" } });
+    expect(parseQuality(true)).toEqual({ ok: false, error: { kind: "InvalidQuality" } });
+    expect(() => parseQuality({})).not.toThrow();
+  });
+
+  it("zip-8 y version intactos con quality (mismo contrato, distinto presupuesto)", () => {
+    expect(contractVersionToNumber(CONTRACT_VERSION)).toBe(3);
+    expect(ZIP_NAMES.length).toBe(8);
+    expect([...ZIP_NAMES]).toEqual([
+      "uv_a.png",
+      "uv_b.png",
+      "mesh_a.glb",
+      "mesh_b.glb",
+      "pbr_a.png",
+      "pbr_b.png",
+      "render_a.png",
+      "render_b.png",
+    ]);
   });
 });

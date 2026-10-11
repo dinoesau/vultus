@@ -131,6 +131,7 @@ _LAST_TEXTURE_STATS = ThreadLocalStats(
         "dpr": 0.0,
         "dpr_sh0": 0.0,
         "pose_tex": 0.0,
+        "persp": 0.0,
         "conf_mean": 0.0,
         "tv": 0.0,
         "latent_ms": 0.0,
@@ -636,38 +637,59 @@ _RASTER_CACHE_KEY = "flame-5023-skin-raster-v2"
 _raster_cache: tuple[str, NDArray[np.int64], NDArray[np.float64]] | None = None
 
 
+def _dilate_mask(mask: NDArray[np.bool_], px: int) -> NDArray[np.bool_]:
+    """Dilatacion binaria por rolls (mismo idioma que `seam_band_512`).
+
+    Expande True `px` pasos en cruz. Para la boca HQ: los dientes nunca
+    deben tocar el seam (el feather los smearia a los labios). Total.
+    """
+    try:
+        out = np.asarray(mask, dtype=bool).copy()
+    except (ValueError, TypeError):
+        return np.asarray(mask, dtype=bool)
+    for _ in range(max(0, int(px))):
+        prev = out.copy()
+        for axis in (0, 1):
+            for shift in (1, -1):
+                out |= np.roll(prev, shift, axis=axis)
+    return np.asarray(out, dtype=bool)
+
+
 def _rasterize_skin_uv(
     uvs: list[tuple[float, float]],
     tris: list[tuple[int, int, int]],
     facing: list[bool] | None = None,
+    size: int = TEX_SIZE,
 ) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
-    """Mapeo texel 512 -> (tri verts piel, baricentricos) en UV 0-1.
+    """Mapeo texel size -> (tri verts piel, baricentricos) en UV 0-1.
 
-    Convencion V unica del contrato: pixel (col,row) <-> UV (u=col/511,
-    v=row/511), la misma que sirven loader y GLB (chin v≈1, brow v≈0;
+    Convencion V unica del contrato: pixel (col,row) <-> UV (u=col/(size-1),
+    v=row/(size-1)), la misma que sirven loader y GLB (chin v≈1, brow v≈0;
     GLTFLoader usa `flipY=false`). Solo tris de piel (verts <3931, UVs en 0-1);
     ojos viven en textura aparte. Last-wins en seams. Cacheado en proceso
-    (la clave incluye facing: geometria distinta por fit no reusa raster).
+    (la clave incluye size y facing: geometria distinta por fit no reusa raster).
     `facing` alinea con `tris`: tris de espaldas (normal z<=0) no muestrean
-    la foto, van a completion.
+    la foto, van a completion. `size` default 512: el forense no cambia ni un bit.
     """
     global _raster_cache
     digest = ""
     if facing is not None:
         digest = hashlib.sha256(np.asarray(facing, dtype=bool).tobytes()).hexdigest()[:16]
-    key = f"{_RASTER_CACHE_KEY}:{len(uvs)}:{len(tris)}:{digest}"
+    dim = int(size) if int(size) > 0 else TEX_SIZE
+    scale = float(dim - 1)
+    key = f"{_RASTER_CACHE_KEY}:{len(uvs)}:{len(tris)}:{digest}:{dim}"
     if _raster_cache is not None and _raster_cache[0] == key:
         return _raster_cache[1], _raster_cache[2]
     uva = np.asarray(uvs, dtype=np.float64)
-    v_idx = np.full((TEX_SIZE, TEX_SIZE, 3), -1, dtype=np.int64)
-    bw = np.zeros((TEX_SIZE, TEX_SIZE, 3), dtype=np.float64)
+    v_idx = np.full((dim, dim, 3), -1, dtype=np.int64)
+    bw = np.zeros((dim, dim, 3), dtype=np.float64)
     for ti, tri in enumerate(tris):
         a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
         if a >= 3931 or b >= 3931 or c >= 3931:
             continue
         if facing is not None and not facing[ti]:
             continue
-        pa, pb, pc = uva[a] * 511.0, uva[b] * 511.0, uva[c] * 511.0
+        pa, pb, pc = uva[a] * scale, uva[b] * scale, uva[c] * scale
         if bool((pa < 0.0).any() or (pa > 511.0).any()) and False:
             pass
         # Tris de costura: colapso 5150-vt a 1 UV por vertice los estira
@@ -679,14 +701,14 @@ def _rasterize_skin_uv(
                 np.linalg.norm(pb - pc),
                 np.linalg.norm(pa - pc),
             )
-            / 511.0
+            / scale
         )
         if du > _UV_STRETCH_MAX:
             continue
         min_u = max(0.0, float(min(pa[0], pb[0], pc[0])))
-        max_u = min(511.0, float(max(pa[0], pb[0], pc[0])))
+        max_u = min(scale, float(max(pa[0], pb[0], pc[0])))
         min_v = max(0.0, float(min(pa[1], pb[1], pc[1])))
-        max_v = min(511.0, float(max(pa[1], pb[1], pc[1])))
+        max_v = min(scale, float(max(pa[1], pb[1], pc[1])))
         x0, x1 = int(min_u), int(max_u)
         y0, y1 = int(min_v), int(max_v)
         if x1 < x0 or y1 < y0:
@@ -935,6 +957,258 @@ def _project_verts_to_pixels(
     px = (tx - float(tx.min())) / tw * lw + lx0
     py = ly1 - (ty - float(ty.min())) / th * lh
     return Ok(np.stack((px, py), axis=1))
+
+
+# Atlas HQ: resolucion nativa de sintesis (el decoder TexGAN es 1024).
+_HQ_SIZE = 1024
+
+# Boca HQ: pixeles de dilatacion del interior excluido (dientes fuera del seam).
+_HQ_MOUTH_DILATE_PX = 3
+
+
+def _perspective_vert_px(
+    displaced: list[tuple[float, float, float]],
+    landmarks: Landmarks,
+    width: int,
+    height: int,
+) -> Ok[tuple[NDArray[np.float64], bool]] | Err[DomainError]:
+    """Verts a pixeles HQ: pinhole si gana al afine, si no el afine.
+
+    Ajusta pinhole (focal `max(W,H)` + 6DOF, init debil-perspectiva
+    cerrado + `refine_pose` 8 pasos) sobre las 68 correspondencias y lo
+    compara en RMSE contra el afine ajustado sobre los mismos 68 puntos.
+    Gana el menor (tolerancia 2% al pinhole): HQ nunca alinea peor que
+    el forense por construccion. Sin fallback bbox: si el afine no
+    converge es Err loud. Retorna (vert_px Nx2, uso_pinhole). Total.
+    """
+    from backend.flame_fit import landmark68
+    from backend.v3_pose import project_points, refine_pose
+
+    try:
+        from backend.gnm_assemble import flame68_positions
+    except ImportError as exc:
+        return Err(MlFailed(detail=MlDecode(details=f"hq perspective requires embed: {exc}")))
+    dpa = np.asarray(displaced, dtype=np.float64)
+    if dpa.ndim != 2 or dpa.shape[1] != 3 or not bool(np.isfinite(dpa).all()):
+        return Err(MlFailed(detail=MlDecode(details="hq perspective invalid mesh")))
+    pts_result = landmark68(landmarks)
+    if isinstance(pts_result, Err):
+        return pts_result
+    pts68 = np.asarray(pts_result.value, dtype=np.float64)
+    placed = flame68_positions(list(displaced))
+    if isinstance(placed, Err):
+        return placed
+    dlib_rows, obj3d = placed.value
+    try:
+        rows = [int(i) for i in dlib_rows]
+        obj = np.asarray(obj3d, dtype=np.float64)
+        img = np.asarray(
+            [[float(pts68[i, 0]) * float(width), float(pts68[i, 1]) * float(height)] for i in rows],
+            dtype=np.float64,
+        )
+    except (IndexError, ValueError, TypeError) as exc:
+        return Err(MlFailed(detail=MlDecode(details=f"hq perspective correspondences invalid: {exc}")))
+    if obj.shape[0] != img.shape[0] or obj.shape[0] < 6:
+        return Err(MlFailed(detail=MlDecode(details="hq perspective too few correspondences")))
+    aff = _texture_pose(landmarks, width, height, list(displaced))
+    if aff is None:
+        return Err(MlFailed(detail=MlDecode(details="hq perspective requires fitted affine")))
+    amat = np.asarray(aff, dtype=np.float64).reshape(2, 4)
+    aff68 = (amat @ np.concatenate([obj, np.ones((obj.shape[0], 1))], axis=1).T).T
+    rmse_aff = float(np.sqrt(((aff68 - img) ** 2).mean()))
+    if not math.isfinite(rmse_aff):
+        return Err(MlFailed(detail=MlDecode(details="hq perspective affine rmse non-finite")))
+    focal = float(max(int(width), int(height)))
+    try:
+        c3 = obj.mean(axis=0)
+        c2 = img.mean(axis=0)
+        oc = obj - c3
+        ic = img - c2
+        den_x = float((oc[:, 0] ** 2).sum())
+        den_y = float((oc[:, 1] ** 2).sum())
+        if den_x < 1e-12 or den_y < 1e-12:
+            raise ValueError("degenerate spread")
+        sx = float((oc[:, 0] * ic[:, 0]).sum() / den_x)
+        sy = float((oc[:, 1] * ic[:, 1]).sum() / den_y)
+        spread = (sx + sy) / 2.0
+        if not math.isfinite(spread) or spread <= 0.0:
+            raise ValueError("non-positive scale")
+        depth = focal / spread
+        tx = float(c2[0] * depth / focal - c3[0])
+        ty = float(c2[1] * depth / focal - c3[1])
+        tz = float(depth - c3[2])
+        pose0 = np.asarray([tx, ty, tz, 0.0, 0.0, 0.0], dtype=np.float64)
+    except (ValueError, TypeError, IndexError) as exc:
+        return Err(MlFailed(detail=MlDecode(details=f"hq perspective init failed: {exc}")))
+    pose, errors = refine_pose(obj, img, focal, steps=8, init=pose0)
+    rmse_persp = float(errors[-1]) if errors else float("inf")
+    use_persp = bool(math.isfinite(rmse_persp) and rmse_persp <= rmse_aff * 1.02)
+    _LAST_TEXTURE_STATS["persp"] = 1.0 if use_persp else 0.0
+    if use_persp:
+        vert_px = project_points(dpa, focal, pose)
+        if vert_px.shape != (dpa.shape[0], 2) or not bool(np.isfinite(vert_px).all()):
+            return Err(MlFailed(detail=MlDecode(details="hq perspective projection invalid")))
+        return Ok((np.asarray(vert_px, dtype=np.float64), True))
+    proj = _project_pose(dpa, amat, width, height)
+    if proj is None or proj.shape != (dpa.shape[0], 2) or not bool(np.isfinite(proj).all()):
+        return Err(MlFailed(detail=MlDecode(details="hq affine projection invalid")))
+    return Ok((np.asarray(proj, dtype=np.float64), False))
+
+
+def bake_hq(
+    image: ImageBytes, fit: FitResult, landmarks: Landmarks, *, texgan_steps: int | None = None
+) -> Ok[RenderedImage] | Err[DomainError]:
+    """Seam HQ feed-forward: unwrap geometrico a 1024 + sintesis nativa + baja a 512.
+
+    Diferencias con el forense (congelado): proyeccion pinhole cuando gana
+    al afine (`_perspective_vert_px`, nunca peor por construccion), parsing
+    y DPR obligatorios (sin ellos es Err loud, jamas gray-world ni unwrap
+    sin mascara), completion TexGAN larga a 1024 nativa
+    (`neural_completion_1024`, default 300 pasos) sin relleno plano, seam
+    de banda (`smooth_seam_3x3`) en vez de feather, boca dilatada y salida
+    512 por contrato (`UV_LEN`). Cero sentinel por construccion. Total.
+    """
+    from backend.flame_fit import landmark_points
+
+    start = time.perf_counter()
+    try:
+        if not weights_present():
+            return Err(MlFailed(detail=MlDecode(details="hq texture requires ffhq-uv weights missing")))
+        mat_result = _require_unwrap_mat()
+        if isinstance(mat_result, Err):
+            return mat_result
+        try:
+            from backend.face_parsing import weights_present as _parsing_present
+        except ImportError as exc:
+            return Err(MlFailed(detail=MlDecode(details=f"hq texture requires parsing backend: {exc}")))
+        if not _parsing_present():
+            return Err(MlFailed(detail=MlDecode(details="hq texture requires parsing weights missing")))
+        try:
+            from backend.dpr import dpr_available as _dpr_available
+        except ImportError as exc:
+            return Err(MlFailed(detail=MlDecode(details=f"hq texture requires dpr backend: {exc}")))
+        if not _dpr_available():
+            return Err(MlFailed(detail=MlDecode(details="hq texture requires dpr weights missing")))
+        photo_result = _decode_photo(image)
+        if isinstance(photo_result, Err):
+            return photo_result
+        photo = photo_result.value
+        height, width = int(photo.shape[0]), int(photo.shape[1])
+        pts_result = landmark_points(landmarks)
+        if isinstance(pts_result, Err):
+            return pts_result
+        pts = pts_result.value
+        from backend.gnm_assemble import displaced_positions, load_flame_template
+
+        loaded = load_flame_template()
+        if isinstance(loaded, Err):
+            return loaded
+        _, template_uvs, template_tris = loaded.value
+        displaced = displaced_positions(fit)
+        if isinstance(displaced, Err):
+            return displaced
+        dpa = np.asarray(displaced.value, dtype=np.float64)
+        pose_result = _perspective_vert_px(list(displaced.value), landmarks, width, height)
+        if isinstance(pose_result, Err):
+            return pose_result
+        vert_px, _used_persp = pose_result.value
+        _LAST_TEXTURE_STATS["pose_tex"] = 1.0
+        vert_normals = _vertex_normals(displaced.value, template_tris)
+        facing = []
+        for ta, tb, tc in template_tris:
+            n = np.cross(dpa[tb] - dpa[ta], dpa[tc] - dpa[ta])
+            facing.append(bool(n[2] > 0.0))
+        v_idx, bw = _rasterize_skin_uv(list(template_uvs), list(template_tris), facing, _HQ_SIZE)
+        covered = v_idx[..., 0] >= 0
+        safe_idx = np.where(covered[..., None], v_idx, 0)
+        tex_px = (
+            bw[..., 0:1] * vert_px[safe_idx[..., 0]]
+            + bw[..., 1:2] * vert_px[safe_idx[..., 1]]
+            + bw[..., 2:3] * vert_px[safe_idx[..., 2]]
+        )
+        in_photo = (
+            covered
+            & (tex_px[..., 0] >= 0.0)
+            & (tex_px[..., 0] < float(width))
+            & (tex_px[..., 1] >= 0.0)
+            & (tex_px[..., 1] < float(height))
+        )
+        try:
+            from backend.face_parsing import face_skin_mask as _parse_mask
+        except ImportError as exc:
+            return Err(MlFailed(detail=MlDecode(details=f"hq texture requires parsing backend: {exc}")))
+        try:
+            photo_skin = np.asarray(_parse_mask(photo), dtype=bool)
+        except Exception as exc:  # noqa: BLE001 - parsing caido en HQ es Err loud, nunca sin mascara
+            return Err(MlFailed(detail=MlDecode(details=f"hq parsing failed: {exc}")))
+        if photo_skin.shape != (height, width):
+            return Err(MlFailed(detail=MlDecode(details="hq parsing mask shape mismatch")))
+        _LAST_TEXTURE_STATS["parsing"] = 1.0
+        mouth_photo = _dilate_mask(mouth_interior_mask(height, width, pts), _HQ_MOUTH_DILATE_PX)
+        sampled = _bilinear_sample(photo, tex_px)
+        tex_normals = _texel_normals(vert_normals, v_idx, bw)
+        try:
+            z_vals = np.asarray(dpa[:, 2], dtype=np.float64)
+            tex_depth = (
+                bw[..., 0] * z_vals[np.clip(safe_idx[..., 0], 0, z_vals.shape[0] - 1)]
+                + bw[..., 1] * z_vals[np.clip(safe_idx[..., 1], 0, z_vals.shape[0] - 1)]
+                + bw[..., 2] * z_vals[np.clip(safe_idx[..., 2], 0, z_vals.shape[0] - 1)]
+            )
+            tex_depth = np.where(covered, np.asarray(tex_depth, dtype=np.float64), 0.0)
+        except (IndexError, ValueError, TypeError):
+            tex_depth = np.zeros_like(covered, dtype=np.float64)
+        conf = compute_texel_confidence(
+            tex_normals, tex_depth, tex_px, covered, width, height, photo_skin, mouth_photo
+        )
+        conf_mean = float(np.mean(conf)) if conf.size else 0.0
+        if not math.isfinite(conf_mean):
+            conf_mean = 0.0
+        _LAST_TEXTURE_STATS["conf_mean"] = conf_mean
+        hard_valid = np.asarray(conf >= conf_valid_min(), dtype=bool) & in_photo
+        if not bool(hard_valid.any()):
+            return Err(MlFailed(detail=MlDecode(details="hq texture no valid texels")))
+        sampled = _dpr_normalize(photo, sampled, hard_valid, tex_normals)
+        if float(_LAST_TEXTURE_STATS.get("dpr", 0.0)) < 0.5:
+            return Err(MlFailed(detail=MlDecode(details="hq texture requires dpr light (no gray-world)")))
+        try:
+            from backend.texgan import hq_fit_steps, neural_completion_1024
+        except ImportError as exc:
+            return Err(MlFailed(detail=MlDecode(details=f"hq texture requires texgan backend: {exc}")))
+        steps = int(texgan_steps) if texgan_steps is not None else int(hq_fit_steps())
+        latent_t0 = time.perf_counter()
+        completion = neural_completion_1024(np.clip(sampled, 0.0, 255.0), hard_valid, steps)
+        _LAST_TEXTURE_STATS["latent_ms"] = float((time.perf_counter() - latent_t0) * 1000.0)
+        if completion is None:
+            return Err(MlFailed(detail=MlDecode(details="hq texture requires texgan synthesis (no flat fill)")))
+        _LAST_TEXTURE_STATS["texgan"] = 1.0
+        try:
+            from backend.v3_texture import smooth_seam_3x3 as _smooth_seam
+        except ImportError as exc:
+            return Err(MlFailed(detail=MlDecode(details=f"hq texture requires seam backend: {exc}")))
+        base = np.where(
+            np.asarray(hard_valid, dtype=bool)[..., None],
+            np.asarray(sampled, dtype=np.float64),
+            np.asarray(completion, dtype=np.float64),
+        )
+        try:
+            atlas1024 = _smooth_seam(base, np.asarray(hard_valid, dtype=bool))
+        except ValueError as exc:
+            return Err(MlFailed(detail=MlDecode(details=f"hq seam failed: {exc}")))
+        small = Image.fromarray(np.rint(np.clip(atlas1024, 0.0, 255.0)).astype(np.uint8)).resize(
+            (TEX_SIZE, TEX_SIZE), Image.Resampling.BILINEAR
+        )
+        raw = np.asarray(small, dtype=np.uint8).tobytes()
+        scrubbed = _scrub_sentinel(raw)
+        parsed = parse_rendered_image(scrubbed)
+        if isinstance(parsed, Err):
+            return Err(MlFailed(detail=MlDecode(details="hq texture produced invalid length")))
+        _LAST_TEXTURE_STATS["evidence"] = texture_evidence(scrubbed)
+        _LAST_TEXTURE_STATS["sentinel_count"] = float(count_sentinel(scrubbed))
+        _LAST_TEXTURE_STATS["tv"] = uv_total_variation(scrubbed)
+        _LAST_TEXTURE_STATS["duration_ms"] = (time.perf_counter() - start) * 1000.0
+        return Ok(parsed.value)
+    except Exception as exc:  # noqa: BLE001 - unwrap HQ caido es MlFailed, no crash
+        return Err(MlFailed(detail=MlDecode(details=f"hq texture failed: {exc}")))
 
 
 def run_unwrap_texture(

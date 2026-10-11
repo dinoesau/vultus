@@ -295,3 +295,44 @@ def test_fetch_404_maps_notfound_vs_599_maps_mlfaild(monkeypatch) -> None:  # ty
     assert isinstance(failed, Err)
     assert isinstance(failed.error, MlFailed)
     assert domain_to_status(failed.error) == 500
+
+
+def test_quality_missing_defaults_standard() -> None:
+    from backend.domain import QUALITY_STANDARD, parse_quality
+
+    assert isinstance(parse_quality(None), Ok)
+    parsed = parse_quality(None)
+    assert isinstance(parsed, Ok)
+    assert parsed.value.as_str() == QUALITY_STANDARD
+    env = _envelope()
+    job = parse_queue_envelope(env)
+    assert isinstance(job, Ok)
+    assert job.value.quality.as_str() == QUALITY_STANDARD
+
+
+def test_quality_hq_roundtrip_case_insensitive() -> None:
+    from backend.domain import QUALITY_HQ, parse_quality
+
+    for raw in ("hq", "HQ", " Hq "):
+        parsed = parse_quality(raw)
+        assert isinstance(parsed, Ok)
+        assert parsed.value.as_str() == QUALITY_HQ
+    env = _envelope()
+    env["quality"] = "hq"
+    job = parse_queue_envelope(env)
+    assert isinstance(job, Ok)
+    assert job.value.quality.as_str() == QUALITY_HQ
+    assert job.value.r2_a.as_str() == KEY_A
+
+
+def test_quality_invalid_is_err_loud() -> None:
+    from backend.domain import Invariant, parse_quality
+
+    for raw in ("ultra", "", 42, True):
+        parsed = parse_quality(raw)
+        assert isinstance(parsed, Err)
+        assert isinstance(parsed.error, Invariant)
+    env = _envelope()
+    env["quality"] = "ultra"
+    assert isinstance(parse_queue_envelope(env), Err)
+    assert domain_to_status(parse_queue_envelope(env).error) == 500

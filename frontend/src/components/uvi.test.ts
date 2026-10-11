@@ -137,19 +137,19 @@ describe("uvi: AC2 placement debajo de hero-card-actions + cableado", () => {
 });
 
 describe("uvi: AC3 reduced-motion estatico + AC4 cero imagen", () => {
-  it("CSS trae respirar 1-1.04, blink 4s, scanline job y media query que apaga todo", () => {
+  it("CSS trae marcha pixel, leds, poll y scanline job con media query que apaga todo", () => {
     const src = readIndex();
-    expect(src.includes("uvi-breathe")).toBe(true);
-    expect(src.includes("scale(1.04)")).toBe(true);
-    expect(src.includes("uvi-blink")).toBe(true);
-    expect(src.includes("4s")).toBe(true);
+    expect(src.includes("uvi-march")).toBe(true);
+    expect(src.includes("steps(")).toBe(true);
+    expect(src.includes("uvi-led")).toBe(true);
+    expect(src.includes("uvi-poll")).toBe(true);
     expect(src.includes(UVI_BUSY_CLASS)).toBe(true);
     expect(src.includes("uvi-scan")).toBe(true);
     expect(src.includes("prefers-reduced-motion")).toBe(true);
     expect(src.includes("animation: none")).toBe(true);
   });
 
-  it("Uvi es SVG/CSS inline 72px centrado, sin <img> ni url( ni http", () => {
+  it("Pixel Walker es SVG pixelado inline 72px centrado, sin <img> ni url( ni http", () => {
     const src = readIndex();
     const uviAt = src.indexOf(`id="${UVI_ID}"`);
     expect(uviAt).toBeGreaterThan(-1);
@@ -158,12 +158,13 @@ describe("uvi: AC3 reduced-motion estatico + AC4 cero imagen", () => {
     expect(tail.includes("<svg")).toBe(true);
     expect(tail.includes("</svg>")).toBe(true);
     expect(tail.includes("<img")).toBe(false);
-    // Unico url( permitido: referencia a fragmento clip-path local, sin red.
-    expect(tail.includes("url(#")).toBe(true);
-    expect(tail.includes("url(http")).toBe(false);
-    expect(tail.includes("url(/")).toBe(false);
-    expect(tail.includes('url("')).toBe(false);
+    // Cero url(): sin clip-path ni assets, todo rects inline.
+    expect(tail.includes("url(")).toBe(false);
     expect(tail.includes("http")).toBe(false);
+    // Grid pixel 16x16 con bordes duros.
+    expect(tail.includes('viewBox="0 0 16 16"')).toBe(true);
+    expect(src.includes("crispEdges")).toBe(true);
+    expect(src.includes("pixelated")).toBe(true);
     // 72px + centrado.
     expect(src.includes("72px")).toBe(true);
     expect(src.includes("margin") && src.includes("auto")).toBe(true);

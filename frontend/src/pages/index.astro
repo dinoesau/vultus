@@ -174,26 +174,38 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       .hero-card-actions { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
       .hero-card-actions .btn { flex: 1; justify-content: center; height: 44px; }
       .hero-card-actions label.micro { margin-top: 0; white-space: nowrap; }
-      /* Uvi (156): tamagotchi de espera, 72px centrado debajo de acciones.
-         Gota --surface-card con reticula UV, ojo-visor coral, antena con
-         dot que parpadea con el poll, dos patitas. Todo SVG/CSS inline. */
+      /* Pixel Walker (156): tamagotchi pixel-art 16x16, 72px centrado
+         debajo de acciones. Robot que marcha con LEDs que escanean,
+         antena con dot, torso con grid UV. Todo SVG/CSS inline, pasos
+         steps() retro. Sin <img>, sin url(), sin requests. */
       #uvi { width: 72px; margin: 14px auto 0; text-align: center; }
       #uvi[hidden] { display: none; }
-      .uvi-stage { width: 72px; height: 72px; margin: 0 auto; display: block; }
-      .uvi-body { transform-origin: 50% 62%; animation: uvi-breathe 2.4s ease-in-out infinite; }
-      .uvi-eye { transform-origin: 36px 44px; animation: uvi-blink 4s ease-in-out infinite; }
-      .uvi-antenna-dot { animation: uvi-poll 1s ease-in-out infinite; }
+      .uvi-stage {
+        width: 72px; height: 72px; margin: 0 auto; display: block;
+        shape-rendering: crispEdges; image-rendering: pixelated;
+      }
+      .uvi-body { animation: uvi-march 0.4s steps(2, end) infinite; }
+      .uvi-eye { animation: uvi-led 0.8s steps(1, end) infinite; }
+      .uvi-antenna-dot { animation: uvi-poll 0.8s steps(1, end) infinite; }
+      .uvi-frame-a { animation: uvi-frame-a 0.4s steps(1, end) infinite; }
+      .uvi-frame-b { animation: uvi-frame-b 0.4s steps(1, end) infinite; }
       .uvi-scan { opacity: 0; }
-      #uvi.uvi--job .uvi-scan { opacity: 1; animation: uvi-scan 1.2s linear infinite; }
+      #uvi.uvi--job .uvi-scan { opacity: 1; animation: uvi-scan 0.6s steps(1, end) infinite; }
+      #uvi.uvi--job .uvi-body { animation-duration: 0.25s; }
+      #uvi.uvi--job .uvi-frame-a, #uvi.uvi--job .uvi-frame-b { animation-duration: 0.25s; }
       #uvi-text { margin: 4px 0 0; font-size: 12px; color: var(--muted); min-height: 1em; }
       #uvi-text:empty { display: none; }
-      @keyframes uvi-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
-      @keyframes uvi-blink { 0%, 92%, 100% { transform: scaleY(1); } 94.5% { transform: scaleY(0.12); } }
-      @keyframes uvi-poll { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-      @keyframes uvi-scan { 0% { transform: translateY(-10px); opacity: 0; } 25% { opacity: 1; } 75% { opacity: 1; } 100% { transform: translateY(10px); opacity: 0; } }
+      @keyframes uvi-march { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+      @keyframes uvi-led { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.35; } }
+      @keyframes uvi-frame-a { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+      @keyframes uvi-frame-b { 0%, 49% { opacity: 0; } 50%, 100% { opacity: 1; } }
+      @keyframes uvi-poll { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.2; } }
+      @keyframes uvi-scan { 0%, 49% { opacity: 0.2; } 50%, 100% { opacity: 1; } }
       @media (prefers-reduced-motion: reduce) {
         #uvi .uvi-body, #uvi .uvi-eye, #uvi .uvi-antenna-dot, #uvi .uvi-scan,
-        #uvi.uvi--job .uvi-scan { animation: none !important; }
+        #uvi .uvi-frame-a, #uvi .uvi-frame-b,
+        #uvi.uvi--job .uvi-scan, #uvi.uvi--job .uvi-body,
+        #uvi.uvi--job .uvi-eye { animation: none !important; }
         #uvi.uvi--job .uvi-scan { opacity: 0 !important; }
       }
       /* strip */
@@ -360,34 +372,37 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
                 </label>
               </div>
               <div id="uvi" data-testid="uvi" hidden aria-hidden="true">
-                <svg class="uvi-stage" viewBox="0 0 72 72" role="img" aria-label="Uvi esperando">
-                  <defs>
-                    <clipPath id="uvi-clip">
-                      <path d="M36 10 C36 10 20 28 20 43 a16 14 0 0 0 32 0 C52 28 36 10 36 10 Z" />
-                    </clipPath>
-                  </defs>
-                  <line x1="36" y1="10" x2="36" y2="3" stroke="#3d3d3a" stroke-width="2" stroke-linecap="round" />
-                  <circle class="uvi-antenna-dot" cx="36" cy="3" r="2.4" fill="#cc785c" />
-                  <ellipse cx="28" cy="60" rx="6" ry="3.4" fill="#3d3d3a" opacity="0.85" />
-                  <ellipse cx="44" cy="60" rx="6" ry="3.4" fill="#3d3d3a" opacity="0.85" />
+                <svg class="uvi-stage" viewBox="0 0 16 16" role="img" aria-label="Pixel Walker esperando">
+                  <rect class="uvi-antenna-dot" x="7" y="0" width="2" height="1" fill="#cc785c" />
+                  <rect x="7" y="1" width="2" height="2" fill="#3d3d3a" />
                   <g class="uvi-body">
-                    <path d="M36 10 C36 10 20 28 20 43 a16 14 0 0 0 32 0 C52 28 36 10 36 10 Z" fill="#efe9de" stroke="#141413" stroke-opacity="0.16" stroke-width="1.5" />
-                    <g clip-path="url(#uvi-clip)" stroke="#141413" stroke-opacity="0.14" stroke-width="1">
-                      <line x1="20" y1="38" x2="52" y2="38" />
-                      <line x1="20" y1="45" x2="52" y2="45" />
-                      <line x1="20" y1="52" x2="52" y2="52" />
-                      <line x1="29" y1="30" x2="29" y2="58" />
-                      <line x1="36" y1="30" x2="36" y2="58" />
-                      <line x1="43" y1="30" x2="43" y2="58" />
-                    </g>
+                    <rect x="4" y="3" width="8" height="4" fill="#141413" />
+                    <rect x="5" y="4" width="6" height="2" fill="#efe9de" />
                     <g class="uvi-eye">
-                      <rect x="26" y="38" width="20" height="12" rx="6" fill="#cc785c" />
-                      <line x1="26" y1="44" x2="46" y2="44" stroke="#ffffff" stroke-opacity="0.7" stroke-width="1" />
-                      <line x1="36" y1="38" x2="36" y2="50" stroke="#ffffff" stroke-opacity="0.7" stroke-width="1" />
-                      <circle cx="36" cy="44" r="2.2" fill="#ffffff" />
-                      <circle cx="36" cy="44" r="1" fill="#cc785c" />
+                      <g class="uvi-frame-a">
+                        <rect x="6" y="4" width="2" height="2" fill="#cc785c" />
+                        <rect x="9" y="4" width="1" height="2" fill="#cc785c" opacity=".3" />
+                      </g>
+                      <g class="uvi-frame-b">
+                        <rect x="6" y="4" width="1" height="2" fill="#cc785c" opacity=".3" />
+                        <rect x="8" y="4" width="2" height="2" fill="#cc785c" />
+                      </g>
                     </g>
-                    <rect class="uvi-scan" x="22" y="44" width="28" height="2" rx="1" fill="#cc785c" opacity="0.9" />
+                    <g class="uvi-frame-a">
+                      <rect x="3" y="7" width="1" height="3" fill="#3d3d3a" />
+                      <rect x="12" y="7" width="1" height="3" fill="#3d3d3a" />
+                      <rect x="5" y="10" width="2" height="2" fill="#3d3d3a" />
+                      <rect x="9" y="10" width="2" height="1" fill="#3d3d3a" />
+                    </g>
+                    <g class="uvi-frame-b">
+                      <rect x="2" y="6" width="1" height="2" fill="#3d3d3a" />
+                      <rect x="13" y="6" width="1" height="2" fill="#3d3d3a" />
+                      <rect x="5" y="10" width="2" height="1" fill="#3d3d3a" />
+                      <rect x="9" y="10" width="2" height="2" fill="#3d3d3a" />
+                    </g>
+                    <rect x="5" y="7" width="6" height="3" fill="#141413" />
+                    <rect x="6" y="8" width="4" height="1" fill="#efe9de" />
+                    <rect class="uvi-scan" x="7" y="8" width="2" height="1" fill="#cc785c" />
                   </g>
                 </svg>
                 <p id="uvi-text"></p>

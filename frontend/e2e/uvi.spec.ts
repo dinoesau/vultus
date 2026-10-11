@@ -112,7 +112,7 @@ test("156 AC3 prefers-reduced-motion: Uvi estatico sin animacion", async ({
   expect(animations.dot).toBe("none");
 });
 
-test("156 AC3 sin reduced-motion: animaciones vivas (breathe/blink/poll)", async ({
+test("156 AC3 sin reduced-motion: animaciones vivas (march/led/poll)", async ({
   page,
 }) => {
   await page.goto(FRONT);
@@ -128,8 +128,8 @@ test("156 AC3 sin reduced-motion: animaciones vivas (breathe/blink/poll)", async
       dot: pick("#uvi .uvi-antenna-dot"),
     };
   });
-  expect(animations.body).toContain("uvi-breathe");
-  expect(animations.eye).toContain("uvi-blink");
+  expect(animations.body).toContain("uvi-march");
+  expect(animations.eye).toContain("uvi-led");
   expect(animations.dot).toContain("uvi-poll");
 });
 

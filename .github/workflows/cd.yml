@@ -67,15 +67,15 @@ jobs:
             echo "api_labels=$API_LABELS"
             LABELS="$LABELS,$API_LABELS"
             # Respaldo: solo el PR de produccion. El push no trae el numero,
-            # se extrae unicamente de "Merge pull request #NN". Nunca "#NN"
-            # generico porque pesca issues (Closes #122, (#124)) y rompe el
-            # run con "Could not resolve to a PullRequest" (run 38086408247).
+            # se extrae unicamente de la linea de merge del PR. Nunca patron
+            # de numero suelto porque tambien pesca keywords de cierre en
+            # mensajes de commit y rompe el run con "Could not resolve to a PullRequest".
             if ! echo ",$LABELS," | grep -qE ",Release: (Major|Minor|Patch),"; then
               PRS="$(jq -r '[(.commits // [])[].message, (.head_commit.message // "")] | join("\n")' "$GITHUB_EVENT_PATH" | grep -oE 'Merge pull request #[0-9]+' | grep -oE '[0-9]+' | sort -u || true)"
               echo "prs_fallback=$PRS"
               for N in $PRS; do
                 # -R explicito: este job no hace checkout y sin .git el gh
-                # muere con "not a git repository" (run 38068519786).
+                # muere con "not a git repository".
                 if ! L="$(gh pr view "$N" -R "$EVENT_REPO" --json labels --jq '[.labels[].name] | join(",")' 2>&1)"; then
                   echo "::warning::no se pudieron leer labels del PR #$N: $L (se ignora)"
                   continue

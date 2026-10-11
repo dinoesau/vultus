@@ -126,7 +126,7 @@ def _install_run_stubs(monkeypatch, fake: FakeR2, progress_calls: list[tuple[str
     monkeypatch.setattr(modal_app, "_r2_client", lambda: fake)
     monkeypatch.setattr(modal_app, "mediapipe_infer", lambda _jid, _img: _landmarks_bytes())
     monkeypatch.setattr(modal_app, "fit_infer", lambda _jid, _img, _lm: Ok(_fit_bytes()))
-    monkeypatch.setattr(modal_app, "texture_infer", lambda _jid, _img, _fit, _lm: Ok(_uv_bytes()))
+    monkeypatch.setattr(modal_app, "texture_infer", lambda _jid, _img, _fit, _lm, _hq=False: Ok(_uv_bytes()))
 
     def _fake_glb(_fit, _uv, eye_texture=None):  # type: ignore[no-untyped-def]
         _ = (_fit, _uv, eye_texture)
@@ -159,6 +159,23 @@ def test_delete_inputs_after_put_ok_gives_404(monkeypatch, caplog) -> None:
         fake.get_object("vultus-jobs", f"jobs/{job_id}/a")
     with pytest.raises(_NotFoundLike):
         fake.get_object("vultus-jobs", f"jobs/{job_id}/b")
+
+
+def test_hq_run_deletes_inputs_after_put_ok(monkeypatch) -> None:
+    """Given HQ con stubs, When termina _run_job_from_r2(..., hq=True), Then zip queda y a|b se borran."""
+    job_id = str(uuid.uuid4())
+    r2_a, r2_b = _proven_keys(job_id)
+    fake = FakeR2()
+    fake.store[f"jobs/{job_id}/a"] = _stub_image()
+    fake.store[f"jobs/{job_id}/b"] = _stub_image()
+    progress_calls: list[tuple[str, float, str]] = []
+    _install_run_stubs(monkeypatch, fake, progress_calls)
+
+    modal_app._run_job_from_r2(job_id, r2_a, r2_b, True)
+
+    assert f"jobs/{job_id}/result.zip" in fake.store
+    assert f"jobs/{job_id}/a" not in fake.store
+    assert f"jobs/{job_id}/b" not in fake.store
 
 
 def test_put_failure_deletes_everything_without_retry(monkeypatch) -> None:

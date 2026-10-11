@@ -294,6 +294,8 @@ def test_consumer_env_carries_full_bridge_fail_loud() -> None:
     assert env["VULTUS_REAL_ML"] == "1"
     for key in ("GNM_ASSETS_DIR", "FFHQ_UV_DIR", "DECA_DIR", "FLAME_ASSETS_DIR", "TEXGAN_DIR", "DEEP3D_DIR", "TOPO_DIR", "PARSING_DIR", "DPR_DIR"):
         assert env[key], key
+    # Jobs HQ de minutos: sin visibilidad de horas se reentregan a mitad del job.
+    assert env["QUEUE_VISIBILITY_TIMEOUT_SECS"] == "3600"
 
 
 def test_candidate_dirs_fall_back_to_weights_root(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -337,3 +339,68 @@ def test_branch_log_helpers_expose_effective_branches() -> None:
     assert line == "displacement=real" or line.startswith("displacement=legacy")
     if line != "displacement=legacy":
         assert line.startswith("displacement=legacy(cause=") and line.endswith(")")
+
+
+def test_impl_texture_hq_mapping(monkeypatch):
+    from backend import flame_texture
+
+    monkeypatch.setattr(modal_app, "REAL_MODE", "0")
+    image = _proven_image()
+    landmarks = _proven_landmarks()
+    fit = _proven_fit_result()
+    monkeypatch.setattr(
+        flame_texture,
+        "bake_hq",
+        lambda _i, _f, _l, **_kw: Err(MlFailed(detail=MlDecode(details="hq boom"))),
+    )
+    result = modal_app._impl_texture_hq(image, fit, landmarks)
+    assert isinstance(result, Err)
+    assert domain_to_status(result.error) == 500
+    assert domain_to_message(result.error) == "internal error"
+    assert "hq boom" not in domain_to_message(result.error)
+
+
+def test_impl_texture_hq_uses_bake_hq_not_bake_flame(monkeypatch):
+    from backend import flame_texture
+    from backend.domain import UV_LEN, parse_rendered_image
+
+    monkeypatch.setattr(modal_app, "REAL_MODE", "0")
+    golden = parse_rendered_image(bytes([7] * UV_LEN))
+    assert isinstance(golden, Ok)
+    seen: list[str] = []
+
+    def _hq(_i, _f, _l, **_kw):
+        seen.append("hq")
+        return Ok(golden.value)
+
+    def _forensic(_i, _f, _l):
+        raise AssertionError("bake_flame no debe correr en HQ")
+
+    monkeypatch.setattr(flame_texture, "bake_hq", _hq)
+    monkeypatch.setattr(flame_texture, "bake_flame", _forensic)
+    out = modal_app._impl_texture_hq(_proven_image(), _proven_fit_result(), _proven_landmarks())
+    assert isinstance(out, Ok)
+    assert seen == ["hq"]
+    assert len(out.value) == modal_app.UV_LEN
+
+
+def test_hq_timeouts_leave_forensic_intact():
+    assert modal_app.TEXTURE_TIMEOUT_SECS == 30
+    assert modal_app.TOTAL_TIMEOUT_SECS == 60
+    assert modal_app.HQ_TEXTURE_TIMEOUT_SECS == 900
+    assert modal_app.HQ_TOTAL_TIMEOUT_SECS == 3600
+
+
+def test_texture_branch_str_reports_persp():
+    assert "persp=" in modal_app._texture_branch_str()
+
+
+def test_queue_visibility_timeout_env(monkeypatch):
+    monkeypatch.delenv("QUEUE_VISIBILITY_TIMEOUT_SECS", raising=False)
+    assert modal_app._queue_visibility_timeout_secs() == 180
+    monkeypatch.setenv("QUEUE_VISIBILITY_TIMEOUT_SECS", "3600")
+    assert modal_app._queue_visibility_timeout_secs() == 3600
+    monkeypatch.setenv("QUEUE_VISIBILITY_TIMEOUT_SECS", "10")
+    assert modal_app._queue_visibility_timeout_secs() == 60
+    monkeypatch.setenv("QUEUE_VISIBILITY_TIMEOUT_SECS", "basura")
+    assert modal_app._queue_visibility_timeout_secs() == 180

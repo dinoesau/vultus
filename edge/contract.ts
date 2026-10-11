@@ -301,6 +301,44 @@ export function resultWindowSecs(ttl: TtlSecs): number {
   return ttlToNumber(ttl) * RESULT_WINDOW_FACTOR;
 }
 
+// Calidad del compare: misma forma zip-8 en ambas, distinto presupuesto.
+// standard = via forense 60s (default, campo ausente por compat).
+// hq = via de minutos (TexGAN largo a 1024 nativa + timeouts largos).
+// Single mint como TtlSecs/ContractVersion: la asercion vive solo aqui.
+declare const QualityBrand: unique symbol;
+export type Quality = Brand<string, "Quality"> & { readonly [QualityBrand]: "Quality" };
+export type QualityError = { readonly kind: "InvalidQuality" };
+
+export const QUALITY_STANDARD = "standard";
+export const QUALITY_HQ = "hq";
+
+// TTL del DO para jobs HQ (minutos, dentro de parseTtlSecs 1..3600).
+export const HQ_TTL_SECS = 1800;
+
+function mintQualityUnchecked(value: string): Quality {
+  return value as Quality;
+}
+
+export const QUALITY_DEFAULT: Quality = mintQualityUnchecked(QUALITY_STANDARD);
+
+/** Fuente unica: parseQuality total via Result; ausente = standard. Nunca lanza. */
+export function parseQuality(raw: unknown): Result<Quality, QualityError> {
+  if (raw === undefined || raw === null) return { ok: true, value: QUALITY_DEFAULT };
+  if (typeof raw !== "string") return { ok: false, error: { kind: "InvalidQuality" } };
+  const cleaned = raw.trim().toLowerCase();
+  if (cleaned === QUALITY_STANDARD) return { ok: true, value: mintQualityUnchecked(QUALITY_STANDARD) };
+  if (cleaned === QUALITY_HQ) return { ok: true, value: mintQualityUnchecked(QUALITY_HQ) };
+  return { ok: false, error: { kind: "InvalidQuality" } };
+}
+
+export function qualityToString(q: Quality): string {
+  return q;
+}
+
+export function isHqQuality(q: Quality): boolean {
+  return qualityToString(q) === QUALITY_HQ;
+}
+
 /** Fuente unica: parseProgress. isValid* delega aqui para no duplicar 0..1. */
 export function isValidProgress(n: unknown): n is number {
   return parseProgress(n).ok;

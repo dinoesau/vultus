@@ -16,6 +16,7 @@
  */
 import {
   CONTRACT_VERSION,
+  HQ_TTL_SECS,
   MAX_IMAGE_BYTES,
   RESULT_ZIP_NAME,
   SWEEP_JOBS_PREFIX,
@@ -24,11 +25,15 @@ import {
   V3_FIGURE_ZIP,
   contractVersionToNumber,
   hasSupportedMagic,
+  isHqQuality,
   jobIdToString,
   parseJobId,
   parseProgress,
+  parseQuality,
   parseStage,
+  parseTtlSecs,
   progressToNumber,
+  qualityToString,
   resolveTtlSecs,
   resultWindowSecs,
   resultZipKey,
@@ -37,6 +42,7 @@ import {
   type Progress,
   type Result,
   type StageName,
+  type TtlSecs,
 } from "./contract";
 import { assertNever } from "./assert";
 
@@ -74,6 +80,7 @@ type WorkerDomainError =
   | { readonly kind: "InvalidJobId" }
   | { readonly kind: "InvalidJson" }
   | { readonly kind: "InvalidProgress" }
+  | { readonly kind: "InvalidQuality" }
   | { readonly kind: "InvalidStage" }
   | { readonly kind: "NotFound" }
   | { readonly kind: "NotDone" };
@@ -91,6 +98,7 @@ function domainToStatus(error: WorkerDomainError): number {
     case "InvalidJobId":
     case "InvalidJson":
     case "InvalidProgress":
+    case "InvalidQuality":
     case "InvalidStage":
       return 400;
     case "NotFound":
@@ -118,6 +126,8 @@ function domainToMessage(error: WorkerDomainError): string {
       return "invalid json";
     case "InvalidProgress":
       return "invalid progress";
+    case "InvalidQuality":
+      return "invalid quality";
     case "InvalidStage":
       return "invalid stage";
     case "NotFound":
@@ -271,26 +281,56 @@ async function handleCompare(req: Request, env: Env): Promise<Response> {
   if (!ctype.includes("multipart/form-data")) {
     return domainResponse({ kind: "MissingMultipart" });
   }
-  const buffers = await loadCompareBuffers(await req.formData());
+  const form = await req.formData();
+  const buffers = await loadCompareBuffers(form);
   if (!buffers.ok) return domainResponse(buffers.error);
+  const quality = parseQuality(form.get("quality"));
+  if (!quality.ok) return domainResponse({ kind: "InvalidQuality" });
+  const hq = isHqQuality(quality.value);
   const jobId = newJobId();
   const key = jobIdToString(jobId);
   const r2a = `jobs/${key}/a`;
   const r2b = `jobs/${key}/b`;
-  const { ttl, invalid, raw } = resolveTtlSecs(env.R2_TTL_SECONDS);
+  // HQ usa TTL de minutos (el DO ya acepta ttl_secs por job); standard
+  // conserva R2_TTL_SECONDS con su log ante invalido.
+  let ttl: TtlSecs;
+  let invalid = false;
+  let raw: unknown = env.R2_TTL_SECONDS;
+  if (hq) {
+    const parsed = parseTtlSecs(HQ_TTL_SECS);
+    if (parsed.ok) {
+      ttl = parsed.value;
+      raw = HQ_TTL_SECS;
+    } else {
+      const fallback = resolveTtlSecs(env.R2_TTL_SECONDS);
+      ttl = fallback.ttl;
+      invalid = fallback.invalid;
+      raw = fallback.raw;
+    }
+  } else {
+    const resolved = resolveTtlSecs(env.R2_TTL_SECONDS);
+    ttl = resolved.ttl;
+    invalid = resolved.invalid;
+    raw = resolved.raw;
+  }
   if (invalid) {
     console.error(
       JSON.stringify({ msg: "invalid ttl", raw: String(raw), default: 60, route: "compare", job_id: key }),
     );
   }
   // Cola solo con IDs+punteros, nunca bytes (limite 128KB/mensaje).
+  // quality solo viaja en HQ: el envelope forense queda intacto.
   await env.VULTUS_BUCKET.put(r2a, buffers.value.aBuf);
   await env.VULTUS_BUCKET.put(r2b, buffers.value.bBuf);
   const stub = env.VULTUS_PROGRESS.get(env.VULTUS_PROGRESS.idFromName(key));
   const initRes = await stub.fetch(`https://do/init?job_id=${key}&ttl_secs=${ttlToNumber(ttl)}`);
   if (initRes.ok) {
     try {
-      await env.VULTUS_QUEUE.send({ job_id: key, r2_keys: { image_a: r2a, image_b: r2b } });
+      await env.VULTUS_QUEUE.send({
+        job_id: key,
+        r2_keys: { image_a: r2a, image_b: r2b },
+        ...(hq ? { quality: qualityToString(quality.value) } : {}),
+      });
     } catch (e) {
       try {
         await env.VULTUS_BUCKET.delete(r2a);

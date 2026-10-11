@@ -13,6 +13,27 @@ export const API_PATHS = {
   result: (id: string) => `/v1/jobs/${id}/result`,
 } as const;
 
+// Calidad del compare: mismo zip-8, distinto presupuesto server.
+// El servidor es autoridad (400 ante ajena); el cliente solo envia "hq"
+// cuando el checkbox esta marcado, ausente en standard.
+export const QUALITY_FIELD = "quality";
+export const QUALITY_HQ = "hq";
+
+// Ventanas de espera del resultado: standard cabe en TTL 60s (10x1s);
+// HQ es via de minutos (540x2s ≈ 18 min). Sin magicos sueltos en pages.
+export const RESULT_RETRY = { maxAttempts: 10, intervalMs: 1000 } as const;
+export const HQ_RESULT_RETRY = { maxAttempts: 540, intervalMs: 2000 } as const;
+
+// Polling de status cuando el WS falla: 1s standard, 5s HQ.
+export const POLL_INTERVAL_MS = 1000;
+export const HQ_POLL_INTERVAL_MS = 5000;
+
+// Nota de expiracion bajo el download: 60s standard, 30 min HQ (HQ_TTL_SECS).
+export function resultTtlNote(jobId: string, hq: boolean): string {
+  const window = hq ? "30 min" : "60 s";
+  return `último zip result-${jobId}.zip · expira en ${window} en servidor`;
+}
+
 // Nombres exactos del bundle (contrato con el worker, zip-8 v3 sin heatmap:
 // 2 UV + 2 GLB + 2 PBR + 2 renders frontales en orden canonico python).
 // Espejo de edge/contract.ts ZIP_MANIFEST; no renombrar sin cambiar el worker.

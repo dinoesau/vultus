@@ -75,6 +75,24 @@ describe("gateway http en worker runtime", () => {
     expect((await SELF.fetch("https://gateway/v1/jobs/not-a-uuid")).status).toBe(400);
   });
 
+  it("quality hq opt-in 202 queued, ajena 400 sin encolar", async () => {
+    const hq = compareForm();
+    hq.append("quality", "hq");
+    const res = await SELF.fetch("https://gateway/v1/compare", { method: "POST", body: hq });
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as { job_id: string; status: string };
+    expect(body.status).toBe("queued");
+    const status = await SELF.fetch(`https://gateway/v1/jobs/${body.job_id}`);
+    expect(status.status).toBe(200);
+
+    const bad = compareForm();
+    bad.append("quality", "ultra");
+    const rejected = await SELF.fetch("https://gateway/v1/compare", { method: "POST", body: bad });
+    expect(rejected.status).toBe(400);
+    const detail = (await rejected.json()) as { detail: string };
+    expect(detail.detail).toBe("invalid quality");
+  });
+
   it("404 en desconocido y 409 en result pre-done", async () => {
     const unknown = "11111111-1111-4111-8111-111111111111";
     expect((await SELF.fetch(`https://gateway/v1/jobs/${unknown}`)).status).toBe(404);

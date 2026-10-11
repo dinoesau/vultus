@@ -53,14 +53,21 @@ TEXGAN_CHANNEL_MAX = 512
 # (T4 ~0.6s/paso medido via duration_ms + nvidia-smi dmon pico VRAM ~6GB
 # con 1 input por GPU y max_containers=2; CPU local ~4s/paso: los tests
 # usan 2 vs 6 pasos para verificar descenso sin pagar 25 en CI).
+# HQ 1024 (worker de minutos, sin TTL 60): HQ_TEXGAN_STEPS=300 via
+# HQ_TEXGAN_STEPS por env, tope HQ_TEXGAN_STEPS_MAX=600.
 # V3 1024 largo: V3_TEXGAN_FIT_STEPS=300 en backend/v3_contract.py con
 # V3_TEXTURE_TIMEOUT_SECS=900 (worker de minutos, sin TTL 60).
 # E2E rapido usa V3_E2E_TEXGAN_STEPS=2 solo como smoke; prod usa el largo.
 TEXGAN_FIT_STEPS = 25
 TEXGAN_FIT_STEPS_MIN = 1
-TEXGAN_FIT_STEPS_MAX = 100
+TEXGAN_FIT_STEPS_MAX = 600
 TEXGAN_FIT_LR = 0.1
 TEXGAN_FIT_REG = 0.01
+# Ajuste largo HQ (sintesis a resolucion nativa 1024, worker de minutos).
+# Default 300 pasos (~3 min en T4); el forense 25 queda intacto.
+HQ_TEXGAN_STEPS = 300
+HQ_TEXGAN_STEPS_MIN = 1
+HQ_TEXGAN_STEPS_MAX = 600
 TEXGAN_PTH_NAME = "texgan_ffhq_uv.pth"
 
 _BLOCK_RESOLUTIONS = (4, 8, 16, 32, 64, 128, 256, 512, 1024)
@@ -83,6 +90,19 @@ def fit_steps() -> int:
     except ValueError:
         return TEXGAN_FIT_STEPS
     return max(TEXGAN_FIT_STEPS_MIN, min(TEXGAN_FIT_STEPS_MAX, raw))
+
+
+def hq_fit_steps() -> int:
+    """Presupuesto largo del ajuste HQ (env HQ_TEXGAN_STEPS, default 300).
+
+    Via del worker de minutos (sin TTL 60): la resolucion nativa 1024
+    necesita cientos de pasos para converger; el forense 25 queda intacto.
+    """
+    try:
+        raw = int(_env("HQ_TEXGAN_STEPS") or str(HQ_TEXGAN_STEPS))
+    except ValueError:
+        return HQ_TEXGAN_STEPS
+    return max(HQ_TEXGAN_STEPS_MIN, min(HQ_TEXGAN_STEPS_MAX, raw))
 
 
 def _candidate_dirs() -> list[str]:
@@ -581,4 +601,52 @@ def neural_completion(
         synth = np.asarray(small, dtype=np.float64)
         return match_color_to_sampled(synth, np.asarray(sampled_255, dtype=np.float64), np.asarray(valid, dtype=bool))
     except Exception:  # noqa: BLE001 - sin backend/pesos o fallo numerico: via piel media
+        return None
+
+
+def neural_completion_1024(
+    sampled_1024: NDArray[np.float64],
+    valid_1024: NDArray[np.bool_],
+    steps: int,
+) -> NDArray[np.float64] | None:
+    """Completion neuronal a resolucion nativa 1024 (via HQ, worker de minutos).
+
+    Ajusta el latente desde `w_avg` con Adam sobre MSE enmascarado: el loss
+    se evalua a 512 (interpolacion del target y la mascara, pico VRAM ~6GB)
+    y la sintesis devuelta es 1024 nativa con `match_color` a 1024.
+    `steps` viene del caller HQ (`hq_fit_steps`, default 300); `steps < 1`
+    es None. Retorna float64 1024x1024x3 en 0-255, o None sin backend
+    (torch), sin pesos o ante fallo: el caller HQ falla loud, nunca
+    relleno plano silencioso. Total: nunca lanza.
+    """
+    try:
+        if int(steps) < 1:
+            return None
+        if not texgan_available():
+            return None
+        import torch
+        from torch.nn import functional as _F
+
+        pth = find_pth()
+        if pth is None:
+            return None
+        a = np.asarray(sampled_1024, dtype=np.float64)
+        m = np.asarray(valid_1024, dtype=bool)
+        if a.ndim != 3 or a.shape[2] != 3 or m.shape != a.shape[:2] or not bool(m.any()):
+            return None
+        dec = load_decoder(pth)
+        with torch.no_grad():
+            tgt = torch.from_numpy(np.ascontiguousarray(a / 255.0)).permute(2, 0, 1).unsqueeze(0)
+            tgt512 = _F.interpolate(tgt.to(torch.float32), size=(512, 512), mode="bilinear", align_corners=False)
+            mk = torch.from_numpy(np.ascontiguousarray(m)).unsqueeze(0).unsqueeze(0)
+            mk512 = _F.interpolate(mk.to(torch.float32), size=(512, 512), mode="bilinear", align_corners=False)
+            mk512 = (mk512 > 0.5).repeat(1, 3, 1, 1)
+        w = dec.fit_latent(tgt512, mk512, steps=int(steps))
+        img01 = dec.synth_uv_map(w)
+        arr = img01.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
+        synth = np.asarray(arr, dtype=np.float64) * 255.0
+        if synth.shape != a.shape or not bool(np.isfinite(synth).all()):
+            return None
+        return match_color_to_sampled(np.clip(synth, 0.0, 255.0), np.clip(a, 0.0, 255.0), m)
+    except Exception:  # noqa: BLE001 - sin backend o fallo numerico: None loud via caller
         return None

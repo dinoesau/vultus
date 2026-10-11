@@ -327,6 +327,10 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
               <div class="hero-card-actions">
                 <button class="btn btn-primary" type="submit">Comparar →</button>
                 <button class="btn btn-secondary" type="button" id="btn-demo">Cargar demo</button>
+                <label class="micro" for="quality-hq" style="display:flex;align-items:center;gap:6px;">
+                  <input type="checkbox" id="quality-hq" name="quality" value="hq" />
+                  Alta calidad (minutos)
+                </label>
               </div>
               <p class="micro" id="demo-credit">Fotos demo: Pete Souza · A dominio público · B CC-BY 3.0</p>
             </form>
@@ -449,6 +453,11 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
     <script>
       import {
         API_PATHS,
+        HQ_POLL_INTERVAL_MS,
+        HQ_RESULT_RETRY,
+        POLL_INTERVAL_MS,
+        QUALITY_HQ,
+        RESULT_RETRY,
         contractVersionMessage,
         errorDetail,
         isRetryableResultStatus,
@@ -457,6 +466,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         parseHealthContractVersion,
         parseJobEvent,
         parsePollStatus,
+        resultTtlNote,
         statusMessage,
         toWsUrl,
         tryExtractViewerBlobs,
@@ -691,6 +701,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       // asíncrono (WS, polling, fetch) se ignora si ya no es la vigente.
       // Sin esto, el socket/poller del intento anterior pisa la UI del nuevo.
       let gen = 0;
+      // Calidad del job vivo: la fija el submit desde el checkbox y la leen
+      // fetchResult/polling/nota-TTL. El FormData ya lleva quality=hq al server.
+      let liveHq = false;
 
       function setProgress(pct: number): void {
         if (progressEl) {
@@ -812,7 +825,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           downloadEl.textContent = `Descargar zip (result-${jobId}.zip)`;
           downloadEl.hidden = false;
         }
-        if (ttlNoteEl) ttlNoteEl.textContent = `último zip result-${jobId}.zip · expira en 60 s en servidor`;
+        if (ttlNoteEl) ttlNoteEl.textContent = resultTtlNote(jobId, liveHq);
         if (ctaDl instanceof HTMLAnchorElement) {
           ctaDl.href = zipUrl;
           ctaDl.textContent = `Descargar result-${jobId}.zip`;
@@ -836,10 +849,12 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       }
 
       // Tolerante a 404/409 durante processing: el zip solo existe tras done y
-      // el worker puede tardar en exponerlo; reintento acotado 10x1s, sin colgar la UI.
+      // el worker puede tardar en exponerlo; reintento acotado sin colgar la UI.
+      // Standard 10x1s (TTL 60s), HQ 540x2s (via de minutos).
       // 409 = not-yet-done (prod vivo), 404 = zip aun no visible o job purgado.
       async function fetchResult(jobId: string, myGen: number, attempt = 0): Promise<void> {
         if (myGen !== gen) return;
+        const retry = liveHq ? HQ_RESULT_RETRY : RESULT_RETRY;
         if (attempt === 0) {
           const healthy = await checkContractHealth();
           if (!healthy.ok) return;
@@ -852,10 +867,10 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           showError(`job ${jobId}: sin conexión al descargar el resultado.`);
           return;
         }
-        if (isRetryableResultStatus(res.status) && attempt < 10) {
+        if (isRetryableResultStatus(res.status) && attempt < retry.maxAttempts) {
           const why = res.status === 409 ? "aún procesando (409)" : "aún no disponible (404)";
           setStageText(`job ${jobId}: resultado ${why}, reintentando...`);
-          window.setTimeout(() => void fetchResult(jobId, myGen, attempt + 1), 1000);
+          window.setTimeout(() => void fetchResult(jobId, myGen, attempt + 1), retry.intervalMs);
           return;
         }
         if (!res.ok) {
@@ -878,14 +893,16 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         myGen: number,
       ): void {
         if (settled || myGen !== gen) return;
-        // Cadena fría supera el TTL 60s: un solo reintento en caliente,
+        // Cadena fría supera el TTL: un solo reintento en caliente,
         // cuando los modelos ya quedaron cargados. Sin loops.
+        // En HQ la expiracion tambien reintenta (el FormData lleva quality).
         if (status === "expired" && !autoRetried && lastFd) {
           autoRetried = true;
           stopLive();
           settled = false;
           clearResultOutputs();
-          setStageText(`job ${jobId}: expiró en frío (TTL 60s). Reintentando en caliente...`);
+          const window = liveHq ? "TTL HQ" : "TTL 60s";
+          setStageText(`job ${jobId}: expiró en frío (${window}). Reintentando en caliente...`);
           void startJob(lastFd);
           return;
         }
@@ -940,7 +957,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
             setStageText(`job ${jobId}: ${body.status} (polling, sin WS)...`);
           }
         };
-        pollTimer = window.setInterval(() => void tick(), 1000);
+        pollTimer = window.setInterval(() => void tick(), liveHq ? HQ_POLL_INTERVAL_MS : POLL_INTERVAL_MS);
         void tick();
       }
 
@@ -979,6 +996,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         form.addEventListener("submit", async (e) => {
           e.preventDefault();
           lastFd = new FormData(form);
+          // El checkbox va en el FormData (quality=hq) y en liveHq para ventanas.
+          const hqBox = document.getElementById("quality-hq");
+          liveHq = hqBox instanceof HTMLInputElement && hqBox.checked && lastFd.get("quality") === QUALITY_HQ;
           autoRetried = false;
           await startJob(lastFd);
         });
@@ -989,7 +1009,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         settled = false;
         const myGen = ++gen;
         clearResultOutputs();
-        setStageText("enviando...");
+        setStageText(liveHq ? "enviando (HQ, minutos)..." : "enviando...");
         setJobLabel("enviando...");
         setProgress(0);
         const healthy = await checkContractHealth();
@@ -1014,7 +1034,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           return;
         }
         const jobId = parsed.value.jobId;
-        setStageText(`job ${jobId}: en cola...`);
+        setStageText(liveHq ? `job ${jobId}: en cola (HQ, minutos)...` : `job ${jobId}: en cola...`);
         setJobLabel(`job ${jobId} · queued`);
         subscribe(jobId, myGen);
       }

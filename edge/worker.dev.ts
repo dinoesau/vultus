@@ -5,7 +5,7 @@
  * Las rutas dev solo responden con `ALLOW_DEV_ROUTES=1`; con vars de
  * produccion responden 404. El bundle de prod no referencia este modulo.
  */
-import { jobIdToString, parseJobId } from "./contract";
+import { RESULT_ZIP_NAME, jobIdToString, parseJobId } from "./contract";
 import prod from "./worker";
 
 export { ProgressDO } from "./progress-do";
@@ -81,7 +81,7 @@ export default {
       if (!env.VULTUS_BUCKET) return json({ detail: "missing bindings" }, 500);
       const bundle = parseZipBundle(new Uint8Array(await req.arrayBuffer()));
       if (!bundle.ok) return json({ detail: "invalid result bundle" }, 400);
-      await env.VULTUS_BUCKET.put(`jobs/${jobIdToString(parsed.value)}/result.zip`, bundle.value);
+      await env.VULTUS_BUCKET.put(`jobs/${jobIdToString(parsed.value)}/${RESULT_ZIP_NAME}`, bundle.value);
       return json({ ok: true });
     }
 

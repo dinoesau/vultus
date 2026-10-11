@@ -22,10 +22,27 @@ interface R2ObjectBody {
   readonly body: ReadableStream;
 }
 
+interface R2ListItem {
+  readonly key: string;
+}
+
+interface R2ListOptions {
+  readonly prefix?: string;
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+
+interface R2ListResult {
+  readonly objects: readonly R2ListItem[];
+  readonly truncated: boolean;
+  readonly cursor?: string;
+}
+
 interface R2Bucket {
   put(key: string, value: ArrayBuffer | Uint8Array): Promise<unknown>;
   get(key: string): Promise<(R2ObjectBody & { readonly body: ReadableStream | null }) | null>;
   delete(key: string): Promise<void>;
+  list(options?: R2ListOptions): Promise<R2ListResult>;
 }
 
 interface Queue {

@@ -47,7 +47,7 @@ graph TD
 
 ## 1. Principios
 
-- **Stateless por defecto.** Nada persiste más allá de la ventana: DO TTL 60 + purga a 2×TTL, R2 `jobs/` con borrado lógico 60s (DO + Python DEL) + lifecycle red 1 día (`expire-jobs`, mínimo R2, ver `scripts/r2-lifecycle-apply.sh`), `/tmp` en tmpfs con `unlink` por job. v3 es la única excepción (retención lógica de días, cola separada; la red 1 día sobre `jobs/` aplica como piso hasta prefijo propio).
+- **Stateless por defecto.** Nada persiste más allá de la ventana: DO TTL 60 + purga a 2×TTL, R2 `jobs/` con borrado lógico (cron 1/min borra `result.zip` en `expired`/purga) + lifecycle red 1 día (`expire-jobs`, mínimo R2, ver `scripts/r2-lifecycle-apply.sh`), `/tmp` en tmpfs con `unlink` por job. v3 es la única excepción (retención lógica de días, cola separada; la red 1 día sobre `jobs/` aplica como piso hasta prefijo propio).
 - **Parse-once en el borde, core sin revalidar.** `backend/domain.py:1-6` + `edge/contract.ts:254-308`. Todo lo que cruza un seam llega ya probado (`ImageBytes`, `JobId`, `Landmarks`, `GnmCoeffs`, `CameraParams`, `RenderedImage`, `TtlSecs`, `Stage`, `ContractVersion`). El core nunca lanza por input esperado: retorna `Result`.
 - **Deep modules, interfaces estrechas.** Cada worker una sola responsabilidad. `workers/*` no conocen HTTP ni frontend. El sink `report/complete/fail` es el único acoplamiento pipeline→progreso.
 - **Un solo dueño por seam.** TS es dueño del ciclo HTTP; Python es dueño del runner local, el orquestador y el assemble CPU. Sin duplicar `TtlSecs` ni ciclo de vida en Python.
@@ -111,7 +111,7 @@ Valida `multipart`, magic JPEG (`FF D8 FF`) / PNG (`89 50 4E 47 0D 0A 1A 0A`) y 
 
 ### 3.2 progreso y cómputo — deep edge
 
-`ProgressDO` (`progress-do.ts:31`): ciclo `queued → processing → done|failed|expired`, `TTL 60`, ventana `expired` visible, purga a 2×TTL vía `alarm()` en 2 fases. `load()` revalida storage corrupto a 60 con log throttled por instancia. `TtlSecs 1..=3600` vía `parseTtlSecs → Result InvalidTtlSecs`; shell `resolveTtlSecs` defaultea a 60 con log, DO responde `400`.
+`ProgressDO` (`progress-do.ts:31`): ciclo `queued → processing → done|failed|expired`, `TTL 60`, ventana `expired` visible, purga a 2×TTL vía `alarm()` en 2 fases. El cron 1/min (`worker.ts:sweepExpiredResults`, `[triggers]`) borra `result.zip` en `expired`/purga; nunca `figure-v3.zip`. `load()` revalida storage corrupto a 60 con log throttled por instancia. `TtlSecs 1..=3600` vía `parseTtlSecs → Result InvalidTtlSecs`; shell `resolveTtlSecs` defaultea a 60 con log, DO responde `400`.
 
 ### 3.3 workers ML + assemble
 

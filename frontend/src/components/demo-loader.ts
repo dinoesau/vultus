@@ -89,7 +89,7 @@ export type DemoLoadError = {
   readonly status?: number;
 };
 
-// Fuente única del mensaje visible ante fallo demo (#123). El loader
+// Fuente única del mensaje visible ante fallo demo. El loader
 // clasifica el Err; la presentación lo pinta sin ramificar por detail/slot.
 export const DEMO_LOAD_ERROR_MESSAGE = "Could not load demo. Try again" as const;
 

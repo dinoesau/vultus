@@ -135,6 +135,77 @@ def test_perspective_vert_px_degenerate_is_err_not_raise() -> None:
     assert isinstance(out, Err)
 
 
+def _mirrored_landmarks(width: int, height: int, mirror: bool):  # type: ignore[no-untyped-def]
+    """Landmarks 478 sinteticos desde el template con afine exacto (espejo opcional).
+
+    Proyecta los 50 puntos del embed con un afine conocido y los planta en
+    los indices MediaPipe de MP_68_MAP: el ajuste afine converge con RMSE ~0
+    y el espejo da escala negativa (caso Obama B en prod).
+    """
+    import numpy as np
+
+    from backend.domain import parse_landmarks
+    from backend.gnm_assemble import flame68_positions, load_flame_template
+    from backend.gnm_head import MP_68_MAP
+
+    loaded = load_flame_template()
+    assert isinstance(loaded, Ok)
+    positions = loaded.value[0]
+    displaced = [(float(p[0]), float(p[1]), float(p[2])) for p in positions]
+    placed = flame68_positions(displaced)
+    assert isinstance(placed, Ok)
+    dlib_rows, obj3d = placed.value
+    obj = np.asarray(obj3d, dtype=np.float64)
+    ox = (obj[:, 0] - obj[:, 0].min()) / max(1e-9, obj[:, 0].max() - obj[:, 0].min())
+    oy = (obj[:, 1] - obj[:, 1].min()) / max(1e-9, obj[:, 1].max() - obj[:, 1].min())
+    fx = (0.75 - 0.5 * ox) if mirror else (0.25 + 0.5 * ox)
+    fy = 0.25 + 0.5 * oy
+    pts = np.full((478, 3), 0.5, dtype=np.float64)
+    for k, j in enumerate([int(i) for i in dlib_rows]):
+        pts[int(MP_68_MAP[int(j)]), 0] = float(fx[k])
+        pts[int(MP_68_MAP[int(j)]), 1] = float(fy[k])
+        pts[int(MP_68_MAP[int(j)]), 2] = 0.0
+    parsed = parse_landmarks(json.dumps(pts.tolist()).encode())
+    assert isinstance(parsed, Ok)
+    return displaced, parsed.value
+
+
+def test_perspective_mirror_falls_back_to_affine_not_err() -> None:
+    """Regression prod (job HQ Obama B): escala negativa no es Err.
+
+    El afine absorbe el flip y converge; el pinhole rotacion-pura no puede.
+    HQ usa el afine con persp=0: nunca alinea peor que el forense.
+    """
+    import numpy as np
+
+    from backend.domain import Ok
+    from backend.flame_texture import _LAST_TEXTURE_STATS, _perspective_vert_px
+
+    displaced, landmarks = _mirrored_landmarks(256, 256, mirror=True)
+    out = _perspective_vert_px(displaced, landmarks, 256, 256)
+    assert isinstance(out, Ok)
+    vert_px, used_persp = out.value
+    assert used_persp is False
+    assert vert_px.shape == (5023, 2)
+    assert bool(np.isfinite(vert_px).all())
+    assert float(_LAST_TEXTURE_STATS.get("persp", -1.0)) == 0.0
+
+
+def test_perspective_frontal_stays_ok() -> None:
+    """Control positivo: sin espejo el seam sigue total (afine o pinhole)."""
+    import numpy as np
+
+    from backend.domain import Ok
+    from backend.flame_texture import _perspective_vert_px
+
+    displaced, landmarks = _mirrored_landmarks(256, 256, mirror=False)
+    out = _perspective_vert_px(displaced, landmarks, 256, 256)
+    assert isinstance(out, Ok)
+    vert_px, _ = out.value
+    assert vert_px.shape == (5023, 2)
+    assert bool(np.isfinite(vert_px).all())
+
+
 def test_rasterize_size_param_keeps_forensic_identical() -> None:
     import numpy as np
 

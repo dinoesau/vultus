@@ -14,6 +14,19 @@ async function loadDemo(page: Page) {
   }
 }
 
+test("154 header pill es boton demo canonico naranja sin TTL", async ({ page }) => {
+  await page.goto(FRONT);
+  const headerBtn = page.locator('#intake .hero-card-head #btn-demo');
+  await expect(headerBtn).toBeVisible();
+  await expect(headerBtn).toHaveAttribute("data-testid", "btn-demo");
+  await expect(headerBtn).toContainText(/Cargar demo/);
+  await expect(headerBtn).not.toContainText(/TTL/);
+  // Sin IDs duplicados: un solo #btn-demo canonico en todo el DOM.
+  await expect(page.locator("#btn-demo")).toHaveCount(1);
+  // El blanco viejo sigue vivo para story-155 con id temporal.
+  await expect(page.locator("#btn-demo-legacy")).toBeVisible();
+});
+
 test("E1 click demo carga Obama A/B listos para Comparar", async ({ page }) => {
   await loadDemo(page);
   for (const [id, name] of [

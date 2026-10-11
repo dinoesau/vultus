@@ -544,15 +544,54 @@ def parse_r2_key(raw: object) -> Result[R2Key, DomainError]:
 
 
 @dataclass(frozen=True, slots=True)
+class Quality:
+    """Solo via parse_quality. standard = via 60s, hq = via de minutos.
+
+    Mismo zip-8 y mismos bytes de contrato en ambas: solo cambia el
+    presupuesto (TexGAN largo + timeouts) aguas arriba.
+    """
+
+    _value: str
+
+    def as_str(self) -> str:
+        return self._value
+
+
+QUALITY_STANDARD = "standard"
+QUALITY_HQ = "hq"
+
+
+def parse_quality(raw: object) -> Result[Quality, DomainError]:
+    """Smart constructor unico. Ausente (None) = standard por compat.
+
+    Envelopes viejos y el path forense no traen el campo; solo HQ lo
+    envia. Valor ajeno es Invariant (el edge nunca encola basura: su
+    propio parse la rechaza con 400 antes del enqueue).
+    """
+    if raw is None:
+        return Ok(Quality(_value=QUALITY_STANDARD))
+    if not isinstance(raw, str):
+        return Err(Invariant(detail="queue quality invalid"))
+    cleaned = raw.strip().lower()
+    if cleaned == QUALITY_STANDARD:
+        return Ok(Quality(_value=QUALITY_STANDARD))
+    if cleaned == QUALITY_HQ:
+        return Ok(Quality(_value=QUALITY_HQ))
+    return Err(Invariant(detail="queue quality invalid"))
+
+
+@dataclass(frozen=True, slots=True)
 class QueueJob:
     """Producto borde cola: job + punteros R2. Solo via parse_queue_envelope.
 
     Wave 5: sin campo `deprecated`; legacy `a/b` es Err, solo canonico.
+    `quality` aditivo con default standard: envelopes viejos siguen validos.
     """
 
     job_id: JobId
     r2_a: R2Key
     r2_b: R2Key
+    quality: Quality
 
 
 def parse_queue_envelope(raw: object) -> Result[QueueJob, DomainError]:
@@ -603,7 +642,17 @@ def parse_queue_envelope(raw: object) -> Result[QueueJob, DomainError]:
     b_parsed = parse_r2_key(b_canon)
     if isinstance(b_parsed, Err):
         return b_parsed
-    return Ok(QueueJob(job_id=job_result.value, r2_a=a_parsed.value, r2_b=b_parsed.value))
+    quality_parsed = parse_quality(body.get("quality"))
+    if isinstance(quality_parsed, Err):
+        return quality_parsed
+    return Ok(
+        QueueJob(
+            job_id=job_result.value,
+            r2_a=a_parsed.value,
+            r2_b=b_parsed.value,
+            quality=quality_parsed.value,
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)

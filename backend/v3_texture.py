@@ -215,8 +215,8 @@ def long_completion_1024(
 
         if not texgan_available():
             return None
-        import torch
-        from torch.nn import functional as _F
+        import torch  # type: ignore[import-not-found]
+        from torch.nn import functional as _F  # type: ignore[import-not-found]
 
         pth = find_pth()
         if pth is None:

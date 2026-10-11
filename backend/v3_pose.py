@@ -92,8 +92,33 @@ def reprojection_error(
     return float(np.sqrt(((pred - p) ** 2).mean()))
 
 
+def project_points(
+    obj: NDArray[np.float64], focal: float, pose: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Proyecta N verts 3D a pixeles con el pinhole v3 (foco + 6DOF).
+
+    Misma convencion que `refine_pose`/`reprojection_error`: `f = max(W,H)`,
+    coordenadas de foto completas (el `tx` absorbe el punto principal).
+    Puro numpy; formas invalidas dan array vacio (nunca lanza).
+    """
+    try:
+        o = np.asarray(obj, dtype=np.float64)
+        q = np.asarray(pose, dtype=np.float64).reshape(-1)
+        f = float(focal)
+    except (ValueError, TypeError):
+        return np.zeros((0, 2), dtype=np.float64)
+    if o.ndim != 2 or o.shape[1] != 3 or q.shape[0] != 6:
+        return np.zeros((0, 2), dtype=np.float64)
+    if not math.isfinite(f) or f <= 0.0 or not bool(np.isfinite(q).all()):
+        return np.zeros((0, 2), dtype=np.float64)
+    if not bool(np.isfinite(o).all()):
+        return np.zeros((0, 2), dtype=np.float64)
+    return np.asarray(_project_perspective(o, f, q), dtype=np.float64)
+
+
 def refine_pose(
-    obj: NDArray[np.float64], img: NDArray[np.float64], focal: float, steps: int = 5
+    obj: NDArray[np.float64], img: NDArray[np.float64], focal: float, steps: int = 5,
+    init: NDArray[np.float64] | None = None,
 ) -> tuple[NDArray[np.float64], list[float]]:
     """Refina pose 6-DOF y retorna `(pose, errores)` (inicial + uno por iter).
 
@@ -104,7 +129,13 @@ def refine_pose(
     o = np.asarray(obj, dtype=np.float64)
     p = np.asarray(img, dtype=np.float64)
     n_steps = max(1, int(steps))
-    pose = np.zeros(6, dtype=np.float64)
+    try:
+        start = np.asarray(init, dtype=np.float64).reshape(-1) if init is not None else np.zeros(6)
+        if start.shape[0] != 6 or not bool(np.isfinite(start).all()):
+            start = np.zeros(6, dtype=np.float64)
+    except (ValueError, TypeError):
+        start = np.zeros(6, dtype=np.float64)
+    pose = np.asarray(start, dtype=np.float64)
     errors: list[float] = [reprojection_error(o, p, float(focal), pose)]
     step = 0.05
     for _ in range(n_steps):

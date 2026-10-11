@@ -50,9 +50,11 @@ SYNC_VERSION=4
 # - backend/flame_fit.py: deca_model.tar en DECA_DIR + (flame2023_Open.pkl OR
 #   generic_model.pkl) en FLAME_ASSETS_DIR.
 # - backend/flame_texture.py: FLAME_w_HIFI3D_UV.obj + eye_ball_tex.png en FFHQ_UV_DIR.
-# BRIDGE_FILES son los 4 exactos obligatorios; el pkl FLAME va por OR en
+# - Via HQ (bake_hq, minutos): parsing 79999_iter.pth + dpr trained_model_03.t7
+#   obligatorios (sin ellos HQ falla loud; el forense 60s no los exige).
+# BRIDGE_FILES son los exactos obligatorios; el pkl FLAME va por OR en
 # BRIDGE_FLAME_PKL_ALTS (uno basta, ambos valen).
-BRIDGE_FILES="mediapipe/face_landmarker.task deca/deca_model.tar ffhq-uv/FLAME_w_HIFI3D_UV.obj ffhq-uv/eye_ball_tex.png checkpoints/texgan_model/texgan_ffhq_uv.pth checkpoints/deep3d_model/epoch_latest.pth topo_assets/unwrap_1024_info.mat topo_assets/hifi3dpp_mean_face.obj flame/flame_template.bin flame/flame_hifi_transfer.npz flame/flame68_embed.npz"
+BRIDGE_FILES="mediapipe/face_landmarker.task deca/deca_model.tar ffhq-uv/FLAME_w_HIFI3D_UV.obj ffhq-uv/eye_ball_tex.png checkpoints/texgan_model/texgan_ffhq_uv.pth checkpoints/deep3d_model/epoch_latest.pth topo_assets/unwrap_1024_info.mat topo_assets/hifi3dpp_mean_face.obj flame/flame_template.bin flame/flame_hifi_transfer.npz flame/flame68_embed.npz checkpoints/parsing_model/79999_iter.pth checkpoints/dpr_model/trained_model_03.t7"
 BRIDGE_FLAME_PKL_ALTS="flame/flame2023_Open.pkl flame/generic_model.pkl"
 LEGACY_PREFIX="gnm"
 

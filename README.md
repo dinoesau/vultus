@@ -134,7 +134,7 @@ Zip-8 en orden canónico: `uv_a/b.png · mesh_a/b.glb · pbr_a/b.png · render_a
 
 ## Stateless
 
-Sin Postgres ni S3 persistente. Prod: borrado lógico R2 60 s (DO + Python DEL) + lifecycle red 1 día (`expire-jobs` sobre `jobs/`, mínimo R2, ver `scripts/r2-lifecycle-apply.sh`) + Queues retención 24 h con TTL lógico 60 vía alarm + `/tmp` tmpfs en Modal. Dev: DO TTL 60 + purga 2xTTL + tmpfs. v3 (única excepción): retención lógica de días en cola separada (`V3_RETENTION_DAYS=7`; la red 1 día aplica como piso hasta prefijo propio). Logs con `job_id`, sin bytes. Ver `PIPELINE.md §5.8` y ADR-003.
+Sin Postgres ni S3 persistente. Prod: borrado lógico R2 60 s (DO + Python DEL) + lifecycle red 1 día (`expire-jobs` sobre `jobs/`, mínimo R2, ver `scripts/r2-lifecycle-apply.sh`) + Queues retención 24 h con TTL lógico 60 vía alarm + `/tmp` tmpfs en Modal. Dev: DO TTL 60 + purga 2xTTL + PUT-delete a|b + sweep result.zip + tmpfs + asserts R2 vacio. v3 (única excepción): retención lógica de días en cola separada (`V3_RETENTION_DAYS=7`; la red 1 día aplica como piso hasta prefijo propio). Logs con `job_id`, sin bytes. Ver `PIPELINE.md §5.8` y ADR-003.
 
 ## Testing
 

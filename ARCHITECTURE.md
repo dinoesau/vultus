@@ -167,7 +167,7 @@ Fit directo con `Compare = distancia de coefs + albedo; el heatmap sobrevive`. E
 
 ### ADR-003 Stateless sin Postgres ni S3
 
-Sin cache ni re-descarga desde servidor; se gana privacidad y simplicidad. Local: DO TTL 60 + purga 2×TTL + tmpfs. Prod: borrado lógico 60s (DO + Python DEL) + lifecycle red 1 día (`expire-jobs` sobre `jobs/`, mínimo R2) + Queues retención 24 h pero TTL lógico 60 vía alarm.
+Sin cache ni re-descarga desde servidor; se gana privacidad y simplicidad. Local: DO TTL 60 + purga 2×TTL + PUT-delete a|b + sweep result.zip + tmpfs + asserts R2 vacio. Prod: borrado lógico 60s (DO + Python DEL) + lifecycle red 1 día (`expire-jobs` sobre `jobs/`, mínimo R2) + Queues retención 24 h pero TTL lógico 60 vía alarm.
 
 ### ADR-004 Cloudflare + Modal
 

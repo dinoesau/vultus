@@ -89,7 +89,7 @@ Sin `heatmap.png` (ADR-008). Renders frontales 512 al final (ADR-012). `CONTRACT
 
 ### `stateless` — no persistir tras entrega
 
-Local: DO TTL 60 + purga 2×TTL + `/tmp` tmpfs. Prod: cron 1/min borra `result.zip` en `expired`/purga + lifecycle red 1 día (`expire-jobs` sobre `jobs/`, mínimo R2) + Queues retención 24 h (TTL lógico 60) + `/tmp` tmpfs en Modal. v3: retención lógica de días en cola separada (única excepción; red 1 día como piso hasta prefijo propio).
+Local: DO TTL 60 + purga 2×TTL + PUT-delete a|b + sweep result.zip + `/tmp` tmpfs + asserts R2 vacio. Prod: cron 1/min borra `result.zip` en `expired`/purga + lifecycle red 1 día (`expire-jobs` sobre `jobs/`, mínimo R2) + Queues retención 24 h (TTL lógico 60) + `/tmp` tmpfs en Modal. v3: retención lógica de días en cola separada (única excepción; red 1 día como piso hasta prefijo propio).
 
 ### `r2key` / `enqueue-command` / `enqueued-job`
 

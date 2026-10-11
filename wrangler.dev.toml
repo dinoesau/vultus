@@ -1,10 +1,14 @@
 # Gateway unico en dev: mismo handler que prod (`edge/worker.dev.ts`
 # envuelve `edge/worker.ts`) con R2/Queue/DO emulados y consumer dev
 # hacia el runner local. Nunca se despliega: prod usa `wrangler.toml`.
+# Paridad olvido: cron 1/min barre result.zip en expired/purga igual que prod.
 name = "vultus-api-dev"
 main = "edge/worker.dev.ts"
 compatibility_date = "2026-09-03"
 compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["* * * * *"]
 
 [[r2_buckets]]
 binding = "VULTUS_BUCKET"

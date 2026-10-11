@@ -174,6 +174,47 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       .hero-card-actions { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
       .hero-card-actions .btn { flex: 1; justify-content: center; height: 44px; }
       .hero-card-actions label.micro { margin-top: 0; white-space: nowrap; }
+      /* Pixel Walker (156) + Ver estudio ghost (158): full-width debajo de frases. */
+      #btn-estudio {
+        display: flex; width: 100%; justify-content: center; align-items: center;
+        margin-top: 12px;
+        font-family: Inter, sans-serif; font-size: 14px; font-weight: 500; line-height: 1;
+        border-radius: var(--r-md); padding: 12px 20px; height: 40px;
+        cursor: pointer; text-decoration: none;
+        background: var(--canvas); color: var(--ink); border: 1px solid var(--hairline);
+        transition: background 0.15s ease;
+      }
+      #btn-estudio:hover { background: var(--surface-soft); }
+      #uvi { width: 72px; margin: 14px auto 0; text-align: center; }
+      #uvi[hidden] { display: none; }
+      .uvi-stage {
+        width: 72px; height: 72px; margin: 0 auto; display: block;
+        shape-rendering: crispEdges; image-rendering: pixelated;
+      }
+      .uvi-body { animation: uvi-march 0.4s steps(2, end) infinite; }
+      .uvi-eye { animation: uvi-led 0.8s steps(1, end) infinite; }
+      .uvi-antenna-dot { animation: uvi-poll 0.8s steps(1, end) infinite; }
+      .uvi-frame-a { animation: uvi-frame-a 0.4s steps(1, end) infinite; }
+      .uvi-frame-b { animation: uvi-frame-b 0.4s steps(1, end) infinite; }
+      .uvi-scan { opacity: 0; }
+      #uvi.uvi--job .uvi-scan { opacity: 1; animation: uvi-scan 0.6s steps(1, end) infinite; }
+      #uvi.uvi--job .uvi-body { animation-duration: 0.25s; }
+      #uvi.uvi--job .uvi-frame-a, #uvi.uvi--job .uvi-frame-b { animation-duration: 0.25s; }
+      #uvi-text { margin: 4px 0 0; font-family: "JetBrains Mono", monospace; font-size: 13px; color: var(--muted); min-height: 1em; }
+      #uvi-text:empty { display: none; }
+      @keyframes uvi-march { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+      @keyframes uvi-led { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.35; } }
+      @keyframes uvi-frame-a { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+      @keyframes uvi-frame-b { 0%, 49% { opacity: 0; } 50%, 100% { opacity: 1; } }
+      @keyframes uvi-poll { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.2; } }
+      @keyframes uvi-scan { 0%, 49% { opacity: 0.2; } 50%, 100% { opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) {
+        #uvi .uvi-body, #uvi .uvi-eye, #uvi .uvi-antenna-dot, #uvi .uvi-scan,
+        #uvi .uvi-frame-a, #uvi .uvi-frame-b,
+        #uvi.uvi--job .uvi-scan, #uvi.uvi--job .uvi-body,
+        #uvi.uvi--job .uvi-eye { animation: none !important; }
+        #uvi.uvi--job .uvi-scan { opacity: 0 !important; }
+      }
       /* strip */
       .strip { border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); background: var(--surface-soft); }
       .strip-inner {
@@ -298,7 +339,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
             </p>
             <div class="btnrow">
               <a class="btn btn-primary" href="#intake">Comparar ahora</a>
-              <a class="btn btn-secondary" href="#estudio">Ver estudio ↓</a>
             </div>
             <p class="micro">
               Wire <code>v2</code> · hitos <code>0.40 / 0.75 / 0.95 / 1.0</code> ·
@@ -337,6 +377,43 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
                   Alta calidad (minutos)
                 </label>
               </div>
+              <div id="uvi" data-testid="uvi" hidden aria-hidden="true">
+                <svg class="uvi-stage" viewBox="0 0 16 16" role="img" aria-label="Pixel Walker esperando">
+                  <rect class="uvi-antenna-dot" x="7" y="0" width="2" height="1" fill="#cc785c" />
+                  <rect x="7" y="1" width="2" height="2" fill="#3d3d3a" />
+                  <g class="uvi-body">
+                    <rect x="4" y="3" width="8" height="4" fill="#141413" />
+                    <rect x="5" y="4" width="6" height="2" fill="#efe9de" />
+                    <g class="uvi-eye">
+                      <g class="uvi-frame-a">
+                        <rect x="6" y="4" width="2" height="2" fill="#cc785c" />
+                        <rect x="9" y="4" width="1" height="2" fill="#cc785c" opacity=".3" />
+                      </g>
+                      <g class="uvi-frame-b">
+                        <rect x="6" y="4" width="1" height="2" fill="#cc785c" opacity=".3" />
+                        <rect x="8" y="4" width="2" height="2" fill="#cc785c" />
+                      </g>
+                    </g>
+                    <g class="uvi-frame-a">
+                      <rect x="3" y="7" width="1" height="3" fill="#3d3d3a" />
+                      <rect x="12" y="7" width="1" height="3" fill="#3d3d3a" />
+                      <rect x="5" y="10" width="2" height="2" fill="#3d3d3a" />
+                      <rect x="9" y="10" width="2" height="1" fill="#3d3d3a" />
+                    </g>
+                    <g class="uvi-frame-b">
+                      <rect x="2" y="6" width="1" height="2" fill="#3d3d3a" />
+                      <rect x="13" y="6" width="1" height="2" fill="#3d3d3a" />
+                      <rect x="5" y="10" width="2" height="1" fill="#3d3d3a" />
+                      <rect x="9" y="10" width="2" height="2" fill="#3d3d3a" />
+                    </g>
+                    <rect x="5" y="7" width="6" height="3" fill="#141413" />
+                    <rect x="6" y="8" width="4" height="1" fill="#efe9de" />
+                    <rect class="uvi-scan" x="7" y="8" width="2" height="1" fill="#cc785c" />
+                  </g>
+                </svg>
+                <p id="uvi-text" role="status" aria-live="polite"></p>
+              </div>
+              <a id="btn-estudio" href="#estudio" data-testid="btn-estudio">Ver estudio ↓</a>
               <p class="micro" id="demo-credit">Fotos demo: Pete Souza · A dominio público · B CC-BY 3.0</p>
             </form>
           </div>
@@ -484,6 +561,12 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         demoLoadErrorMessage,
       } from "../components/demo-loader.ts";
       import type { DemoDomError, DemoPresentableError } from "../components/demo-loader.ts";
+      import { hideUvi, parseUviElement, showUvi } from "../components/uvi.ts";
+      import {
+        startPhraseRotation,
+        stopPhraseRotation,
+      } from "../components/uvi-phrases.ts";
+      import type { PhraseHandle } from "../components/uvi-phrases.ts";
 
       const api = document.body.dataset.apiUrl ?? "http://localhost:8000";
       const foundForm = document.getElementById("compare");
@@ -635,6 +718,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       async function loadDemo(btn: HTMLButtonElement): Promise<Result<void, LoadDemoError>> {
         if (demoLoading) return { ok: true, value: undefined };
         demoLoading = true;
+        uviShow("demo");
         const prevLabel = btn.textContent;
         btn.disabled = true;
         btn.setAttribute("aria-busy", "true");
@@ -684,6 +768,8 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           btn.removeAttribute("aria-busy");
           btn.textContent = prevLabel;
           demoLoading = false;
+          if (isJobLive()) uviShow("job");
+          else uviHide();
         }
       }
 
@@ -708,6 +794,63 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       // Calidad del job vivo: la fija el submit desde el checkbox y la leen
       // fetchResult/polling/nota-TTL. El FormData ya lleva quality=hq al server.
       let liveHq = false;
+
+      // Uvi (156): helpers totales sin literales. parseUviElement clasifica
+      // el Err; ante nodo ausente no se rompe stage-text (canal intacto).
+      // Frases (157): el handle vive aquí, atado a `gen`. uviShow arranca la
+      // rotación solo si no hay una viva de la misma gen (así loadDemo no
+      // resetea las frases de un job en curso); ante gen nueva el timer
+      // viejo se detiene antes de arrancar (sin fugas). uviHide detiene y
+      // limpia el texto: todo terminal (done/failed/demo-fail) pasa por aquí.
+      // stopLive NO toca frases: Uvi sigue visible durante la descarga del
+      // zip y debe seguir rotando en el HQ largo. Sin animación extra en el
+      // texto (reduced-motion: las frases son texto, siguen rotando).
+      let phraseHandle: PhraseHandle | null = null;
+      let phraseGen = 0;
+
+      function stopUviPhrases(): void {
+        if (phraseHandle) {
+          stopPhraseRotation(phraseHandle);
+          phraseHandle = null;
+        }
+        const text = document.getElementById("uvi-text");
+        if (text instanceof HTMLElement) text.textContent = "";
+      }
+
+      function startUviPhrases(myGen: number): void {
+        const text = document.getElementById("uvi-text");
+        if (!(text instanceof HTMLElement)) return;
+        if (phraseHandle && phraseGen !== myGen) {
+          stopPhraseRotation(phraseHandle);
+          phraseHandle = null;
+        }
+        if (phraseHandle) return;
+        const started = startPhraseRotation((phrase) => {
+          if (myGen === gen) text.textContent = phrase;
+        });
+        if (started.ok) {
+          phraseHandle = started.value;
+          phraseGen = myGen;
+        }
+      }
+
+      function uviShow(mode: "demo" | "job"): void {
+        const parsed = parseUviElement(document);
+        if (parsed.ok) showUvi(parsed.value, mode);
+        startUviPhrases(gen);
+      }
+
+      function uviHide(): void {
+        const parsed = parseUviElement(document);
+        if (parsed.ok) hideUvi(parsed.value);
+        stopUviPhrases();
+      }
+
+      // Job vivo = gen emitida y sin settle. loadDemo lo usa para no pisar
+      // el scanline del job si el usuario recarga demo a mitad de compare.
+      function isJobLive(): boolean {
+        return gen > 0 && !settled;
+      }
 
       function setProgress(pct: number): void {
         if (progressEl) {
@@ -735,7 +878,10 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       // Solo el fallo de red al pedir /health es fail-open con Ok(true): el POST
       // posterior mostrara su error real. Un JSON roto es InvalidHealthVersion y
       // bloquea con mensaje actualiza (nunca fail-open silencioso).
-      async function checkContractHealth(): Promise<Result<boolean, HealthVersionError>> {
+      // Uvi se oculta aqui (sitio unico, sin duplicar): el fallo de salud es
+      // terminal del intento. El guard de gen evita pisar el scanline de un
+      // job mas nuevo si dos submits se solapan.
+      async function checkContractHealth(myGen: number): Promise<Result<boolean, HealthVersionError>> {
         let res: Response;
         try {
           res = await fetch(`${api}/health`);
@@ -751,6 +897,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           const msg = contractVersionMessage(error);
           showError(msg);
           setStageText(msg);
+          if (myGen === gen) uviHide();
           return { ok: false, error };
         }
         const parsed = parseHealthContractVersion(raw);
@@ -758,6 +905,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         const msg = contractVersionMessage(parsed.error);
         showError(msg);
         setStageText(msg);
+        if (myGen === gen) uviHide();
         return { ok: false, error: parsed.error };
       }
 
@@ -839,6 +987,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         if (myGen !== gen) return;
         if (!parsed.ok) {
           showError(`job ${jobId}: zip sin piezas (falta ${parsed.error.name}).`);
+          uviHide();
           return;
         }
         const { uvA, uvB, pbrA, pbrB, meshA, meshB } = parsed.value;
@@ -850,6 +999,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         setStageText(`job ${jobId}: listo. Zip guardado en memoria para re-descarga local.`);
         setJobLabel(`job ${jobId} · done`);
         setProgress(100);
+        if (myGen === gen) uviHide();
       }
 
       // Tolerante a 404/409 durante processing: el zip solo existe tras done y
@@ -860,7 +1010,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         if (myGen !== gen) return;
         const retry = liveHq ? HQ_RESULT_RETRY : RESULT_RETRY;
         if (attempt === 0) {
-          const healthy = await checkContractHealth();
+          const healthy = await checkContractHealth(myGen);
           if (!healthy.ok) return;
           if (myGen !== gen) return;
         }
@@ -869,6 +1019,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           res = await fetch(`${api}${API_PATHS.result(jobId)}`);
         } catch {
           showError(`job ${jobId}: sin conexión al descargar el resultado.`);
+          if (myGen === gen) uviHide();
           return;
         }
         if (isRetryableResultStatus(res.status) && attempt < retry.maxAttempts) {
@@ -879,6 +1030,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         }
         if (!res.ok) {
           showError(`job ${jobId}: no se pudo descargar el resultado (HTTP ${res.status}).`);
+          if (myGen === gen) uviHide();
           return;
         }
         try {
@@ -886,6 +1038,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         } catch (err) {
           const why = err instanceof Error ? err.message : String(err);
           showError(`job ${jobId}: zip inválido (${why}).`);
+          if (myGen === gen) uviHide();
         }
       }
 
@@ -914,6 +1067,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         if (!isTerminal(status)) return;
         stopLive();
         if (status === "done") void fetchResult(jobId, myGen);
+        else if (myGen === gen) uviHide();
       }
 
       // Fallback a polling 1s si el WS falla o cierra antes de un estado
@@ -937,6 +1091,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           if (res.status === 404) {
             stopLive();
             setStageText(`job ${jobId}: no encontrado (404).`);
+            if (myGen === gen) uviHide();
             return;
           }
           if (!res.ok) return;
@@ -1013,28 +1168,40 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         settled = false;
         const myGen = ++gen;
         clearResultOutputs();
+        uviShow("job");
         setStageText(liveHq ? "enviando (HQ, minutos)..." : "enviando...");
         setJobLabel("enviando...");
         setProgress(0);
-        const healthy = await checkContractHealth();
+        const healthy = await checkContractHealth(myGen);
         if (!healthy.ok) return;
         if (myGen !== gen) return;
-        const res = await fetch(`${api}${API_PATHS.compare}`, { method: "POST", body: fd });
+        let res: Response;
+        try {
+          res = await fetch(`${api}${API_PATHS.compare}`, { method: "POST", body: fd });
+        } catch {
+          if (myGen !== gen) return;
+          setStageText("sin conexión al enviar. Revisa la red e inténtalo de nuevo.");
+          uviHide();
+          return;
+        }
         let rawBody: unknown;
         try {
           rawBody = await res.json();
         } catch {
           setStageText(`error ${res.status}: invalid response`);
+          if (myGen === gen) uviHide();
           return;
         }
         if (!res.ok) {
           const detail = errorDetail(rawBody);
           setStageText(`error ${res.status}: ${detail}`);
+          if (myGen === gen) uviHide();
           return;
         }
         const parsed = parseCompareResponse(rawBody);
         if (!parsed.ok) {
           setStageText(`error ${res.status}: invalid response`);
+          if (myGen === gen) uviHide();
           return;
         }
         const jobId = parsed.value.jobId;

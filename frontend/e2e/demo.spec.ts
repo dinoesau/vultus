@@ -14,7 +14,7 @@ async function loadDemo(page: Page) {
   }
 }
 
-test("154 header pill es boton demo canonico naranja sin TTL", async ({ page }) => {
+test("155 sin boton blanco: solo header naranja + acciones Comparar/checkbox", async ({ page }) => {
   await page.goto(FRONT);
   const headerBtn = page.locator('#intake .hero-card-head #btn-demo');
   await expect(headerBtn).toBeVisible();
@@ -23,8 +23,45 @@ test("154 header pill es boton demo canonico naranja sin TTL", async ({ page }) 
   await expect(headerBtn).not.toContainText(/TTL/);
   // Sin IDs duplicados: un solo #btn-demo canonico en todo el DOM.
   await expect(page.locator("#btn-demo")).toHaveCount(1);
-  // El blanco viejo sigue vivo para story-155 con id temporal.
-  await expect(page.locator("#btn-demo-legacy")).toBeVisible();
+  // Un solo "Cargar demo" en toda la pagina: el naranja del header.
+  await expect(page.getByRole("button", { name: /cargar demo/i })).toHaveCount(1);
+  // Acciones: solo Comparar submit + checkbox calidad, sin demo.
+  const actions = page.locator("#intake .hero-card-actions");
+  await expect(actions.getByRole("button", { name: /Comparar/ })).toBeVisible();
+  await expect(actions.getByRole("button", { name: /demo/i })).toHaveCount(0);
+  await expect(page.locator("#quality-hq")).toBeVisible();
+  await expect(page.locator("#demo-credit")).toBeVisible();
+  await expect(page.locator("#demo-credit")).toContainText(/Pete Souza/);
+});
+
+test("155 con demo cargada, credit y checkbox siguen visibles", async ({ page }) => {
+  await loadDemo(page);
+  await expect(page.locator("#demo-credit")).toBeVisible();
+  await expect(page.locator("#demo-credit")).toContainText(/Pete Souza/);
+  await expect(page.locator("#quality-hq")).toBeVisible();
+  await expect(
+    page.locator("#intake .hero-card-actions").getByRole("button", { name: /demo/i }),
+  ).toHaveCount(0);
+});
+
+test("155 acciones hacen stack sin overflow en <=640px", async ({ page }) => {
+  await page.setViewportSize({ width: 600, height: 800 });
+  await page.goto(FRONT);
+  const actions = page.locator("#intake .hero-card-actions");
+  await expect(actions).toBeVisible();
+  const compareBox = await actions
+    .getByRole("button", { name: /Comparar/ })
+    .boundingBox();
+  const hqBox = await page.locator('label[for="quality-hq"]').boundingBox();
+  expect(compareBox).not.toBeNull();
+  expect(hqBox).not.toBeNull();
+  // Stack vertical: checkbox debajo del boton Comparar.
+  expect(hqBox!.y).toBeGreaterThanOrEqual(compareBox!.y + compareBox!.height - 1);
+  // Sin overflow horizontal del documento.
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(1);
 });
 
 test("E1 click demo carga Obama A/B listos para Comparar", async ({ page }) => {

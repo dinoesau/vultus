@@ -171,8 +171,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--muted); font-weight: 400;
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%;
       }
-      .hero-card-actions { display: flex; gap: 10px; margin-top: 14px; }
+      .hero-card-actions { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
       .hero-card-actions .btn { flex: 1; justify-content: center; height: 44px; }
+      .hero-card-actions label.micro { margin-top: 0; white-space: nowrap; }
       /* strip */
       .strip { border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); background: var(--surface-soft); }
       .strip-inner {
@@ -255,6 +256,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       }
       @media (max-width: 640px) {
         .cards3, .dropgrid { grid-template-columns: 1fr; }
+        .hero-card-actions { flex-direction: column; align-items: stretch; }
+        .hero-card-actions .btn { flex: none; width: 100%; }
+        .hero-card-actions label.micro { white-space: normal; }
         .hero { padding: 48px 0; }
         .section { padding: 48px 0; }
         .wrap, .topnav-inner, .strip-inner { padding-left: 18px; padding-right: 18px; }
@@ -328,8 +332,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
               </div>
               <div class="hero-card-actions">
                 <button class="btn btn-primary" type="submit">Comparar →</button>
-                <!-- TODO story-155: eliminar -->
-                <button class="btn btn-secondary" type="button" id="btn-demo-legacy">Cargar demo</button>
                 <label class="micro" for="quality-hq" style="display:flex;align-items:center;gap:6px;">
                   <input type="checkbox" id="quality-hq" name="quality" value="hq" />
                   Alta calidad (minutos)
@@ -591,7 +593,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       bindPreview('input[name="image_b"]', '[data-testid="preview-b"]');
 
       const demoBtn = document.getElementById("btn-demo");
-      const demoBtnLegacy = document.getElementById("btn-demo-legacy");
       let demoLoading = false;
 
       type LoadDemoError = DemoPresentableError;
@@ -686,11 +687,8 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         }
       }
 
-      for (const candidate of [demoBtn, demoBtnLegacy]) {
-        if (candidate instanceof HTMLButtonElement) {
-          const btnRef = candidate;
-          btnRef.addEventListener("click", () => void loadDemo(btnRef));
-        }
+      if (demoBtn instanceof HTMLButtonElement) {
+        demoBtn.addEventListener("click", () => void loadDemo(demoBtn));
       }
 
       // Blob URL del zip en memoria: permite re-descarga local sin volver

@@ -295,6 +295,15 @@ export function healthDotState(raw: unknown, resOk: boolean): HealthDotState {
   }
 }
 
+// Etiqueta del pill Health para lector de pantalla (#153 dot-only movil:
+// sin texto visible, el estado se anuncia via aria-label en el mismo poller).
+// Proyeccion total del bool ya probado: union de literales, nunca lanza.
+export type HealthAriaLabel = "Health: ok" | "Health: down";
+
+export function healthAriaLabel(ok: boolean): HealthAriaLabel {
+  return ok ? "Health: ok" : "Health: down";
+}
+
 export function contractVersionMessage(error: HealthVersionError): string {
   switch (error.kind) {
     case "InvalidHealthVersion":

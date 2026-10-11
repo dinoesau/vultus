@@ -6,6 +6,7 @@ import {
   POLL_INTERVAL_MS,
   QUALITY_HQ,
   RESULT_RETRY,
+  healthAriaLabel,
   healthDotState,
   resultTtlNote,
 } from "./compare-client";
@@ -58,5 +59,13 @@ describe("compare-client health pill: dot vivo desde GET /health", () => {
 
   it("AC4 intervalo de refresco 30s sin magicos en pages", () => {
     expect(HEALTH_POLL_INTERVAL_MS).toBe(30_000);
+  });
+});
+
+// Story-153 dot-only movil: un test por criterio Given-When-Then.
+describe("compare-client health pill dot-only: anuncio para lector", () => {
+  it("AC2 dot-only anuncia Health: ok o Health: down via aria-label", () => {
+    expect(healthAriaLabel(true)).toBe("Health: ok");
+    expect(healthAriaLabel(false)).toBe("Health: down");
   });
 });

@@ -42,6 +42,9 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         --amber: #e8a55a;
         --success: #5db872;
         --error: #c64545;
+        /* Verde del dot Health: --success 2.33:1 no pasa AA sobre --canvas,
+           este tono da 4.75:1 (#153). --error 4.59:1 pasa sin cambios. */
+        --health-ok: #3a7d44;
         --r-md: 8px;
         --r-lg: 12px;
         --r-xl: 16px;
@@ -100,7 +103,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       }
       .health-dot {
         width: 7px; height: 7px; border-radius: 50%;
-        background: var(--success);
+        background: var(--health-ok);
       }
       .health-pill[data-state="down"] .health-dot { background: var(--error); }
       .btn {
@@ -299,7 +302,10 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         .hero h1.display { font-size: 42px; }
         .sec-head h2 { font-size: 34px; }
         .navlinks { display: none; }
-        .health-pill { display: none; }
+        /* #153 dot-only: el pill sigue en el flex del nav, solo el texto
+           se oculta y el padding colapsa para no romper el layout. */
+        .health-pill { min-width: 0; padding: 6px; gap: 0; }
+        .health-pill .health-label { display: none; }
       }
       @media (max-width: 640px) {
         .cards3, .dropgrid { grid-template-columns: 1fr; }
@@ -327,7 +333,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           <a href="#metodo">Método</a><a href="#estudio">Estudio</a><a href="#uv">Espacio UV</a><a href="#entrega">Entrega</a>
         </nav>
         <div class="nav-right">
-          <span id="health-pill" class="health-pill" role="status" title="checking"><span class="health-dot" aria-hidden="true"></span><span class="health-label">Health</span></span>
+          <span id="health-pill" class="health-pill" role="status" title="checking" aria-label="Health: checking"><span class="health-dot" aria-hidden="true"></span><span class="health-label">Health</span></span>
           <a class="btn btn-primary" href="#comparar">Comparar</a>
         </div>
       </div>
@@ -549,6 +555,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         RESULT_RETRY,
         contractVersionMessage,
         errorDetail,
+        healthAriaLabel,
         healthDotState,
         isRetryableResultStatus,
         isTerminal,
@@ -926,6 +933,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         if (!(healthPill instanceof HTMLElement)) return;
         healthPill.dataset.state = state.ok ? "ok" : "down";
         healthPill.title = state.title;
+        healthPill.setAttribute("aria-label", healthAriaLabel(state.ok));
       }
 
       async function refreshHealth(): Promise<void> {

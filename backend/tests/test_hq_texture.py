@@ -83,26 +83,32 @@ def test_bake_hq_fails_loud_without_weights(monkeypatch: pytest.MonkeyPatch, tmp
 
 
 def test_bake_hq_requires_parsing_weights_loud(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
-    from backend.domain import Err
+    from backend.domain import Err, Ok
     from backend.flame_fit import fit_flame
     from backend.flame_texture import bake_hq
 
-    repo = pathlib.Path(__file__).resolve().parent.parent.parent
-    monkeypatch.setenv("FFHQ_UV_DIR", str(repo / "weights" / "ffhq-uv"))
-    monkeypatch.setenv("TOPO_DIR", str(repo / "weights" / "topo_assets"))
+    bridge = tmp_path / "bridge"
+    bridge.mkdir()
+    (bridge / "FLAME_w_HIFI3D_UV.obj").write_bytes(b"obj-stub")
+    (bridge / "eye_ball_tex.png").write_bytes(b"png-stub")
     empty = tmp_path / "empty"
     empty.mkdir()
-    for var in ("TEXGAN_DIR", "PARSING_DIR", "DPR_DIR", "WEIGHTS_ROOT", "WEIGHTS_DIR"):
+    monkeypatch.setenv("FFHQ_UV_DIR", str(bridge))
+    for var in ("TOPO_DIR", "TEXGAN_DIR", "PARSING_DIR", "DPR_DIR", "WEIGHTS_ROOT", "WEIGHTS_DIR"):
         monkeypatch.setenv(var, str(empty))
+    # El mat de unwrap es colaborador, no el gate bajo test: se asume
+    # presente para aislar el gate de parsing (white-box del repo).
+    import backend.flame_texture as _ft
+
+    monkeypatch.setattr(_ft, "_require_unwrap_mat", lambda: Ok("stub-mat"))
     image = _synthetic_image()
     landmarks = _synthetic_landmarks()
     fit = fit_flame(image, landmarks)
     assert not isinstance(fit, Err)
     out = bake_hq(image, fit.value, landmarks)
-    # Sin parsing (o sin scipy para el mat) es Err loud: jamas unwrap sin mascara.
+    # Sin parsing es Err loud con la causa: jamas unwrap sin mascara.
     assert isinstance(out, Err)
-    detail = str(out.error)
-    assert "parsing" in detail or "unwrap" in detail or "scipy" in detail
+    assert "parsing" in str(out.error)
 
 
 def test_dilate_mask_grows_cross() -> None:

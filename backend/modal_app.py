@@ -106,6 +106,10 @@ DPR_DIR = _env("DPR_DIR", os.path.join(WEIGHTS_ROOT, "checkpoints", "dpr_model")
 # Env del consumer CPU (ensambla GLB en _run_job_from_r2): puente completo
 # explicito mas VULTUS_REAL_ML=1. Sin esto el assemble cae al fixture
 # sintetico silencioso en prod (waiver local) en vez de fallar loud.
+# QUEUE_VISIBILITY_TIMEOUT_SECS=3600: la cola puede traer jobs HQ de
+# minutos; con 180s se reentregarian a mitad del job y se procesarian
+# duplicado. 3600 solo retrasa la re-entrega ante crash (el path feliz
+# hace ack inmediato), asi que el forense 60s queda intacto.
 CONSUMER_ENV = {
     "GNM_ASSETS_DIR": GNM_ASSETS_DIR,
     "VULTUS_REAL_ML": "1",
@@ -117,6 +121,7 @@ CONSUMER_ENV = {
     "TOPO_DIR": TOPO_DIR,
     "PARSING_DIR": PARSING_DIR,
     "DPR_DIR": DPR_DIR,
+    "QUEUE_VISIBILITY_TIMEOUT_SECS": "3600",
 }
 # Nombre del Volume (Factor III: config por env, ver .env.example).
 MODAL_VOLUME_NAME = _env("MODAL_VOLUME", "vultus-weights") or "vultus-weights"

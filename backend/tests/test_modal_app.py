@@ -294,6 +294,8 @@ def test_consumer_env_carries_full_bridge_fail_loud() -> None:
     assert env["VULTUS_REAL_ML"] == "1"
     for key in ("GNM_ASSETS_DIR", "FFHQ_UV_DIR", "DECA_DIR", "FLAME_ASSETS_DIR", "TEXGAN_DIR", "DEEP3D_DIR", "TOPO_DIR", "PARSING_DIR", "DPR_DIR"):
         assert env[key], key
+    # Jobs HQ de minutos: sin visibilidad de horas se reentregan a mitad del job.
+    assert env["QUEUE_VISIBILITY_TIMEOUT_SECS"] == "3600"
 
 
 def test_candidate_dirs_fall_back_to_weights_root(monkeypatch) -> None:  # type: ignore[no-untyped-def]

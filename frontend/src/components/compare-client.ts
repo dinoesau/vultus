@@ -267,6 +267,34 @@ export function healthNeedsUpdate(health: unknown): boolean {
   return !parseHealthContractVersion(health).ok;
 }
 
+// Ritmo del pill Health del topnav: check al cargar + cada 30s.
+// Constante aqui para no regar magicos en pages.
+export const HEALTH_POLL_INTERVAL_MS = 30_000;
+
+export interface HealthDotState {
+  readonly ok: boolean;
+  readonly title: string;
+}
+
+// Estado del dot del pill Health: total, nunca lanza. Reusa el parser del
+// contrato para no bifurcar la nocion de "OK"; el tooltip lleva el detalle.
+export function healthDotState(raw: unknown, resOk: boolean): HealthDotState {
+  if (!resOk) return { ok: false, title: "down" };
+  const parsed = parseHealthContractVersion(raw);
+  if (parsed.ok) {
+    return { ok: true, title: `contract v${contractVersionToNumber(parsed.value)}` };
+  }
+  switch (parsed.error.kind) {
+    case "VersionMismatch":
+      return {
+        ok: false,
+        title: `contract v${contractVersionToNumber(parsed.error.received)} (expected v${contractVersionToNumber(parsed.error.expected)})`,
+      };
+    case "InvalidHealthVersion":
+      return { ok: false, title: "down" };
+  }
+}
+
 export function contractVersionMessage(error: HealthVersionError): string {
   switch (error.kind) {
     case "InvalidHealthVersion":

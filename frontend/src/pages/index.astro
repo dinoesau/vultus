@@ -41,6 +41,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         --on-dark-soft: #a09d96;
         --amber: #e8a55a;
         --success: #5db872;
+        --error: #c64545;
         --r-md: 8px;
         --r-lg: 12px;
         --r-xl: 16px;
@@ -87,16 +88,21 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       .navlinks a { text-decoration: none; color: var(--ink); font-size: 14px; font-weight: 500; }
       .navlinks a:hover { color: var(--primary-active); }
       .nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-      .net-pill {
+      /* Pill Health vivo (#152): dot + label con ancho fijo para no mover
+         el layout al cambiar de color. El label queda como hook para #153. */
+      .health-pill {
         font-family: "JetBrains Mono", monospace; font-size: 12px;
         color: var(--muted); border: 1px solid var(--hairline);
         background: var(--surface-soft); border-radius: var(--r-pill);
         padding: 6px 12px; white-space: nowrap;
+        display: inline-flex; align-items: center; gap: 7px;
+        min-width: 96px; justify-content: center;
       }
-      .net-pill i {
-        display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-        background: var(--success); margin-right: 7px; vertical-align: 1px;
+      .health-dot {
+        width: 7px; height: 7px; border-radius: 50%;
+        background: var(--success);
       }
+      .health-pill[data-state="down"] .health-dot { background: var(--error); }
       .btn {
         font-family: Inter, sans-serif; font-size: 14px; font-weight: 500; line-height: 1;
         border: 0; border-radius: var(--r-md); padding: 12px 20px; height: 40px;
@@ -293,7 +299,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         .hero h1.display { font-size: 42px; }
         .sec-head h2 { font-size: 34px; }
         .navlinks { display: none; }
-        .net-pill { display: none; }
+        .health-pill { display: none; }
       }
       @media (max-width: 640px) {
         .cards3, .dropgrid { grid-template-columns: 1fr; }
@@ -321,7 +327,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
           <a href="#metodo">Método</a><a href="#estudio">Estudio</a><a href="#uv">Espacio UV</a><a href="#entrega">Entrega</a>
         </nav>
         <div class="nav-right">
-          <span class="net-pill" title="Contrato + retención"><i></i>TTL 60s · contract v3</span>
+          <span id="health-pill" class="health-pill" role="status" title="checking"><span class="health-dot" aria-hidden="true"></span><span class="health-label">Health</span></span>
           <a class="btn btn-primary" href="#comparar">Comparar</a>
         </div>
       </div>
@@ -530,11 +536,12 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         <div><h5>Recursos</h5><a href="#metodo">Pipeline</a><a href="#estudio">Arquitectura</a></div>
         <div><h5>Legal</h5><a href="#entrega">Disclaimer no-ID</a><a href="#entrega">Privacidad stateless</a><a href="#demo-credit">Fotos demo</a></div>
       </div>
-      <div class="copy"><span>© 2026 Vultus · cream #faf9f5 · coral #cc785c</span><span>contract v3 · TTL 60s</span></div>
+      <div class="copy"><span>© 2026 Vultus · cream #faf9f5 · coral #cc785c</span></div>
     </footer>
     <script>
       import {
         API_PATHS,
+        HEALTH_POLL_INTERVAL_MS,
         HQ_POLL_INTERVAL_MS,
         HQ_RESULT_RETRY,
         POLL_INTERVAL_MS,
@@ -542,6 +549,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         RESULT_RETRY,
         contractVersionMessage,
         errorDetail,
+        healthDotState,
         isRetryableResultStatus,
         isTerminal,
         parseCompareResponse,
@@ -553,7 +561,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         toWsUrl,
         tryExtractViewerBlobs,
       } from "../components/compare-client.ts";
-      import type { HealthVersionError, Result } from "../components/compare-client.ts";
+      import type { HealthDotState, HealthVersionError, Result } from "../components/compare-client.ts";
       import {
         blobsToFiles,
         loadDemoBlobs,
@@ -908,6 +916,38 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         if (myGen === gen) uviHide();
         return { ok: false, error: parsed.error };
       }
+
+      // Pill Health del topnav: refleja GET /health real sin tocar la puerta
+      // del submit (checkContractHealth). Verde = OK + contract v3, rojo =
+      // red caida, 5xx, JSON roto o mismatch. Solo tooltip, sin click ni panel.
+      const healthPill = document.getElementById("health-pill");
+
+      function paintHealth(state: HealthDotState): void {
+        if (!(healthPill instanceof HTMLElement)) return;
+        healthPill.dataset.state = state.ok ? "ok" : "down";
+        healthPill.title = state.title;
+      }
+
+      async function refreshHealth(): Promise<void> {
+        let res: Response;
+        try {
+          res = await fetch(`${api}/health`);
+        } catch {
+          paintHealth({ ok: false, title: "down" });
+          return;
+        }
+        let raw: unknown;
+        try {
+          raw = await res.json();
+        } catch {
+          paintHealth({ ok: false, title: "down" });
+          return;
+        }
+        paintHealth(healthDotState(raw, res.ok));
+      }
+
+      void refreshHealth();
+      window.setInterval(() => void refreshHealth(), HEALTH_POLL_INTERVAL_MS);
 
       // Limpia solo salidas del job (zip + UV + 3D + errores). El intake
       // (preview-a/b) persiste tras Compare: el usuario ve lo

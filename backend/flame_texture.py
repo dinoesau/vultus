@@ -978,7 +978,9 @@ def _perspective_vert_px(
     cerrado + `refine_pose` 8 pasos) sobre las 68 correspondencias y lo
     compara en RMSE contra el afine ajustado sobre los mismos 68 puntos.
     Gana el menor (tolerancia 2% al pinhole): HQ nunca alinea peor que
-    el forense por construccion. Sin fallback bbox: si el afine no
+    el forense por construccion. El pinhole es rotacion pura: ante espejo
+    (escala negativa, el afine lo absorbe con flip) el init falla y se usa
+    el afine con `persp=0`, nunca Err. Sin fallback bbox: si el afine no
     converge es Err loud. Retorna (vert_px Nx2, uso_pinhole). Total.
     """
     from backend.flame_fit import landmark68
@@ -1019,6 +1021,7 @@ def _perspective_vert_px(
     if not math.isfinite(rmse_aff):
         return Err(MlFailed(detail=MlDecode(details="hq perspective affine rmse non-finite")))
     focal = float(max(int(width), int(height)))
+    pose0: NDArray[np.float64] | None = None
     try:
         c3 = obj.mean(axis=0)
         c2 = img.mean(axis=0)
@@ -1038,17 +1041,22 @@ def _perspective_vert_px(
         ty = float(c2[1] * depth / focal - c3[1])
         tz = float(depth - c3[2])
         pose0 = np.asarray([tx, ty, tz, 0.0, 0.0, 0.0], dtype=np.float64)
-    except (ValueError, TypeError, IndexError) as exc:
-        return Err(MlFailed(detail=MlDecode(details=f"hq perspective init failed: {exc}")))
-    pose, errors = refine_pose(obj, img, focal, steps=8, init=pose0)
-    rmse_persp = float(errors[-1]) if errors else float("inf")
-    use_persp = bool(math.isfinite(rmse_persp) and rmse_persp <= rmse_aff * 1.02)
-    _LAST_TEXTURE_STATS["persp"] = 1.0 if use_persp else 0.0
-    if use_persp:
-        vert_px = project_points(dpa, focal, pose)
-        if vert_px.shape != (dpa.shape[0], 2) or not bool(np.isfinite(vert_px).all()):
-            return Err(MlFailed(detail=MlDecode(details="hq perspective projection invalid")))
-        return Ok((np.asarray(vert_px, dtype=np.float64), True))
+    except (ValueError, TypeError, IndexError):
+        # Init inviable (espejo o spread degenerado): el afine ya converge
+        # y absorbe el flip; el pinhole rotacion-pura no puede. Sin ruido.
+        pose0 = None
+    if pose0 is not None:
+        try:
+            pose, errors = refine_pose(obj, img, focal, steps=8, init=pose0)
+            rmse_persp = float(errors[-1]) if errors else float("inf")
+            if math.isfinite(rmse_persp) and rmse_persp <= rmse_aff * 1.02:
+                vert_px = project_points(dpa, focal, pose)
+                if vert_px.shape == (dpa.shape[0], 2) and bool(np.isfinite(vert_px).all()):
+                    _LAST_TEXTURE_STATS["persp"] = 1.0
+                    return Ok((np.asarray(vert_px, dtype=np.float64), True))
+        except Exception:  # noqa: BLE001, S110 - refine caido: el afine decide (persp=0 abajo), nunca Err
+            pass
+    _LAST_TEXTURE_STATS["persp"] = 0.0
     proj = _project_pose(dpa, amat, width, height)
     if proj is None or proj.shape != (dpa.shape[0], 2) or not bool(np.isfinite(proj).all()):
         return Err(MlFailed(detail=MlDecode(details="hq affine projection invalid")))

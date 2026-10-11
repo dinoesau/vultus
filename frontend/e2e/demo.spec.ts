@@ -116,7 +116,7 @@ test("E5 fallo 404 en B muestra mensaje sin parciales y conserva stage", async (
   await expect(btn).toBeEnabled({ timeout: 10_000 });
   await expect(btn).toContainText(/Cargar demo/);
   await expect(btn).not.toHaveAttribute("aria-busy", "true");
-  // Mensaje exigible #123: literal único, canal #result-error con role=alert.
+  // Mensaje exigible: literal único, canal #result-error con role=alert.
   await expect(page.locator("#result-error")).toBeVisible();
   await expect(page.locator("#result-error")).toHaveText(DEMO_LOAD_ERROR_MESSAGE);
   // Sin parciales: inputs vacíos, previews ocultos, stage intacto.

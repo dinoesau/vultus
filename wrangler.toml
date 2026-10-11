@@ -8,6 +8,11 @@ compatibility_date = "2026-09-03"
 # workers.dev como fallback hasta hardening (Fase 4 apaga con `false`).
 workers_dev = true
 
+# Olvido total en R2: cron 1/min borra jobs/{id}/result.zip cuando el
+# DO dice expired o ya purgo. Sin sleep en Modal. v3 figure-v3.zip excluido.
+[triggers]
+crons = ["* * * * *"]
+
 # Cloudflare Pages maneja el frontend Astro static; este Worker expone Seam 1
 # POST /v1/compare, GET /v1/jobs/:id, POST /v1/jobs/:id/progress (Modal),
 # WS /v1/jobs/:id/events (progreso vivo), GET /health. Sin fallbacks dummy en prod.
@@ -26,8 +31,10 @@ binding = "VULTUS_QUEUE"
 binding = "VULTUS_BUCKET"
 bucket_name = "vultus-jobs"
 preview_bucket_name = "vultus-jobs-preview"
-# Prod real: olvido logico 60s en ProgressDO/Python; R2 lifecycle `vultus-jobs-1d`
-# (jobs/ expire 1 dia, minimo R2) es solo red de seguridad via CLI.
+# Prod real: olvido logico 60s en ProgressDO/Python; R2 lifecycle `expire-jobs`
+# (jobs/ expire 1 dia, minimo R2) es solo red de seguridad versionada en
+# scripts/r2-lifecycle-apply.sh (prod + preview), verificada por
+# scripts/smoke-r2-lifecycle.sh.
 
 [[durable_objects.bindings]]
 name = "VULTUS_PROGRESS"

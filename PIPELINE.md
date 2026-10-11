@@ -27,7 +27,7 @@ graph TD
     J --> K[result.zip TTL 60s<br/>R2 prod / PUT /dev/results local]
     K --> L[Worker StreamingResponse zip]
     L --> M[cliente: UV_A/B + mesh + PBR + renders<br/>visor estudio + re-descarga local]
-    K -. lifecycle 60s .-> N[olvido: tmpfs wipe + R2 DEL + purga 2xTTL]
+    K -. logico 60s + red 1d .-> N[olvido: tmpfs wipe + R2 DEL + purga 2xTTL]
     D -. progress 0.40/0.75/0.95/1.0 .-> O[DO WS /v1/jobs/id/events]
     O --> A
 ```
@@ -116,7 +116,7 @@ sequenceDiagram
     FE->>CF: GET /v1/jobs/{id}/result
     CF->>R2: fetch bytes
     CF-->>FE: 200 zip StreamingResponse
-    R2->>R2: lifecycle 60s DEL (dev: purga 2xTTL)
+    R2->>R2: DEL logico 60s + red 1 dia (dev: purga 2xTTL)
     W1->>W1: unlink /tmp/job_id/* (tmpfs)
 ```
 
@@ -128,7 +128,7 @@ sequenceDiagram
 
 ### 5.2 Queue — Queues + R2 (prod) / emulados (local)
 
-`R2 PutObject image_a/b` + mensaje `compare_job(job_id, r2_keys jobs/{id}/a|b)` (Queues < 128 KiB: nunca bytes). `10k ops/día free` (3 ops/job → ~3.333 jobs/día), retención 24 h pero **TTL lógico 60** vía alarm + lifecycle. Local: misma entrada dev emula R2/Queue/DO; consumer reenvía al webhook. Progreso por WS con `Stage queued|fit|texture|assemble|done`. Sin Postgres ni MinIO; egress R2 free.
+`R2 PutObject image_a/b` + mensaje `compare_job(job_id, r2_keys jobs/{id}/a|b)` (Queues < 128 KiB: nunca bytes). `10k ops/día free` (3 ops/job → ~3.333 jobs/día), retención 24 h pero **TTL lógico 60** vía alarm + DEL tras entrega, con lifecycle red 1 día (`expire-jobs` sobre `jobs/`, mínimo R2, `scripts/r2-lifecycle-apply.sh`). Local: misma entrada dev emula R2/Queue/DO; consumer reenvía al webhook. Progreso por WS con `Stage queued|fit|texture|assemble|done`. Sin Postgres ni MinIO; egress R2 free.
 
 ### 5.3 W1 — MediaPipe 478
 
@@ -148,11 +148,11 @@ Input `fit + RenderedImage` ya probados (`UV_LEN`). Partición piel/ojos (`EYE 3
 
 ### 5.7 Entrega — `GET /v1/jobs/{id}/result`
 
-Tras `WS done`, el Worker hace `R2 GetObject(result.zip)` → `StreamingResponse application/zip + Content-Disposition: attachment`, sin escribir a disco. Frontend crea `URL.createObjectURL` (`result-{jobId}.zip`) y ofrece re-descarga local desde memoria. Tras el stream: prod `lifecycle 60 s`, local purga 2×TTL. `404/409` = aún no listo (reintento acotado 10×1 s); `404` tras purga = expirado.
+Tras `WS done`, el Worker hace `R2 GetObject(result.zip)` → `StreamingResponse application/zip + Content-Disposition: attachment`, sin escribir a disco. Frontend crea `URL.createObjectURL` (`result-{jobId}.zip`) y ofrece re-descarga local desde memoria. Tras el stream: borrado lógico 60 s + red 1 día en prod (`expire-jobs`), purga 2×TTL en local. `404/409` = aún no listo (reintento acotado 10×1 s); `404` tras purga = expirado.
 
 ### 5.8 Limpieza stateless
 
-`unlink /tmp/{job}/*` siempre (éxito o fallo) + `cleanup_job_dir`. Local: DO TTL 60 + purga 2×TTL. Prod: R2 lifecycle + alarm DO. Logs con `job_id + duration_ms`, sin bytes. Verificación: tests exigen `tmpfs` vacío + DO expone `expired` visible antes de purgar.
+`unlink /tmp/{job}/*` siempre (éxito o fallo) + `cleanup_job_dir`. Local: DO TTL 60 + purga 2×TTL + PUT-delete a|b + sweep result.zip + asserts R2 vacio. Prod: borrado lógico 60s (DO + Python DEL) + lifecycle red 1 día (`scripts/r2-lifecycle-apply.sh --apply`, verificado por `scripts/smoke-r2-lifecycle.sh`). Logs con `job_id + duration_ms + delete_inputs_ms`, sin bytes. Verificación: tests exigen `tmpfs` vacío + R2 emulado sin `a|b` + DO expone `expired` visible antes de purgar.
 
 ## 6. Contratos de datos
 
@@ -199,4 +199,4 @@ Pesos y JPEGs LFW nunca se commitean (fotos congeladas por sha256).
 
 Por job: `duration_ms` por etapa, `vram_mb`, `queue_lag_ms`. Ramas efectivas en logs (`deep3d=/pose=/texgan=/dpr=/displacement=`; prohibido fallback sin log). Health verifica queue ping + `torch.cuda.is_available`. Prod: `Analytics + Workers Logs` (3 días free) + `Modal logs` + `OpenTelemetry` opcional.
 
-Local: servicios independientes (`docker compose`). Prod: Workers a 0, Modal `0→100` (`Starter 10`, `Team 50`, cold 1-2 s), `texture c=1`, R2/Queues sin gestión. v3 en cola separada con timeouts de minutos (`600/900`) y retención de días — nunca en el presupuesto 60 s. Cache opcional `hash(image)→UV` en R2 con TTL 60 desactivada por defecto (stateless estricto).
+Local: servicios independientes (`docker compose`). Prod: Workers a 0, Modal `0→100` (`Starter 10`, `Team 50`, cold 1-2 s), `texture c=1`, R2/Queues sin gestión. v3 en cola separada con timeouts de minutos (`600/900`) y retención lógica de días (`V3_RETENTION_DAYS=7`) — nunca en el presupuesto 60 s; excepción aparte: como `figure-v3.zip` vive hoy bajo `jobs/`, la red 1 día aplica como piso hasta prefijo propio. Cache opcional `hash(image)→UV` en R2 con TTL 60 desactivada por defecto (stateless estricto).

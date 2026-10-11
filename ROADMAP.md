@@ -24,7 +24,7 @@ graph TB
     CF -- PutObject + enqueue pointer --> Q[Queues 10k ops/día free]
     CF -- TTL 60 + DO WS --> DO[ProgressDO]
     Q -- pull consumer --> MO[Modal GPU<br/>MediaPipe + DECA + FFHQ-UV<br/>$30 free · cold 1-2s]
-    MO -- result.zip --> R2[R2 TTL 60s lifecycle]
+    MO -- result.zip --> R2[R2 logico 60s + red 1d]
     R2 -- StreamingResponse zip-8 --> CF
     CF -- WS 0.40/0.75/0.95/1.0 --> FE
     FE --> DL[zip-8: UV + mesh + PBR + renders<br/>+ visor estudio blanco]
@@ -34,7 +34,7 @@ graph TB
 
 Stateless: worker solo `/tmp` tmpfs; resultado `jobs/{id}/result.zip` 60 s; mensaje Queues retención 24 h pero TTL lógico 60 vía alarm; dev `Store` emulado en memoria. Tras la descarga el cliente es dueño; el servidor no recuerda nada (GDPR friendly).
 
-Flujo de un job: `POST /v1/compare → 202 + job_id` → `WS /events` → Modal `MediaPipe → FLAME → FFHQ-UV → assemble` → `R2 result.zip` → `GET /result` StreamingResponse → `lifecycle 60 s` + `unlink /tmp`. En dev idéntico pero con `R2/Queue/DO` emulados + webhook al runner `:8001` + sidecar `:8081`. Si se cierra la pestaña, expira y se reintenta.
+Flujo de un job: `POST /v1/compare → 202 + job_id` → `WS /events` → Modal `MediaPipe → FLAME → FFHQ-UV → assemble` → `R2 result.zip` → `GET /result` StreamingResponse → borrado lógico `60 s` + red `1 día` + `unlink /tmp`. En dev idéntico pero con `R2/Queue/DO` emulados + webhook al runner `:8001` + sidecar `:8081`. Si se cierra la pestaña, expira y se reintenta.
 
 ## 4. Stack real
 

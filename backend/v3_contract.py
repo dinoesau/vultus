@@ -55,8 +55,12 @@ V3_ZIP_NAMES = (
     V3_ZIP_RIM,
 )
 
-# Retencion de dias (R2 con retencion de dias) y worker de minutos.
-# La via forense sigue en TTL 60; v3 no vive en 60s por diseno.
+# Retencion logica de dias (cola separada sin TTL 60; ver v3_worker.V3_QUEUE)
+# y worker de minutos. La via forense sigue en borrado logico 60s + red R2
+# 1 dia (`expire-jobs` sobre `jobs/`); v3 no vive en 60s por diseno.
+# Excepcion documentada aparte: figure-v3.zip vive hoy bajo `jobs/`, asi que
+# la red 1 dia aplica como piso minimo hasta que v3 migre a prefijo propio
+# con regla aparte.
 V3_RETENTION_DAYS = 7
 V3_FIT_TIMEOUT_SECS = 600
 V3_TEXTURE_TIMEOUT_SECS = 900

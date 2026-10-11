@@ -67,15 +67,15 @@ jobs:
             echo "api_labels=$API_LABELS"
             LABELS="$LABELS,$API_LABELS"
             # Respaldo: solo el PR de produccion. El push no trae el numero,
-            # se extrae unicamente de "Merge pull request #NN". Nunca "#NN"
-            # generico porque pesca issues (Closes #122, (#124)) y rompe el
-            # run con "Could not resolve to a PullRequest" (run 38086408247).
+            # se extrae unicamente de la linea de merge del PR. Nunca patron
+            # de numero suelto porque tambien pesca keywords de cierre en
+            # mensajes de commit y rompe el run con "Could not resolve to a PullRequest".
             if ! echo ",$LABELS," | grep -qE ",Release: (Major|Minor|Patch),"; then
               PRS="$(jq -r '[(.commits // [])[].message, (.head_commit.message // "")] | join("\n")' "$GITHUB_EVENT_PATH" | grep -oE 'Merge pull request #[0-9]+' | grep -oE '[0-9]+' | sort -u || true)"
               echo "prs_fallback=$PRS"
               for N in $PRS; do
                 # -R explicito: este job no hace checkout y sin .git el gh
-                # muere con "not a git repository" (run 38068519786).
+                # muere con "not a git repository".
                 if ! L="$(gh pr view "$N" -R "$EVENT_REPO" --json labels --jq '[.labels[].name] | join(",")' 2>&1)"; then
                   echo "::warning::no se pudieron leer labels del PR #$N: $L (se ignora)"
                   continue
@@ -178,7 +178,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           QUEUE_NAME: vultus-jobs
           R2_BUCKET: vultus-jobs
-          LIFECYCLE_RULE: expire-jobs
+          PREVIEW_BUCKET: vultus-jobs-preview
         run: |
           if npx --yes wrangler@4 queues list 2>/dev/null | grep -q "$QUEUE_NAME"; then
             echo "queue $QUEUE_NAME ya existe, se omite"
@@ -190,11 +190,20 @@ jobs:
           else
             npx --yes wrangler@4 r2 bucket create "$R2_BUCKET"
           fi
-          if npx --yes wrangler@4 r2 bucket lifecycle list "$R2_BUCKET" 2>/dev/null | grep -q "$LIFECYCLE_RULE"; then
-            echo "lifecycle $LIFECYCLE_RULE ya existe, se omite"
+          if npx --yes wrangler@4 r2 bucket list 2>/dev/null | grep -q "$PREVIEW_BUCKET"; then
+            echo "bucket $PREVIEW_BUCKET ya existe, se omite"
           else
-            npx --yes wrangler@4 r2 bucket lifecycle add "$R2_BUCKET" "$LIFECYCLE_RULE" 'jobs/' --expire-days 1 -y
+            npx --yes wrangler@4 r2 bucket create "$PREVIEW_BUCKET"
           fi
+          # Red R2 1 dia sobre jobs/ en prod + preview (borrado logico 60s
+          # vive en DO/Python; R2 minimo 1 dia). Idempotente via script.
+          R2_BUCKETS="$R2_BUCKET $PREVIEW_BUCKET" bash scripts/r2-lifecycle-apply.sh --apply
+      - name: verify r2 lifecycle
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_BUCKETS: vultus-jobs vultus-jobs-preview
+        run: bash scripts/smoke-r2-lifecycle.sh
       - name: deploy worker production
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -2,6 +2,7 @@ name: Epic
 description: Large outcome that spans multiple stories. Creates a trackable unit of work.
 title: "[Epic] "
 labels: ["epic"]
+projects: ["dinoesau/5"]
 body:
   - type: textarea
     id: goal

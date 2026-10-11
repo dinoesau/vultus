@@ -4,8 +4,10 @@
  * dos rutas dev: lectura de blobs de entrada y escritura del bundle.
  * Las rutas dev solo responden con `ALLOW_DEV_ROUTES=1`; con vars de
  * produccion responden 404. El bundle de prod no referencia este modulo.
+ * Paridad olvido: PUT borra a|b tras el zip (como Modal), GET blobs
+ * respeta DO expired/purga con 404, cron 1/min barre result.zip.
  */
-import { jobIdToString, parseJobId } from "./contract";
+import { jobIdToString, parseJobId, resultZipKey } from "./contract";
 import prod from "./worker";
 
 export { ProgressDO } from "./progress-do";
@@ -26,6 +28,31 @@ function json(data: unknown, status = 200): Response {
 
 function devEnabled(env: DevEnv): boolean {
   return env.ALLOW_DEV_ROUTES === "1";
+}
+
+function isRecord(raw: unknown): raw is Record<string, unknown> {
+  return typeof raw === "object" && raw !== null && !Array.isArray(raw);
+}
+
+/** Lee el estado del DO sin `as`: 404 si purgo, expired si cerro ventana. */
+async function readDevDoStatus(
+  env: DevEnv,
+  jobKey: string,
+): Promise<{ readonly found: false } | { readonly found: true; readonly status: string }> {
+  if (!env.VULTUS_PROGRESS) return { found: true, status: "done" };
+  const stub = env.VULTUS_PROGRESS.get(env.VULTUS_PROGRESS.idFromName(jobKey));
+  const res = await stub.fetch("https://do/status");
+  if (res.status === 404) return { found: false };
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { found: true, status: "done" };
+  }
+  if (!isRecord(body)) return { found: true, status: "done" };
+  const status: unknown = body["status"];
+  if (typeof status !== "string") return { found: true, status: "done" };
+  return { found: true, status };
 }
 
 type Slot = "a" | "b";
@@ -63,9 +90,15 @@ export default {
       if (!parsed.ok) return json({ detail: "invalid job_id" }, 400);
       const slot = parseSlot(slotRaw);
       if (!slot.ok) return json({ detail: "invalid slot" }, 400);
-      if (!env.VULTUS_BUCKET) return json({ detail: "missing bindings" }, 500);
+      if (!env.VULTUS_BUCKET || !env.VULTUS_PROGRESS) return json({ detail: "missing bindings" }, 500);
+      const jobKey = jobIdToString(parsed.value);
+      // Guarda de ventana: expirado o purgado es 404 aunque el objeto siga.
+      const doStatus = await readDevDoStatus(env, jobKey);
+      if (!doStatus.found || doStatus.status === "expired") {
+        return json({ detail: "not found" }, 404);
+      }
       // Llave via accesor del brand probado, sin `as`.
-      const obj = await env.VULTUS_BUCKET.get(`jobs/${jobIdToString(parsed.value)}/${slot.value}`);
+      const obj = await env.VULTUS_BUCKET.get(`jobs/${jobKey}/${slot.value}`);
       if (!obj || !obj.body) return json({ detail: "not found" }, 404);
       return new Response(obj.body, {
         headers: { "Content-Type": "application/octet-stream" },
@@ -81,7 +114,20 @@ export default {
       if (!env.VULTUS_BUCKET) return json({ detail: "missing bindings" }, 500);
       const bundle = parseZipBundle(new Uint8Array(await req.arrayBuffer()));
       if (!bundle.ok) return json({ detail: "invalid result bundle" }, 400);
-      await env.VULTUS_BUCKET.put(`jobs/${jobIdToString(parsed.value)}/result.zip`, bundle.value);
+      const jobKey = jobIdToString(parsed.value);
+      await env.VULTUS_BUCKET.put(resultZipKey(parsed.value), bundle.value);
+      // Paridad Modal: tras el zip ok los inputs se olvidan. Best-effort
+      // por key con log, nunca tumba el done por un delete parcial.
+      const deleteStart = Date.now();
+      for (const slotKey of [`jobs/${jobKey}/a`, `jobs/${jobKey}/b`]) {
+        try {
+          await env.VULTUS_BUCKET.delete(slotKey);
+        } catch (e) {
+          console.error(JSON.stringify({ msg: "delete input failed", job_id: jobKey, key: slotKey, cause: String(e) }));
+        }
+      }
+      const deleteInputsMs = Date.now() - deleteStart;
+      console.error(JSON.stringify({ msg: "dev result stored", job_id: jobKey, delete_inputs_ms: deleteInputsMs }));
       return json({ ok: true });
     }
 
@@ -108,5 +154,10 @@ export default {
       if (res.ok) msg.ack();
       else msg.retry();
     }
+  },
+
+  // Cron dev 1/min: misma purga que prod (expired o purga -> borra zip).
+  async scheduled(event: unknown, env: DevEnv): Promise<void> {
+    await (prod as unknown as { scheduled(e: unknown, env: DevEnv): Promise<void> }).scheduled(event, env);
   },
 };

@@ -81,7 +81,7 @@ Sin `heatmap.png` (ADR-008). Renders frontales 512 al final (ADR-012). `CONTRACT
 
 ### `figure-v3` — bundle denso paralelo
 
-`V3_ZIP_NAMES` (`v3_contract.py:49-56` espejo `contract.ts:98-105`): `mesh_dense.glb`, `albedo_1024.png`, `relight_{neutral,key,fill}.png` → realmente `neutral/key/fill/rim` (6 piezas). Nombres disjuntos del zip-8: prohibido mezclar. `V3_VERT_COUNT = 20481`, `V3_TRI_COUNT = 40832`, atlas 1024, `TV ≤ 2.0`, retención 7 días, timeouts 600/900. Servido por `GET /v3/jobs/{id}/figure` como `figure-v3.zip`.
+`V3_ZIP_NAMES` (`v3_contract.py:49-56` espejo `contract.ts:98-105`): `mesh_dense.glb`, `albedo_1024.png`, `relight_{neutral,key,fill}.png` → realmente `neutral/key/fill/rim` (6 piezas). Nombres disjuntos del zip-8: prohibido mezclar. `V3_VERT_COUNT = 20481`, `V3_TRI_COUNT = 40832`, atlas 1024, `TV ≤ 2.0`, retención lógica 7 días (`V3_RETENTION_DAYS`, cola separada `v3-queue`), timeouts 600/900. Excepción aparte: `figure-v3.zip` vive hoy bajo `jobs/`, así que la red `expire-jobs` 1 día aplica como piso mínimo hasta prefijo propio. Servido por `GET /v3/jobs/{id}/figure` como `figure-v3.zip`.
 
 ### `assemble` — ensamblaje CPU
 
@@ -89,7 +89,7 @@ Sin `heatmap.png` (ADR-008). Renders frontales 512 al final (ADR-012). `CONTRACT
 
 ### `stateless` — no persistir tras entrega
 
-Local: DO TTL 60 + purga 2×TTL + `/tmp` tmpfs. Prod: R2 lifecycle `jobs/` + Queues retención 24 h (TTL lógico 60) + `/tmp` tmpfs en Modal. v3: retención de días en cola separada (única excepción).
+Local: DO TTL 60 + purga 2×TTL + PUT-delete a|b + sweep result.zip + `/tmp` tmpfs + asserts R2 vacio. Prod: cron 1/min borra `result.zip` en `expired`/purga + lifecycle red 1 día (`expire-jobs` sobre `jobs/`, mínimo R2) + Queues retención 24 h (TTL lógico 60) + `/tmp` tmpfs en Modal. v3: retención lógica de días en cola separada (única excepción; red 1 día como piso hasta prefijo propio).
 
 ### `r2key` / `enqueue-command` / `enqueued-job`
 

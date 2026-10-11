@@ -174,10 +174,17 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
       .hero-card-actions { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
       .hero-card-actions .btn { flex: 1; justify-content: center; height: 44px; }
       .hero-card-actions label.micro { margin-top: 0; white-space: nowrap; }
-      /* Pixel Walker (156): tamagotchi pixel-art 16x16, 72px centrado
-         debajo de acciones. Robot que marcha con LEDs que escanean,
-         antena con dot, torso con grid UV. Todo SVG/CSS inline, pasos
-         steps() retro. Sin <img>, sin url(), sin requests. */
+      /* Pixel Walker (156) + Ver estudio ghost (158): full-width debajo de frases. */
+      #btn-estudio {
+        display: flex; width: 100%; justify-content: center; align-items: center;
+        margin-top: 12px;
+        font-family: Inter, sans-serif; font-size: 14px; font-weight: 500; line-height: 1;
+        border-radius: var(--r-md); padding: 12px 20px; height: 40px;
+        cursor: pointer; text-decoration: none;
+        background: var(--canvas); color: var(--ink); border: 1px solid var(--hairline);
+        transition: background 0.15s ease;
+      }
+      #btn-estudio:hover { background: var(--surface-soft); }
       #uvi { width: 72px; margin: 14px auto 0; text-align: center; }
       #uvi[hidden] { display: none; }
       .uvi-stage {
@@ -332,7 +339,6 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
             </p>
             <div class="btnrow">
               <a class="btn btn-primary" href="#intake">Comparar ahora</a>
-              <a class="btn btn-secondary" href="#estudio">Ver estudio ↓</a>
             </div>
             <p class="micro">
               Wire <code>v2</code> · hitos <code>0.40 / 0.75 / 0.95 / 1.0</code> ·
@@ -407,6 +413,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
                 </svg>
                 <p id="uvi-text" role="status" aria-live="polite"></p>
               </div>
+              <a id="btn-estudio" href="#estudio" data-testid="btn-estudio">Ver estudio ↓</a>
               <p class="micro" id="demo-credit">Fotos demo: Pete Souza · A dominio público · B CC-BY 3.0</p>
             </form>
           </div>

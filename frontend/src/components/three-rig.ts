@@ -120,7 +120,7 @@ export function checkStudioLights(
   return { ok: true, value: lights };
 }
 
-export type ViewerFaceStatus = "idle" | "loading" | "ready" | "invalid";
+export type ViewerFaceStatus = "idle" | "loading" | "ready" | "invalid" | "unavailable" | "cancelled";
 
 export type ViewerStatusError = { readonly kind: "UnknownStatus" };
 
@@ -132,6 +132,8 @@ export function parseViewerStatus(raw: unknown): Result<ViewerFaceStatus, Viewer
     case "loading":
     case "ready":
     case "invalid":
+    case "unavailable":
+    case "cancelled":
       return { ok: true, value: raw };
     default:
       return { ok: false, error: { kind: "UnknownStatus" } };
@@ -149,8 +151,112 @@ export function viewerStatusMessage(status: ViewerFaceStatus): string {
       return "cara real lista: meshes A+B cargados en visor (GLB parseado + PBR).";
     case "invalid":
       return "GLB invalido: no se pudo parsear (revisa el zip).";
+    case "unavailable":
+      return "visor no disponible (WebGL): el GLB es válido pero el contexto 3D falló.";
+    case "cancelled":
+      return "carga cancelada: se limpió el visor a mitad de carga (el zip está bien).";
     default:
       return assertNever(status);
+  }
+}
+
+// S5 (story-178): taxonomia total de fallos del visor por fase. El catch
+// unico que lo etiquetaba todo como invalid era Error Hiding: el usuario
+// leia "revisa el zip" con el zip sano. Cada variante mapea a un estado
+// distinto via viewerErrorStatus; StaleLoad es silencio (gen vieja ignorada).
+export type ViewerFace = "A" | "B";
+
+export type ViewerWebglPhase = "renderer" | "probes" | "render";
+
+export type ViewerLoadError =
+  | {
+      readonly kind: "ParseError";
+      readonly face: ViewerFace;
+      readonly phase: "parse";
+      readonly name: string;
+      readonly message: string;
+    }
+  | {
+      readonly kind: "WebGLError";
+      readonly face: ViewerFace;
+      readonly phase: ViewerWebglPhase;
+      readonly name: string;
+      readonly message: string;
+    }
+  | { readonly kind: "CancelledError" }
+  | { readonly kind: "StaleLoad" };
+
+export interface ErrorCause {
+  readonly name: string;
+  readonly message: string;
+}
+
+/** Causa total de un throw: nunca lanza, ni con Symbol ni con null. */
+export function describeErrorCause(err: unknown): ErrorCause {
+  if (err instanceof Error) {
+    return {
+      name: err.name === "" ? "Error" : err.name,
+      message: err.message === "" ? "(sin mensaje)" : err.message,
+    };
+  }
+  if (typeof err === "string") return { name: "Error", message: err };
+  try {
+    return { name: "Error", message: String(err) };
+  } catch {
+    return { name: "Error", message: "(causa no serializable)" };
+  }
+}
+
+/** Invalid con causa: solo el parse fallido menciona el zip. */
+export function viewerParseErrorMessage(face: ViewerFace, cause: ErrorCause): string {
+  return (
+    `GLB invalido: no se pudo parsear cara ${face} ` +
+    `en fase parse (${cause.name}: ${cause.message}) (revisa el zip).`
+  );
+}
+
+/** WebGL roto con GLB parseado: nunca dice invalido ni mienta el zip. */
+export function viewerWebglErrorMessage(
+  face: ViewerFace,
+  phase: ViewerWebglPhase,
+  cause: ErrorCause,
+): string {
+  return (
+    `visor no disponible (WebGL): fallo cara ${face} ` +
+    `en fase ${phase} (${cause.name}: ${cause.message}). El GLB es válido.`
+  );
+}
+
+/** Cancelacion por clear a mitad de carga: espejo del estado cancelled. */
+export function viewerCancelledMessage(): string {
+  return viewerStatusMessage("cancelled");
+}
+
+/** Token de generacion del evento vultus:meshes: entero >= 0 o null. Total. */
+export function parseGenToken(raw: unknown): number | null {
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0) return null;
+  return raw;
+}
+
+/** Stale si la entrante es estrictamente menor que la vigente; sin gen no hay stale. */
+export function isStaleGen(incoming: number | null, current: number | null): boolean {
+  if (incoming === null || current === null) return false;
+  return incoming < current;
+}
+
+/** Mapeo exhaustivo error -> estado; StaleLoad es null (ignorar en silencio). */
+export function viewerErrorStatus(error: ViewerLoadError): ViewerFaceStatus | null {
+  switch (error.kind) {
+    case "ParseError":
+      return "invalid";
+    case "WebGLError":
+      return "unavailable";
+    case "CancelledError":
+      return "cancelled";
+    case "StaleLoad":
+      return null;
+    default:
+      return assertNever(error);
   }
 }
 

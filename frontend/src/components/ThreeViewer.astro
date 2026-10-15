@@ -67,11 +67,18 @@
     STUDIO_LIGHTS,
     checkLightProbes,
     checkStudioLights,
+    describeErrorCause,
+    isStaleGen,
+    parseGenToken,
     parseStudioBackground,
     resolveSkinColorHex,
+    viewerCancelledMessage,
+    viewerErrorStatus,
+    viewerParseErrorMessage,
     viewerStatusMessage,
+    viewerWebglErrorMessage,
   } from "./three-rig.ts";
-  import type { Result } from "./three-rig.ts";
+  import type { Result, ViewerFace, ViewerLoadError, ViewerWebglPhase } from "./three-rig.ts";
 
   function isRecord(raw: unknown): raw is Record<string, unknown> {
     return typeof raw === "object" && raw !== null && !Array.isArray(raw);
@@ -99,9 +106,27 @@
   const foundLinkB = document.getElementById("download-mesh-b");
   const linkB = foundLinkB instanceof HTMLAnchorElement ? foundLinkB : null;
   let meshUrls: string[] = [];
+  // S5 (story-178): carrera clear-vs-load. loadSerial cuenta cargas
+  // aceptadas; invalidationSerial se bumppea en cada vultus:clear. Un fallo
+  // que resuelve tras un clear es CancelledError (fetch revocado), nunca
+  // invalid; un fallo de una carga vieja con carga nueva vigente es
+  // StaleLoad (silencio). viewerGen espeja la gen de index.astro.
+  let viewerGen: number | null = null;
+  let loadSerial = 0;
+  let invalidationSerial = 0;
 
   function setStatus(msg: string): void {
     if (statusEl) statusEl.textContent = msg;
+  }
+
+  // Contexto 3D perdido con GLB ya parseado: visor no disponible
+  // (WebGL), nunca "GLB invalido". Solo dispara con contexto GL vivo,
+  // asi que el neutro 2D no lo toca.
+  for (const canvas of [canvasA, canvasB]) {
+    canvas?.addEventListener("webglcontextlost", (ev) => {
+      ev.preventDefault();
+      setStatus(viewerStatusMessage("unavailable"));
+    });
   }
 
   // Un solo renderer por canvas: se dispone + cancela RAF antes de repintar.
@@ -272,6 +297,9 @@
     readonly meshB: Blob;
     readonly pbrA?: Blob;
     readonly pbrB?: Blob;
+    // Token de generacion del job (espejo de la gen de index.astro):
+    // unknown en el borde, se parsea con parseGenToken, nunca cast.
+    readonly gen?: unknown;
   }
 
   type ViewerDetailError = { readonly kind: "InvalidViewerDetail" };
@@ -300,6 +328,7 @@
         meshB,
         ...(isBlob(pbrA) ? { pbrA } : {}),
         ...(isBlob(pbrB) ? { pbrB } : {}),
+        ...(raw["gen"] !== undefined ? { gen: raw["gen"] } : {}),
       },
     };
   }
@@ -308,6 +337,38 @@
   function readDetail(ev: Event): Result<ViewerDetail, ViewerDetailError> {
     if (!isRecord(ev)) return { ok: false, error: { kind: "InvalidViewerDetail" } };
     return parseViewerDetail(ev["detail"]);
+  }
+
+  // Guarda de tipo para el catch de loadGlbs: paintFace solo rechaza
+  // con ViewerLoadError, pero el borde es unknown y no se asume nada.
+  function isViewerLoadError(err: unknown): err is ViewerLoadError {
+    if (!isRecord(err)) return false;
+    const kind = err["kind"];
+    return (
+      kind === "ParseError" ||
+      kind === "WebGLError" ||
+      kind === "CancelledError" ||
+      kind === "StaleLoad"
+    );
+  }
+
+  // Clasifica un fallo post-inicio: stale si una carga nueva ya manda,
+  // cancelado si un clear revoco las URLs en vuelo, taxonomia por fase
+  // en caso contrario. Total: nunca lanza.
+  function afterStartError(
+    face: ViewerFace,
+    phase: "parse" | ViewerWebglPhase,
+    err: unknown,
+    myLoad: number,
+    myInvalid: number,
+  ): ViewerLoadError {
+    if (myLoad !== loadSerial) return { kind: "StaleLoad" };
+    if (myInvalid !== invalidationSerial) return { kind: "CancelledError" };
+    const cause = describeErrorCause(err);
+    if (phase === "parse") {
+      return { kind: "ParseError", face, phase, name: cause.name, message: cause.message };
+    }
+    return { kind: "WebGLError", face, phase, name: cause.name, message: cause.message };
   }
 
   // Tras done: expone re-descarga local e intenta pintar las caras reales.
@@ -319,6 +380,10 @@
       return;
     }
     const detail = parsed.value;
+    // Gen vieja con reintento vigente: se ignora en silencio, sin tocar status.
+    const incomingGen = parseGenToken(detail.gen ?? null);
+    if (isStaleGen(incomingGen, viewerGen)) return;
+    if (incomingGen !== null) viewerGen = incomingGen;
     const urlA = URL.createObjectURL(detail.meshA);
     const urlB = URL.createObjectURL(detail.meshB);
     trackUrl(urlA);
@@ -336,7 +401,9 @@
       linkB.hidden = false;
     }
     setStatus(viewerStatusMessage("loading"));
-    void loadGlbs(urlA, urlB, pbrUrlA, pbrUrlB);
+    const myLoad = ++loadSerial;
+    const myInvalid = invalidationSerial;
+    void loadGlbs(urlA, urlB, pbrUrlA, pbrUrlB, myLoad, myInvalid);
   });
 
   async function paintFace(
@@ -345,7 +412,9 @@
     neutral: HTMLCanvasElement | null,
     glbUrl: string,
     pbrUrl: string | null,
-    label: string,
+    face: ViewerFace,
+    myLoad: number,
+    myInvalid: number,
   ): Promise<{ readonly pbrOk: boolean }> {
     // Yaw inicial frontal: la cara del GLB apunta a -Z y la camara
     // (0,0.2,3.2) mira al origen desde +Z; PI la frontaliza en el primer
@@ -353,7 +422,22 @@
     const FRONT_YAW: number = Math.PI;
     const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
     const loader = new GLTFLoader();
-    const gltf = await loader.loadAsync(glbUrl);
+    // Fase parse: el unico fallo que puede culpar al zip.
+    let model: import("three").Group;
+    try {
+      model = (await loader.loadAsync(glbUrl)).scene;
+    } catch (err) {
+      throw afterStartError(face, "parse", err, myLoad, myInvalid);
+    }
+    // Clear entre parse y render: la carga ya esta muerta, no hay GLB que pintar.
+    if (myLoad !== loadSerial) {
+      const stale: ViewerLoadError = { kind: "StaleLoad" };
+      throw stale;
+    }
+    if (myInvalid !== invalidationSerial) {
+      const cancelled: ViewerLoadError = { kind: "CancelledError" };
+      throw cancelled;
+    }
     let map: import("three").Texture | null = null;
     if (pbrUrl) {
       try {
@@ -379,7 +463,7 @@
     }
     // Ojos preservados por indice de material/primitiva: no se toca ningun
     // material existente, sin filtro por nombre de nodo.
-    gltf.scene.traverse((node) => {
+    model.traverse((node) => {
       if (!(node instanceof THREE.Mesh)) return;
       const current = node.material;
       if (Array.isArray(current)) {
@@ -401,31 +485,45 @@
       if (current) return;
       node.material = fallback;
     });
+    // Fases WebGL con GLB ya parseado: cualquier fallo aqui es visor no
+    // disponible, nunca GLB invalido. Cada fase lleva su nombre al log.
     disposeCanvas(canvas);
     // El overlay neutro ya cumplio: se cancela su RAF y se oculta para
     // revelar el canvas WebGL dedicado, que nunca recibio getContext("2d").
     disposeCanvas(neutral);
     if (neutral) neutral.hidden = true;
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    let renderer: import("three").WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    } catch (err) {
+      throw afterStartError(face, "renderer", err, myLoad, myInvalid);
+    }
     renderer.setSize(STUDIO_CANVAS_WIDTH, STUDIO_CANVAS_HEIGHT, false);
     getSlot(canvas).renderer = renderer;
     const scene = new THREE.Scene();
     applyStudio(THREE, scene);
     const camera = makeCamera(THREE);
-    gltf.scene.rotation.y = FRONT_YAW;
-    scene.add(gltf.scene);
-    await applyProbes(THREE, scene, renderer);
-    renderer.render(scene, camera);
+    model.rotation.y = FRONT_YAW;
+    scene.add(model);
+    try {
+      await applyProbes(THREE, scene, renderer);
+    } catch (err) {
+      throw afterStartError(face, "probes", err, myLoad, myInvalid);
+    }
+    try {
+      renderer.render(scene, camera);
+    } catch (err) {
+      throw afterStartError(face, "render", err, myLoad, myInvalid);
+    }
     let frames = 0;
     const tick = () => {
-      gltf.scene.rotation.y += 0.01;
+      model.rotation.y += 0.01;
       renderer.render(scene, camera);
       if (++frames < 240 && canvas.isConnected) {
         getSlot(canvas).raf = requestAnimationFrame(tick);
       }
     };
     tick();
-    void label;
     return { pbrOk };
   }
 
@@ -434,28 +532,75 @@
     urlB: string,
     pbrA: string | null,
     pbrB: string | null,
+    myLoad: number,
+    myInvalid: number,
   ): Promise<void> {
     if (!canvasA || !canvasB) return;
+    // El chunk three.js es infra del visor: si no carga, no hay GLB
+    // que culpar; es visor no disponible, nunca invalid.
+    let THREE: ThreeModule;
     try {
-      const THREE = await import("three");
+      THREE = await import("three");
+    } catch {
+      if (myLoad !== loadSerial) return;
+      setStatus(viewerStatusMessage("unavailable"));
+      return;
+    }
+    try {
       // Exito solo si ambos GLB parsean; cada cara se pinta en su canvas
       // WebGL dedicado con su overlay neutro asociado.
       // PBR roto nunca es ready: estado distinto sin PBR, GLB parseado.
       const [doneA, doneB] = await Promise.all([
-        paintFace(THREE, canvasA, neutralA, urlA, pbrA, "A"),
-        paintFace(THREE, canvasB, neutralB, urlB, pbrB, "B"),
+        paintFace(THREE, canvasA, neutralA, urlA, pbrA, "A", myLoad, myInvalid),
+        paintFace(THREE, canvasB, neutralB, urlB, pbrB, "B", myLoad, myInvalid),
       ]);
+      // Reintento nuevo vigente: el exito viejo no pisa su loading.
+      if (myLoad !== loadSerial) return;
+      // Clear en vuelo sin reintento: la carga murio revocada.
+      if (myInvalid !== invalidationSerial) {
+        setStatus(viewerCancelledMessage());
+        return;
+      }
       if (!doneA.pbrOk || !doneB.pbrOk) {
         setStatus(`${viewerStatusMessage("loading")} sin PBR (textura no disponible, GLB parseado).`);
         return;
       }
       setStatus(viewerStatusMessage("ready"));
-    } catch {
-      setStatus(viewerStatusMessage("invalid"));
+    } catch (err) {
+      // Reintento nuevo vigente: el fallo viejo se ignora en silencio.
+      if (myLoad !== loadSerial) return;
+      const mapped: ViewerLoadError = isViewerLoadError(err)
+        ? err
+        : {
+            kind: "WebGLError",
+            face: "A",
+            phase: "render",
+            ...describeErrorCause(err),
+          };
+      // Clear en vuelo: el fetch del blob revocado falla como cancelada
+      // aunque el error parezca de parse. Nunca invalid tras un clear.
+      const effective: ViewerLoadError =
+        mapped.kind === "StaleLoad" || myInvalid === invalidationSerial
+          ? mapped
+          : { kind: "CancelledError" };
+      const status = viewerErrorStatus(effective);
+      if (status === null) return;
+      if (status === "invalid" && effective.kind === "ParseError") {
+        setStatus(viewerParseErrorMessage(effective.face, effective));
+        return;
+      }
+      if (status === "unavailable" && effective.kind === "WebGLError") {
+        setStatus(viewerWebglErrorMessage(effective.face, effective.phase, effective));
+        return;
+      }
+      setStatus(viewerStatusMessage(status));
     }
   }
 
   window.addEventListener("vultus:clear", () => {
+    // Invalida primero: cualquier loadAsync en vuelo que resuelva despues
+    // es CancelledError, no invalid (Race Hazard del revoke abajo).
+    invalidationSerial += 1;
     for (const u of meshUrls) URL.revokeObjectURL(u);
     meshUrls = [];
     if (linkA) {

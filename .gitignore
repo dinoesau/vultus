@@ -55,3 +55,8 @@ models/*.ckpt
 
 # Vitest 
 .vite/vitest/results.json
+
+# Playwright (artefactos efimeros de corridas e2e)
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/

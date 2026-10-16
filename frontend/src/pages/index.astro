@@ -1042,7 +1042,7 @@ const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
         setImage('[data-testid="panel-uv-a"]', uvA);
         setImage('[data-testid="panel-uv-b"]', uvB);
         window.dispatchEvent(
-          new CustomEvent("vultus:meshes", { detail: { meshA, meshB, pbrA, pbrB } }),
+          new CustomEvent("vultus:meshes", { detail: { meshA, meshB, pbrA, pbrB, gen: myGen } }),
         );
         setStageText(`job ${jobId}: listo. Zip guardado en memoria para re-descarga local.`);
         setJobLabel(`job ${jobId} · done`);

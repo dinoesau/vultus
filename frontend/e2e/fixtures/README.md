@@ -1,5 +1,27 @@
 # Fixtures E2E (par dorado sintético)
 
+## Golden GLB del visor 3D (S6, congelado 2026-10-15)
+
+`mesh_a.glb` + `pbr_a.png` y `mesh_b.glb` + `pbr_b.png`: GLBs reales via la
+unica via de ensamblaje (`backend.gnm_assemble.build_personalized_glb`), con
+2 primitivas (piel + ojo), materiales `SkinPBR` + `EyePBR`, 5023 verts unicos
+por cara (10046 A+B) y PBR 512x512. Nunca un GLB minimo falso: el spec
+`../viewer-3d-golden.spec.ts` los lleva por `GLTFLoader` + `WebGLRenderer`
+reales tras el boot con neutro 2D.
+
+- Generador determinista: `generate_golden_glb.py` (mismos marcadores dan los
+  mismos bytes; A = fit 0.1 / albedo 0xA1, B = fit 0.5 / albedo 0xB2, ojo con
+  patron determinista 512x512, nunca blanco fallback).
+- Manifiesto: `golden-sha256.json` (mesh_a `918b04aa...`, mesh_b `ca68b456...`).
+- Desvio documentado vs issue #179: los sha `4e1ee03a...` / `6f8503dd...` son
+  GLBs del job real de prod (texturas reales de fotos, irreproducibles sin el
+  dataset); estos goldens usan el mismo builder y la misma estructura, con
+  albedos sinteticos pindeados. Los gates estructurales del issue (2 meshes,
+  10046 verts, SkinPBR/EyePBR, PBR 512x512) se cumplen en ambos.
+- El spec corre sin GPU (flags SwiftShader en el propio spec) y sin red (solo
+  localhost + blob:); necesita el build estatico (`npm run build` + preview)
+  o `FRONT_URL` contra prod.
+
 `a.png` y `b.png`: PNG 1x1 válidos (magic `89 50 4E 47 0D 0A 1A 0A`, colores
 distintos rojo/azul) que pasan `ImageBytes::parse` (solo magic) y los dobles
 deterministas del sidecar (`_is_png`), fluyendo por el pipeline hasta `done`.
